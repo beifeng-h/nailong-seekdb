@@ -1,0 +1,15 @@
+# The SeekDB Windows installer is 150 MB and GitHub rejects git objects
+# larger than 100 MB. deploy_seekdb.ps1 fetches it instead -- the exact URL
+# and checksum live in seekdb/vendor/README.md.
+seekdb/vendor/*.msi
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
