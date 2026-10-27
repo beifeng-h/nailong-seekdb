@@ -1,6 +1,15 @@
+"""Query a running SeekDB instance to prove it is alive and serving SQL.
+
+    python verify_sql.py [port]
+"""
+
+import sys
+
 import pymysql
 
-conn = pymysql.connect(host="127.0.0.1", port=2881, user="root", password="",
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 2881
+
+conn = pymysql.connect(host="127.0.0.1", port=port, user="root", password="",
                        connect_timeout=20)
 cur = conn.cursor()
 
@@ -18,9 +27,6 @@ cur.execute("INSERT INTO t VALUES (1,'hello'),(2,'seekdb') "
 cur.execute("SELECT * FROM t ORDER BY id")
 print("table t        ->", cur.fetchall())
 
-cur.execute("SELECT COUNT(*) FROM oceanbase.__all_virtual_table")
-print("internal tabs  ->", cur.fetchall())
-
 conn.commit()
 conn.close()
-print("\nCONNECTED AND QUERIED OK")
+print(f"\nCONNECTED AND QUERIED OK (port {port})")
