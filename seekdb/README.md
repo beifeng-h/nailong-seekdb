@@ -34,6 +34,35 @@ wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/get_telemetry_id.sh
 
 不要提交：整个 `telemetry.json` 文件、文件路径、AMD 账号、算力券码。
 
+**提测前一定要确认服务端能查到这条 UUID。** 平台不是看本地文件，而是去
+OceanBase 的上报服务里查这个 UUID 的记录。v1.4.0 只在 **bootstrap 时上报一次**，
+没有周期重试——如果实例引导那一刻网络不通，UUID 只存在于本地，平台就会返回
+"暂未查询到该部署 UUID 的上报记录"，而且重启也不会补报（已有数据目录的实例
+不会重新 bootstrap）。
+
+确认与补报：
+
+```powershell
+# 1. 看有没有上报告警，0 表示上传成功
+wsl -d seekdb-ubuntu -u root -- grep -cE "Failed to send telemetry" /var/lib/seekdb/log/seekdb.log
+
+# 2. 如果不是 0（或不确定），把 observer 生成的同一份载荷重发一次
+cd D:\数据库大赛
+wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/report_telemetry.sh
+```
+
+成功时服务端会返回：
+
+```
+{
+  "code" : 200,
+  "message" : "操作成功",
+  "data" : "31218627920"
+}
+```
+
+详见 [`wsl/README.md`](wsl/README.md) 的 "The upload -- this one bites"。
+
 ## 两套部署
 
 跑了两套实例，因为**遥测 ID 的格式在版本之间变过**：

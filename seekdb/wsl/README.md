@@ -71,6 +71,57 @@ instance is restarted**.
     # logs
     wsl -d seekdb-ubuntu -u root -- tail -f /var/lib/seekdb/log/seekdb.log
 
+## The upload -- this one bites
+
+The competition platform does not just read the local file. It looks the UUID
+up in **the report the instance uploaded to
+`https://openwebapi.oceanbase.com/api/web/oceanbase/report`**. If the server
+has no record for the UUID, the submission is rejected with
+"暂未查询到该部署 UUID 的上报记录".
+
+SeekDB v1.4.0 uploads **exactly once, while it bootstraps**
+(`report_bootstrap_telemetry` in `src/observer/ob_server.cpp`). There is no
+periodic retry. So if the network was unavailable at the moment the instance
+bootstrapped, the UUID exists locally but never reaches the server, and no
+amount of restarting helps -- a restart on an existing data directory does not
+bootstrap again and therefore does not report again.
+
+Check whether the upload happened:
+
+    wsl -d seekdb-ubuntu -u root -- grep -cE "Failed to send telemetry" /var/lib/seekdb/log/seekdb.log
+
+`0` means the upload succeeded. If it is not `0`, re-send the very same
+payload the observer produced:
+
+    wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/report_telemetry.sh
+
+which posts `run/telemetry.json` to the endpoint and prints the server's
+answer:
+
+    {
+      "code" : 200,
+      "message" : "操作成功",
+      "data" : "31218627920"
+    }
+
+If the base directory has to change, note that the UUID depends on it -- the
+same instance under `/var/lib/seekdb` and under `/var/lib/seekdb.new` gets two
+different UUIDs. The UUID is derived from the machine id and the base
+directory, not from a timestamp, which is why it survives restarts but not a
+moved data directory.
+
+### Proving the upload happens
+
+`verify_report_capture.sh` boots a throwaway observer with `https_proxy`
+pointed at `proxy_capture.py`, a proxy that logs the target and then hangs
+up. The proxy log shows the attempt:
+
+    REQUEST CONNECT openwebapi.oceanbase.com:443 HTTP/1.1
+
+and the observer logs `Failed to send telemetry`, which is the same warning
+that would appear on a real network failure. That is how we know a bootstrap
+without that warning really uploaded.
+
 ## Note
 
 The WSL distribution lives on `D:` and holds the whole deployment. If the
