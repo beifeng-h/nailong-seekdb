@@ -14,7 +14,8 @@
 随时可重新读取：
 
 ```powershell
-wsl -d seekdb-ubuntu -u root -- bash wsl\get_telemetry_id.sh
+cd D:\数据库大赛
+wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/get_telemetry_id.sh
 ```
 
 ## 怎么提交
@@ -129,11 +130,12 @@ C:\Users\FOR FUTURE\Documents\ChatGPT\数据库大赛\
 
 ```powershell
 # 读取要提交的 UUID（Linux 部署）
-wsl -d seekdb-ubuntu -u root -- bash wsl\get_telemetry_id.sh
+cd D:\数据库大赛
+wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/get_telemetry_id.sh
 
 # 启动 / 停止 Linux 部署
-wsl -d seekdb-ubuntu -u root -- bash wsl\start_seekdb.sh
-wsl -d seekdb-ubuntu -u root -- bash wsl\stop_seekdb.sh
+wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/start_seekdb.sh
+wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/stop_seekdb.sh
 
 # 启动 / 停止 Windows 部署
 .\start_seekdb.ps1

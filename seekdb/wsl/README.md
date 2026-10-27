@@ -27,7 +27,8 @@ Reaching the instance from Windows works through WSL's localhost forwarding:
 
 Read it back with:
 
-    wsl -d seekdb-ubuntu -u root -- bash wsl/get_telemetry_id.sh
+    cd D:\数据库大赛
+    wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/get_telemetry_id.sh
 
 Unlike v1.3.0, v1.4.0 derives the UUID from the machine id and the base
 directory instead of a timestamp, so **the UUID does not change when the
@@ -62,9 +63,10 @@ instance is restarted**.
 ## Everyday commands
 
     # start / stop / read the UUID
-    wsl -d seekdb-ubuntu -u root -- bash wsl/start_seekdb.sh
-    wsl -d seekdb-ubuntu -u root -- bash wsl/stop_seekdb.sh
-    wsl -d seekdb-ubuntu -u root -- bash wsl/get_telemetry_id.sh
+    cd D:\数据库大赛
+    wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/start_seekdb.sh
+    wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/stop_seekdb.sh
+    wsl -d seekdb-ubuntu -u root -- bash seekdb/wsl/get_telemetry_id.sh
 
     # logs
     wsl -d seekdb-ubuntu -u root -- tail -f /var/lib/seekdb/log/seekdb.log
