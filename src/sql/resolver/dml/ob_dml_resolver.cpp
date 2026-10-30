@@ -13064,8 +13064,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
           path_given = true;
         }
       } else {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_USER_ERROR(OB_ERR_UNEXPECTED, "the file table takes one path and named options only");
+        // A second positional argument is a syntax error, not a runtime error.
+        ret = OB_ERR_PARSE_SQL;
       }
     }
     if (OB_SUCC(ret) && !path_given) {
@@ -13110,6 +13110,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
                                                reader,
                                                error))) {
       ret = OB_ERR_UNEXPECTED;
+      LOG_USER_ERROR(OB_ERR_UNEXPECTED, "cannot open the file %s: %s", path.ptr(), error.to_string().c_str());
+      LOG_WARN("the file could not be opened", K(path.ptr()), K(error.to_string().c_str()));
     } else if (OB_FAIL(reader->infer_schema(schema, error))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_USER_ERROR(OB_ERR_UNEXPECTED, "cannot read the file %s: %s", path.ptr(), error.to_string().c_str());

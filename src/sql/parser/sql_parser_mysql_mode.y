@@ -17540,6 +17540,7 @@ file_table_arg
   // positional argument is a syntax error, like an unknown keyword.
   if (NULL == $3 || T_FILE_TABLE_NAMED_ARG != $3->type_) {
     yyerror(&@3, result, "a file table takes one path and named options only\n");
+    YYABORT_PARSE_SQL_ERROR;
   }
   push_back_list(result->malloc_pool_, result, $$, $1, $3);
 }
