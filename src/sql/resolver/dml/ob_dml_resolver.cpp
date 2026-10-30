@@ -12884,6 +12884,13 @@ ObDataType file_table_column_type(file_table::InferredType type)
 namespace
 {
 
+/** Compare an option value with a literal, the value is not zero terminated. */
+bool file_table_option_equals(const ObString &option, const char *literal)
+{
+  const int64_t length = static_cast<int64_t>(strlen(literal));
+  return option.length() == length && 0 == strncasecmp(option.ptr(), literal, static_cast<size_t>(length));
+}
+
 /** The format option only names the layout the table function already reads. */
 bool file_table_format_option_supported(int64_t format_id, const ObString &option)
 {
@@ -12891,16 +12898,16 @@ bool file_table_format_option_supported(int64_t format_id, const ObString &optio
   if (supported) {
     // An empty option is accepted, the table function decides.
   } else if (0 == format_id) {
-    supported = (0 == strcasecmp(option.ptr(), "csv") || 0 == strcasecmp(option.ptr(), "auto"));
+    supported = (file_table_option_equals(option, "csv") || file_table_option_equals(option, "auto"));
   } else if (1 == format_id) {
-    supported = (0 == strcasecmp(option.ptr(), "newline_delimited")
-                 || 0 == strcasecmp(option.ptr(), "ndjson")
-                 || 0 == strcasecmp(option.ptr(), "jsonl")
-                 || 0 == strcasecmp(option.ptr(), "auto"));
+    supported = (file_table_option_equals(option, "newline_delimited")
+                 || file_table_option_equals(option, "ndjson")
+                 || file_table_option_equals(option, "jsonl")
+                 || file_table_option_equals(option, "auto"));
   } else if (2 == format_id) {
-    supported = (0 == strcasecmp(option.ptr(), "parquet") || 0 == strcasecmp(option.ptr(), "auto"));
+    supported = (file_table_option_equals(option, "parquet") || file_table_option_equals(option, "auto"));
   } else {
-    supported = (0 == strcasecmp(option.ptr(), "auto"));
+    supported = (file_table_option_equals(option, "auto"));
   }
   return supported;
 }
