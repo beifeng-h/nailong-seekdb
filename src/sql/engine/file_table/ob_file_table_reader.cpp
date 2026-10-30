@@ -310,6 +310,11 @@ int glob_files(const std::string &pattern, std::vector<std::string> &files, File
     if ("." == name || ".." == name) {
       continue;
     }
+    // A hidden entry, such as the "._name" resource fork a copy on macOS
+    // leaves behind, is not part of the data set.
+    if (!name.empty() && '.' == name[0] && (name_pattern.empty() || '.' != name_pattern[0])) {
+      continue;
+    }
     if (!match_pattern(name, name_pattern)) {
       continue;
     }
