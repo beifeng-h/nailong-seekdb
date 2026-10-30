@@ -79,6 +79,8 @@ public:
   const std::vector<std::string> &column_names() const { return column_names_; }
   /** The inferred column types. */
   const std::vector<InferredType> &column_types() const { return column_types_; }
+  /** Whether a NULL value was seen in each column. */
+  const std::vector<bool> &column_nullable() const { return column_nullable_; }
   /** The number of records that were skipped because of @c ignore_errors. */
   long long skipped_records() const { return skipped_records_; }
   /** Close the file. */
@@ -110,6 +112,7 @@ private:
   long long skipped_records_ = 0;
   std::vector<std::string> column_names_;
   std::vector<InferredType> column_types_;
+  std::vector<bool> column_nullable_;
 };
 
 } // namespace file_table

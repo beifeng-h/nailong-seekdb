@@ -5480,15 +5480,20 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       }
     }
     if (OB_SUCC(ret)) {
-      spec.into_type_ = op.get_into_type();
-      spec.is_optional_ = op.get_is_optional();
-      spec.is_single_ = op.get_is_single();
-      spec.max_file_size_ = op.get_max_file_size();
-      spec.buffer_size_ = op.get_buffer_size();
-      spec.cs_type_ = op.get_cs_type();
-      spec.parallel_ = op.get_parallel();
-      spec.is_overwrite_ = op.get_is_overwrite();
-      spec.plan_->need_drive_dml_query_ = true;
+      const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(op.get_plan()->get_stmt());
+      if (NULL != select_stmt && NULL != select_stmt->get_select_into()
+          && OB_FAIL(ob_write_string(alloc, select_stmt->get_select_into()->header_line_, spec.header_))) {
+      } else {
+        spec.into_type_ = op.get_into_type();
+        spec.is_optional_ = op.get_is_optional();
+        spec.is_single_ = op.get_is_single();
+        spec.max_file_size_ = op.get_max_file_size();
+        spec.buffer_size_ = op.get_buffer_size();
+        spec.cs_type_ = op.get_cs_type();
+        spec.parallel_ = op.get_parallel();
+        spec.is_overwrite_ = op.get_is_overwrite();
+        spec.plan_->need_drive_dml_query_ = true;
+      }
     }
   }
   return ret;

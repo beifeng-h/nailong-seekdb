@@ -3049,6 +3049,46 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
     if (OB_SUCC(ret)
         && OB_FAIL(external_format.to_string_with_alloc(into_item.external_properties_, *allocator_, true))) {
     }
+    // The csv option PARSE_HEADER asks for the column names on the first line.
+    if (OB_SUCC(ret) && external_format.csv_format_.parse_header_) {
+      ObSelectStmt *select_stmt = static_cast<ObSelectStmt *>(get_stmt());
+      if (OB_ISNULL(select_stmt)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObIArray<SelectItem> &items = select_stmt->get_select_items();
+        const ObString &field_term = external_format.csv_format_.field_term_str_;
+        const ObString &line_term = external_format.csv_format_.line_term_str_;
+        int64_t total = line_term.length();
+        for (int64_t i = 0; i < items.count(); ++i) {
+          total += items.at(i).expr_name_.length();
+          if (i + 1 < items.count()) {
+            total += field_term.length();
+          }
+        }
+        char *buffer = static_cast<char *>(allocator_->alloc(total));
+        if (OB_ISNULL(buffer)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          int64_t position = 0;
+          for (int64_t i = 0; i < items.count(); ++i) {
+            const ObString &name = items.at(i).expr_name_;
+            if (name.length() > 0) {
+              MEMCPY(buffer + position, name.ptr(), name.length());
+              position += name.length();
+            }
+            if (i + 1 < items.count() && field_term.length() > 0) {
+              MEMCPY(buffer + position, field_term.ptr(), field_term.length());
+              position += field_term.length();
+            }
+          }
+          if (line_term.length() > 0) {
+            MEMCPY(buffer + position, line_term.ptr(), line_term.length());
+            position += line_term.length();
+          }
+          into_item.header_line_.assign_ptr(buffer, static_cast<int32_t>(position));
+        }
+      }
+    }
   }
   // file: single, max_file_size, buffer_size
   if (OB_SUCC(ret) && NULL != node->children_[2]) {

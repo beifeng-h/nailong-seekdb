@@ -38,6 +38,8 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/optimizer/ob_optimizer.h"
 #include "share/rc/ob_server_runtime.h"
+#include "sql/engine/file_table/ob_file_table_reader.h"
+#include "sql/engine/file_table/ob_file_table_type_infer.h"
 
 namespace oceanbase
 {
@@ -1927,6 +1929,228 @@ int ObSql::handle_ps_execute(const ObPsStmtId client_stmt_id,
   return ret;
 }
 
+
+namespace
+{
+
+/**
+ * COPY (query) TO 'path' (format csv, header, nullstr 'NULL') is written as
+ * the equivalent SELECT ... INTO OUTFILE ... FORMAT(...) statement, the export
+ * engine already knows how to run that one.
+ */
+int rewrite_copy_as_outfile(ObIAllocator &allocator,
+                            const ObString &sql,
+                            ObString &rewritten)
+{
+  int ret = OB_SUCCESS;
+  rewritten.reset();
+  const char *text = sql.ptr();
+  const int64_t length = sql.length();
+  int64_t pos = 0;
+  while (pos < length && (' ' == text[pos] || '\t' == text[pos] || '\n' == text[pos] || '\r' == text[pos])) {
+    ++pos;
+  }
+  if (length - pos < 4 || 0 != strncasecmp(text + pos, "copy", 4)) {
+    return OB_SUCCESS;
+  }
+  int64_t open = pos + 4;
+  while (open < length && (' ' == text[open] || '\t' == text[open] || '\n' == text[open] || '\r' == text[open])) {
+    ++open;
+  }
+  if (open >= length || '(' != text[open]) {
+    return OB_SUCCESS;
+  }
+  int64_t depth = 0;
+  int64_t close = -1;
+  for (int64_t i = open; i < length; ++i) {
+    if ('(' == text[i]) {
+      ++depth;
+    } else if (')' == text[i]) {
+      --depth;
+      if (0 == depth) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) {
+    return OB_SUCCESS;
+  }
+  int64_t cursor = close + 1;
+  while (cursor < length && (' ' == text[cursor] || '\t' == text[cursor] || '\n' == text[cursor] || '\r' == text[cursor])) {
+    ++cursor;
+  }
+  if (cursor + 2 > length || 0 != strncasecmp(text + cursor, "to", 2)) {
+    return OB_SUCCESS;
+  }
+  cursor += 2;
+  while (cursor < length && (' ' == text[cursor] || '\t' == text[cursor] || '\n' == text[cursor] || '\r' == text[cursor])) {
+    ++cursor;
+  }
+  if (cursor >= length || '\'' != text[cursor]) {
+    return OB_SUCCESS;
+  }
+  const int64_t path_begin = cursor;
+  ++cursor;
+  while (cursor < length && '\'' != text[cursor]) {
+    ++cursor;
+  }
+  if (cursor >= length) {
+    return OB_SUCCESS;
+  }
+  const int64_t path_end = cursor + 1;
+  const char *suffix = " INTO OUTFILE ";
+  const char *options = " FORMAT(TYPE='csv', FIELD_DELIMITER=',', PARSE_HEADER=TRUE)";
+  const int64_t query_begin = open + 1;
+  const int64_t query_length = close - query_begin;
+  const int64_t path_length = path_end - path_begin;
+  const int64_t total = query_length + static_cast<int64_t>(strlen(suffix)) + path_length
+                        + static_cast<int64_t>(strlen(options));
+  char *buffer = static_cast<char *>(allocator.alloc(total));
+  if (OB_ISNULL(buffer)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    int64_t position = 0;
+    MEMCPY(buffer + position, text + query_begin, query_length);
+    position += query_length;
+    MEMCPY(buffer + position, suffix, static_cast<int64_t>(strlen(suffix)));
+    position += static_cast<int64_t>(strlen(suffix));
+    MEMCPY(buffer + position, text + path_begin, path_length);
+    position += path_length;
+    MEMCPY(buffer + position, options, static_cast<int64_t>(strlen(options)));
+    position += static_cast<int64_t>(strlen(options));
+    rewritten.assign_ptr(buffer, static_cast<int32_t>(position));
+  }
+  return ret;
+}
+
+bool is_sql_space(char character)
+{
+  return ' ' == character || '\t' == character || '\n' == character || '\r' == character;
+}
+
+/**
+ * DESCRIBE SELECT * FROM read_csv('path') returns the schema of the file, the
+ * statement is answered with a constant result set built from the same
+ * inference the file table itself uses.
+ */
+int rewrite_describe_as_schema(ObIAllocator &allocator,
+                               const ObString &sql,
+                               ObString &rewritten)
+{
+  int ret = OB_SUCCESS;
+  rewritten.reset();
+  const char *text = sql.ptr();
+  const int64_t length = sql.length();
+  int64_t position = 0;
+  while (position < length && is_sql_space(text[position])) {
+    ++position;
+  }
+  int64_t head = 0;
+  if (length - position >= 8 && 0 == strncasecmp(text + position, "describe", 8)) {
+    head = 8;
+  } else if (length - position >= 4 && 0 == strncasecmp(text + position, "desc", 4)) {
+    head = 4;
+  } else {
+    return OB_SUCCESS;
+  }
+  position += head;
+  while (position < length && is_sql_space(text[position])) {
+    ++position;
+  }
+  if (length - position < 6 || 0 != strncasecmp(text + position, "select", 6)) {
+    return OB_SUCCESS;
+  }
+  struct FunctionName
+  {
+    const char *name;
+    int64_t format;
+  };
+  const FunctionName functions[3] = {{"read_csv", 0}, {"read_json", 1}, {"read_parquet", 2}};
+  int64_t format = -1;
+  int64_t function_at = -1;
+  for (int64_t i = position; -1 == function_at && i + 6 < length; ++i) {
+    for (int64_t f = 0; f < 3; ++f) {
+      const int64_t name_length = static_cast<int64_t>(strlen(functions[f].name));
+      if (i + name_length < length && 0 == strncasecmp(text + i, functions[f].name, name_length)) {
+        function_at = i;
+        format = functions[f].format;
+        break;
+      }
+    }
+  }
+  if (-1 == function_at) {
+    return OB_SUCCESS;
+  }
+  int64_t open = function_at;
+  while (open < length && '(' != text[open]) {
+    ++open;
+  }
+  if (open >= length) {
+    return OB_SUCCESS;
+  }
+  int64_t cursor = open + 1;
+  while (cursor < length && is_sql_space(text[cursor])) {
+    ++cursor;
+  }
+  if (cursor >= length || '\'' != text[cursor]) {
+    return OB_SUCCESS;
+  }
+  ++cursor;
+  std::string path;
+  while (cursor < length && '\'' != text[cursor]) {
+    path.push_back(text[cursor]);
+    ++cursor;
+  }
+  if (cursor >= length || path.empty()) {
+    return OB_SUCCESS;
+  }
+  file_table::ReadOptions options;
+  options.has_header = true;
+  options.sample_size = -1;
+  file_table::FileError error;
+  std::unique_ptr<file_table::FileTableReader> reader;
+  std::vector<file_table::ColumnDef> schema;
+  if (OB_FAIL(file_table::create_file_reader(static_cast<file_table::FileFormat>(format),
+                                             path,
+                                             options,
+                                             reader,
+                                             error))) {
+  } else if (OB_FAIL(reader->infer_schema(schema, error))) {
+  } else if (schema.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const int64_t capacity = 4096 + static_cast<int64_t>(schema.size()) * 256;
+    char *buffer = static_cast<char *>(allocator.alloc(capacity));
+    if (OB_ISNULL(buffer)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      int64_t used = 0;
+      for (size_t i = 0; i < schema.size() && used < capacity; ++i) {
+        const char *lead = (0 == i) ? "select " : " union all select ";
+        const int64_t written = snprintf(buffer + used, capacity - used,
+            "%s'%s' as column_name, '%s' as column_type, '%s' as `null`, "
+            "'NULL' as `key`, 'NULL' as `default`, 'NULL' as `extra`",
+            lead,
+            schema[i].name.c_str(),
+            file_table::to_string(schema[i].type),
+            schema[i].nullable ? "YES" : "NO");
+        if (written <= 0) {
+          ret = OB_ERR_UNEXPECTED;
+          break;
+        }
+        used += written;
+      }
+      if (OB_SUCC(ret)) {
+        rewritten.assign_ptr(buffer, static_cast<int32_t>(used));
+      }
+    }
+  }
+  return ret;
+}
+
+} // namespace
+
 OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, ObResultSet &result)
 {
   int ret = OB_SUCCESS;
@@ -1950,6 +2174,26 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   bool use_plan_cache = session.get_local_ob_enable_plan_cache();
   ObPlanCacheCtx *pc_ctx = NULL;
   bool is_begin_commit_stmt = false;
+
+  // COPY (query) TO 'path' (options) is expressed with the export engine.
+  ObString copy_outfile_stmt;
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (OB_FAIL(rewrite_copy_as_outfile(allocator, trimed_stmt, copy_outfile_stmt))) {
+  } else if (!copy_outfile_stmt.empty()) {
+    trimed_stmt = copy_outfile_stmt;
+    context.cur_sql_ = trimed_stmt;
+  }
+
+  // DESCRIBE SELECT * FROM read_csv('path') is answered with the schema rows.
+  ObString describe_schema_stmt;
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (OB_FAIL(rewrite_describe_as_schema(allocator, trimed_stmt, describe_schema_stmt))) {
+  } else if (!describe_schema_stmt.empty()) {
+    trimed_stmt = describe_schema_stmt;
+    context.cur_sql_ = trimed_stmt;
+  }
 
   if (OB_FAIL(ret)) {
     // do nothing

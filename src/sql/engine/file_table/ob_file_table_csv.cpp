@@ -402,8 +402,11 @@ int CsvReader::infer_schema(FileError &error)
   }
   column_types_.clear();
   column_types_.resize(column_count, InferredType::VARCHAR);
+  column_nullable_.clear();
+  column_nullable_.resize(column_count, false);
   for (size_t i = 0; i < column_count; ++i) {
     column_types_[i] = inferrers[i].result();
+    column_nullable_[i] = inferrers[i].has_null();
   }
   return CSV_OK;
 }

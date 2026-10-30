@@ -79,11 +79,13 @@ public:
     }
     const std::vector<std::string> &names = csv_.column_names();
     const std::vector<InferredType> &types = csv_.column_types();
+    const std::vector<bool> &nullables = csv_.column_nullable();
     schema.clear();
     for (size_t i = 0; i < names.size(); ++i) {
       ColumnDef column;
       column.name = names[i];
       column.type = i < types.size() ? types[i] : InferredType::VARCHAR;
+      column.nullable = i < nullables.size() ? nullables[i] : true;
       schema.push_back(column);
     }
     return 0;
