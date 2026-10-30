@@ -47,6 +47,96 @@ const int32_t ENCODING_RLE_DICTIONARY = 8;
 
 /** The compression codecs of the Parquet format. */
 const int32_t CODEC_UNCOMPRESSED = 0;
+const int32_t CODEC_SNAPPY = 1;
+
+/**
+ * Decompress a Snappy block, the raw format the Parquet column pages use.
+ *
+ * The block starts with the varint length of the output, then a sequence of
+ * literals and back references.  A back reference may overlap the bytes it
+ * copies, so the bytes are copied one at a time.
+ */
+bool snappy_decompress(const char *input, size_t length, std::string &output)
+{
+  size_t position = 0;
+  uint64_t expected = 0;
+  int shift = 0;
+  while (position < length) {
+    const unsigned char byte = static_cast<unsigned char>(input[position++]);
+    expected |= static_cast<uint64_t>(byte & 0x7F) << shift;
+    if (0 == (byte & 0x80)) {
+      break;
+    }
+    shift += 7;
+    if (shift > 32) {
+      return false;
+    }
+  }
+  output.clear();
+  output.reserve(static_cast<size_t>(expected));
+  while (position < length) {
+    const unsigned char tag = static_cast<unsigned char>(input[position++]);
+    const int kind = tag & 0x03;
+    size_t copy_length = 0;
+    size_t copy_offset = 0;
+    if (0 == kind) {
+      size_t literal = tag >> 2;
+      if (literal < 60) {
+        copy_length = literal + 1;
+      } else {
+        const size_t extra = literal - 59;
+        if (extra > 4 || position + extra > length) {
+          return false;
+        }
+        uint64_t value = 0;
+        for (size_t i = 0; i < extra; ++i) {
+          value |= static_cast<uint64_t>(static_cast<unsigned char>(input[position + i])) << (8 * i);
+        }
+        position += extra;
+        copy_length = static_cast<size_t>(value) + 1;
+      }
+      if (position + copy_length > length) {
+        return false;
+      }
+      output.append(input + position, copy_length);
+      position += copy_length;
+      continue;
+    } else if (1 == kind) {
+      copy_length = 4 + ((tag >> 2) & 0x07);
+      if (position + 1 > length) {
+        return false;
+      }
+      copy_offset = (static_cast<size_t>(tag >> 5) << 8) | static_cast<unsigned char>(input[position]);
+      position += 1;
+    } else if (2 == kind) {
+      copy_length = 1 + (tag >> 2);
+      if (position + 2 > length) {
+        return false;
+      }
+      copy_offset = static_cast<size_t>(static_cast<unsigned char>(input[position]))
+                    | (static_cast<size_t>(static_cast<unsigned char>(input[position + 1])) << 8);
+      position += 2;
+    } else {
+      copy_length = 1 + (tag >> 2);
+      if (position + 4 > length) {
+        return false;
+      }
+      copy_offset = static_cast<size_t>(static_cast<unsigned char>(input[position]))
+                    | (static_cast<size_t>(static_cast<unsigned char>(input[position + 1])) << 8)
+                    | (static_cast<size_t>(static_cast<unsigned char>(input[position + 2])) << 16)
+                    | (static_cast<size_t>(static_cast<unsigned char>(input[position + 3])) << 24);
+      position += 4;
+    }
+    if (0 == copy_offset || copy_offset > output.size()) {
+      return false;
+    }
+    const size_t start = output.size() - copy_offset;
+    for (size_t i = 0; i < copy_length; ++i) {
+      output.push_back(output[start + i]);
+    }
+  }
+  return output.size() == static_cast<size_t>(expected);
+}
 
 /** The converted types of the Parquet format. */
 const int32_t CONVERTED_DATE = 6;
@@ -796,10 +886,9 @@ int ParquetReader::decode_column(size_t column_index, FileError &error)
   std::vector<Value> &values = row_group_values_[column_index];
   values.clear();
 
-  if (CODEC_UNCOMPRESSED != chunk.codec) {
+  if (CODEC_UNCOMPRESSED != chunk.codec && CODEC_SNAPPY != chunk.codec) {
     error.code = 1;
-    error.message = "the column uses the compression codec " + std::to_string(chunk.codec)
-                    + ", only uncompressed files are supported";
+    error.message = "the column uses the unsupported compression codec " + std::to_string(chunk.codec);
     error.line = 0;
     error.column = 0;
     return PARQUET_ERROR;
@@ -843,6 +932,18 @@ int ParquetReader::decode_column(size_t column_index, FileError &error)
       error.line = 0;
       error.column = 0;
       return PARQUET_ERROR;
+    }
+
+    if (CODEC_SNAPPY == chunk.codec && is_compressed && PAGE_DATA_V2 != page_type && !page.empty()) {
+      std::string uncompressed;
+      if (!snappy_decompress(page.data(), page.size(), uncompressed)) {
+        error.code = 1;
+        error.message = "the snappy block of the column cannot be decompressed";
+        error.line = 0;
+        error.column = 0;
+        return PARQUET_ERROR;
+      }
+      page.swap(uncompressed);
     }
 
     if (PAGE_DICTIONARY == page_type) {
@@ -905,6 +1006,18 @@ int ParquetReader::decode_column(size_t column_index, FileError &error)
       levels.assign(page.data() + offset, static_cast<size_t>(def_levels_length));
       offset += static_cast<size_t>(def_levels_length);
       payload.assign(page.data() + offset, page.size() - offset);
+      // In a v2 data page only the value part is compressed.
+      if (CODEC_SNAPPY == chunk.codec && is_compressed && !payload.empty()) {
+        std::string uncompressed;
+        if (!snappy_decompress(payload.data(), payload.size(), uncompressed)) {
+          error.code = 1;
+          error.message = "the snappy block of the column cannot be decompressed";
+          error.line = 0;
+          error.column = 0;
+          return PARQUET_ERROR;
+        }
+        payload.swap(uncompressed);
+      }
     }
 
     if (leaf.max_def_level > 0) {
