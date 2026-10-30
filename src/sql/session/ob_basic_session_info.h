@@ -410,6 +410,8 @@ public:
   inline const ObString &get_log_row_value_option() const;
   int64_t get_default_lob_inrow_threshold() const;
   bool get_local_autocommit() const;
+  /** Whether the table functions that read a local file may be used. */
+  bool get_enable_file_sql() const { return sys_vars_cache_.get_enable_file_sql(); }
   uint64_t get_local_auto_increment_increment() const;
   uint64_t get_local_auto_increment_offset() const;
   uint64_t get_local_last_insert_id() const;
@@ -1373,7 +1375,8 @@ public:
         runtime_filter_wait_time_ms_(0),
         runtime_filter_max_in_num_(0),
         runtime_bloom_filter_max_size_(INT_MAX32),
-        enable_sql_plan_monitor_(false)
+        enable_sql_plan_monitor_(false),
+        enable_file_sql_(false)
     {}
     ~SysVarsCacheData() {}
 
@@ -1414,6 +1417,7 @@ public:
       runtime_bloom_filter_max_size_ = INT32_MAX;
       default_lob_inrow_threshold_ = OB_DEFAULT_LOB_INROW_THRESHOLD;
       enable_sql_plan_monitor_ = false;
+      enable_file_sql_ = false;
     }
 
     inline bool operator==(const SysVarsCacheData &other) const {
@@ -1522,6 +1526,7 @@ public:
     int64_t runtime_bloom_filter_max_size_;
     // No use. Placeholder.
     bool enable_sql_plan_monitor_;
+    bool enable_file_sql_;
   };
 private:
 #define DEF_SYS_VAR_CACHE_FUNCS(SYS_VAR_TYPE, SYS_VAR_NAME)                           \
@@ -1619,6 +1624,7 @@ private:
     DEF_SYS_VAR_CACHE_FUNCS(int64_t, runtime_bloom_filter_max_size);
     DEF_SYS_VAR_CACHE_FUNCS(int64_t, default_lob_inrow_threshold);
     DEF_SYS_VAR_CACHE_FUNCS(bool, enable_sql_plan_monitor);
+    DEF_SYS_VAR_CACHE_FUNCS(bool, enable_file_sql);
     void set_autocommit_info(bool inc_value)
     {
       inc_data_.autocommit_ = inc_value;
@@ -1676,6 +1682,7 @@ private:
         bool inc_default_lob_inrow_threshold_:1;
         bool inc_ob_enable_pl_cache_:1;
         bool inc_enable_sql_plan_monitor_:1;
+        bool inc_enable_file_sql_:1;
       };
     };
   };

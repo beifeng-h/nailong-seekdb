@@ -214,6 +214,17 @@ SQL_UNITY_GROUPS = [
         external_srcs = [],
     ),
     struct(
+        name = "ob_sql_engine_file_table_0",
+        language = "c++",
+        srcs = [
+            "src/sql/engine/file_table/ob_file_table_csv.cpp",
+            "src/sql/engine/file_table/ob_file_table_json.cpp",
+            "src/sql/engine/file_table/ob_file_table_parquet.cpp",
+            "src/sql/engine/file_table/ob_file_table_reader.cpp",
+            "src/sql/engine/file_table/ob_file_table_thrift.cpp",
+            "src/sql/engine/file_table/ob_file_table_type_infer.cpp",
+        ],
+    ),    struct(
         name = "ob_sql_engine_basic_0",
         language = "c++",
         srcs = [
@@ -224,6 +235,7 @@ SQL_UNITY_GROUPS = [
             "src/sql/engine/basic/ob_chunk_datum_store.cpp",
             "src/sql/engine/basic/ob_chunk_row_store.cpp",
             "src/sql/engine/basic/ob_expr_values_op.cpp",
+            "src/sql/engine/basic/ob_file_table_op.cpp",
             "src/sql/engine/basic/ob_function_table_op.cpp",
             "src/sql/engine/basic/ob_group_join_buffer.cpp",
             "src/sql/engine/basic/ob_hash_partitioning_infrastructure_op.cpp",
@@ -1158,6 +1170,7 @@ SQL_UNITY_GROUPS = [
             "src/sql/optimizer/ob_log_distinct.cpp",
             "src/sql/optimizer/ob_log_exchange.cpp",
             "src/sql/optimizer/ob_log_expr_values.cpp",
+            "src/sql/optimizer/ob_log_file_table.cpp",
             "src/sql/optimizer/ob_log_for_update.cpp",
             "src/sql/optimizer/ob_log_function_table.cpp",
             "src/sql/optimizer/ob_log_granule_iterator.cpp",

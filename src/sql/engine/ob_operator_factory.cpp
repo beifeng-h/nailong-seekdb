@@ -30,6 +30,7 @@
 #include "sql/optimizer/ob_log_expr_values.h"
 #include "sql/optimizer/ob_log_function_table.h"
 #include "sql/optimizer/ob_log_json_table.h"
+#include "sql/optimizer/ob_log_file_table.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/optimizer/ob_log_subplan_filter.h"
 #include "sql/optimizer/ob_log_subplan_scan.h"
@@ -56,6 +57,7 @@
 #include "sql/optimizer/ob_log_expr_values.h"
 #include "sql/optimizer/ob_log_function_table.h"
 #include "sql/optimizer/ob_log_json_table.h"
+#include "sql/optimizer/ob_log_file_table.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/optimizer/ob_log_subplan_filter.h"
 #include "sql/optimizer/ob_log_subplan_scan.h"
@@ -120,6 +122,7 @@
 #include "sql/engine/basic/ob_select_into_op.h"
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/basic/ob_json_table_op.h"
+#include "sql/engine/basic/ob_file_table_op.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
 #include "sql/engine/basic/ob_stat_collector_op.h"
 #include "sql/engine/opt_statistics/ob_optimizer_stats_gathering_op.h"
@@ -337,6 +340,7 @@ int ObOperatorFactory::alloc_op_spec(ObIAllocator &alloc, const ObPhyOperatorTyp
                                      const int64_t child_cnt, ObOpSpec *&spec)
 {
   int ret = OB_SUCCESS;
+  if (PHY_FILE_TABLE == type) { fprintf(stderr, "[file table] alloc_op_spec start child_cnt=%ld\n", child_cnt); }
   if (!is_registered(type)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (child_cnt < 0) {
@@ -344,7 +348,8 @@ int ObOperatorFactory::alloc_op_spec(ObIAllocator &alloc, const ObPhyOperatorTyp
   } else if (OB_FAIL(G_ALLOC_FUNCTION_ARRAY[type].spec_func_(
               alloc, type, child_cnt, spec))) {
   }
-  return ret;
+
+  if (PHY_FILE_TABLE == type) { fprintf(stderr, "[file table] alloc_op_spec ret=%d spec=%p\n", ret, spec); }  return ret;
 }
 
 int ObOperatorFactory::alloc_operator(ObIAllocator &alloc, ObExecContext &exec_ctx,
@@ -353,13 +358,15 @@ int ObOperatorFactory::alloc_operator(ObIAllocator &alloc, ObExecContext &exec_c
 {
   const ObPhyOperatorType type = spec.type_;
   int ret = OB_SUCCESS;
+  if (PHY_FILE_TABLE == type) { fprintf(stderr, "[file table] alloc_operator start child_cnt=%ld\n", child_cnt); }
   if (child_cnt < 0 || !is_registered(type)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(G_ALLOC_FUNCTION_ARRAY[type].op_func_(
               alloc, exec_ctx, spec, input, child_cnt, op))) {
   }
 
-  return ret;
+
+  if (PHY_FILE_TABLE == type) { fprintf(stderr, "[file table] alloc_operator ret=%d op=%p\n", ret, op); }  return ret;
 }
 
 int ObOperatorFactory::alloc_op_input(ObIAllocator &alloc, ObExecContext &exec_ctx,
@@ -393,3 +400,4 @@ int ObOperatorFactory::generate_spec(ObStaticEngineCG &cg,
 
 } // end namespace sql
 } // end namespace oceanbase
+

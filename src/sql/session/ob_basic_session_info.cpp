@@ -2173,6 +2173,12 @@ OB_INLINE int ObBasicSessionInfo::process_session_variable(ObSysVarClassType var
       OX (sys_vars_cache_.set_autocommit(int_val != 0));
       break;
     }
+    case SYS_VAR_ENABLE_FILE_SQL: {
+      int64_t int_val = 0;
+      OZ (val.get_int(int_val), val);
+      OX (sys_vars_cache_.set_enable_file_sql(int_val != 0));
+      break;
+    }
     case SYS_VAR_OB_ENABLE_SHOW_TRACE: {
       int64_t int_val = 0;
       OZ (val.get_int(int_val), val);
@@ -2518,6 +2524,12 @@ int ObBasicSessionInfo::fill_sys_vars_cache_base_value(
       int64_t int_val = 0;
       OZ (val.get_int(int_val), val);
       OX (sys_vars_cache.set_base_autocommit(int_val != 0));
+      break;
+    }
+    case SYS_VAR_ENABLE_FILE_SQL: {
+      int64_t int_val = 0;
+      OZ (val.get_int(int_val), val);
+      OX (sys_vars_cache.set_base_enable_file_sql(int_val != 0));
       break;
     }
     case SYS_VAR_OB_ENABLE_SHOW_TRACE: {
@@ -3254,7 +3266,8 @@ OB_DEF_SERIALIZE(ObBasicSessionInfo::SysVarsCacheData)
               runtime_filter_wait_time_ms_,
               runtime_filter_max_in_num_,
               runtime_bloom_filter_max_size_,
-              enable_sql_plan_monitor_);
+              enable_sql_plan_monitor_,
+              enable_file_sql_);
   return ret;
 }
 
@@ -3277,7 +3290,8 @@ OB_DEF_DESERIALIZE(ObBasicSessionInfo::SysVarsCacheData)
               runtime_filter_wait_time_ms_,
               runtime_filter_max_in_num_,
               runtime_bloom_filter_max_size_,
-              enable_sql_plan_monitor_);
+              enable_sql_plan_monitor_,
+              enable_file_sql_);
   return ret;
 }
 
@@ -3300,7 +3314,8 @@ OB_DEF_SERIALIZE_SIZE(ObBasicSessionInfo::SysVarsCacheData)
               runtime_filter_wait_time_ms_,
               runtime_filter_max_in_num_,
               runtime_bloom_filter_max_size_,
-              enable_sql_plan_monitor_);
+              enable_sql_plan_monitor_,
+              enable_file_sql_);
   return len;
 }
 
