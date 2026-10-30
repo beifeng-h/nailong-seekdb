@@ -17536,6 +17536,11 @@ file_table_arg
 }
 | file_table_arg_list ',' file_table_arg
 {
+  // The path comes first and once, every further argument is named.  A second
+  // positional argument is a syntax error, like an unknown keyword.
+  if (NULL == $3 || T_FILE_TABLE_NAMED_ARG != $3->type_) {
+    yyerror(&@3, result, "a file table takes one path and named options only\n");
+  }
   push_back_list(result->malloc_pool_, result, $$, $1, $3);
 }
 ;

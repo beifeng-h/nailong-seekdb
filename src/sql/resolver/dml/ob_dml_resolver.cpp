@@ -12881,6 +12881,64 @@ ObDataType file_table_column_type(file_table::InferredType type)
 
 } // namespace
 
+namespace
+{
+
+/** The format option only names the layout the table function already reads. */
+bool file_table_format_option_supported(int64_t format_id, const ObString &option)
+{
+  bool supported = (0 == option.length());
+  if (supported) {
+    // An empty option is accepted, the table function decides.
+  } else if (0 == format_id) {
+    supported = (0 == strcasecmp(option.ptr(), "csv") || 0 == strcasecmp(option.ptr(), "auto"));
+  } else if (1 == format_id) {
+    supported = (0 == strcasecmp(option.ptr(), "newline_delimited")
+                 || 0 == strcasecmp(option.ptr(), "ndjson")
+                 || 0 == strcasecmp(option.ptr(), "jsonl")
+                 || 0 == strcasecmp(option.ptr(), "auto"));
+  } else if (2 == format_id) {
+    supported = (0 == strcasecmp(option.ptr(), "parquet") || 0 == strcasecmp(option.ptr(), "auto"));
+  } else {
+    supported = (0 == strcasecmp(option.ptr(), "auto"));
+  }
+  return supported;
+}
+
+int file_table_option_bool(const ParseNode &node, bool &value)
+{
+  int ret = OB_SUCCESS;
+  if (T_BOOL == node.type_ || T_INT == node.type_) {
+    value = (0 != node.value_);
+  } else if (T_VARCHAR == node.type_ && NULL != node.str_value_) {
+    value = (0 == strcasecmp(node.str_value_, "true") || 0 == strcasecmp(node.str_value_, "1"));
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  return ret;
+}
+
+int file_table_option_int(const ParseNode &node, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  if (T_INT == node.type_) {
+    value = node.value_;
+  } else if (T_OP_NEG == node.type_ && 1 == node.num_child_ && NULL != node.children_[0]) {
+    int64_t positive = 0;
+    if (OB_FAIL(file_table_option_int(*node.children_[0], positive))) {
+    } else {
+      value = -positive;
+    }
+  } else if (T_VARCHAR == node.type_ && NULL != node.str_value_) {
+    value = strtoll(node.str_value_, NULL, 10);
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  return ret;
+}
+
+} // namespace
+
 int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableItem *&tbl_item)
 {
   int ret = OB_SUCCESS;
@@ -12931,7 +12989,6 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
       if (OB_ISNULL(arg)) {
         ret = OB_ERR_UNEXPECTED;
       } else if (T_FILE_TABLE_NAMED_ARG == arg->type_ && 2 == arg->num_child_) {
-        fprintf(stderr, "[file table] a named argument\n");
         // A named argument, the name is the first child of the node.
         const ParseNode *name_node = arg->children_[0];
         const ParseNode *value_node = arg->children_[1];
@@ -12939,27 +12996,62 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
         ObString value;
         if (OB_ISNULL(name_node) || OB_ISNULL(value_node)) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(resolve_str_const(*value_node, value))) {
-          ret = OB_ERR_UNEXPECTED;
         } else {
           name.assign_ptr(name_node->str_value_, name_node->str_len_);
           const char *option = name.ptr();
           if (0 == strcasecmp(option, "delimiter")) {
-            table_def->delimiter_ = value;
+            if (OB_FAIL(resolve_str_const(*value_node, value))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              table_def->delimiter_ = value;
+            }
           } else if (0 == strcasecmp(option, "quote")) {
-            table_def->quote_ = value;
+            if (OB_FAIL(resolve_str_const(*value_node, value))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              table_def->quote_ = value;
+            }
           } else if (0 == strcasecmp(option, "escape")) {
-            table_def->escape_ = value;
+            if (OB_FAIL(resolve_str_const(*value_node, value))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              table_def->escape_ = value;
+            }
           } else if (0 == strcasecmp(option, "null")) {
-            table_def->null_string_ = value;
+            if (OB_FAIL(resolve_str_const(*value_node, value))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              table_def->null_string_ = value;
+            }
+          } else if (0 == strcasecmp(option, "format")) {
+            if (OB_FAIL(resolve_str_const(*value_node, value))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (!file_table_format_option_supported(format_id, value)) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "the format option does not match the file table function");
+            }
           } else if (0 == strcasecmp(option, "header")) {
-            table_def->has_header_ = (0 == strcasecmp(value.ptr(), "true") || 0 == strcasecmp(value.ptr(), "1"));
-            table_def->header_given_ = true;
+            bool flag = false;
+            if (OB_FAIL(file_table_option_bool(*value_node, flag))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else {
+              table_def->has_header_ = flag;
+              table_def->header_given_ = true;
+            }
           } else if (0 == strcasecmp(option, "sample_size")) {
-            table_def->sample_size_ = value.empty() ? -1 : strtoll(value.ptr(), nullptr, 10);
+            int64_t number = 0;
+            if (OB_FAIL(file_table_option_int(*value_node, number))) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (-1 != number) {
+              // The schema is deterministic: the whole file is scanned.
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size only supports -1, the schema is inferred from the whole file");
+            } else {
+              table_def->sample_size_ = -1;
+            }
           } else {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_USER_ERROR(OB_ERR_UNEXPECTED, "the file table does not know the option %s", option);
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "the file table does not know the option %s", option);
           }
         }
       } else if (!path_given) {

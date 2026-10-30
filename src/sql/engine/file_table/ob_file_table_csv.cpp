@@ -324,16 +324,20 @@ int CsvReader::read_header(FileError &error)
         error.column = static_cast<long long>(i) + 1;
         return CSV_ERROR;
       }
-      for (size_t j = 0; j < column_names_.size(); ++j) {
-        if (column_names_[j] == name) {
-          error.code = 1;
-          error.message = "duplicate column name '" + name + "' in the header";
-          error.line = record_line_;
-          error.column = static_cast<long long>(i) + 1;
-          return CSV_ERROR;
+      // A repeated header name keeps the column addressable: the second
+      // occurrence of "id" becomes "id__2", the third "id__3", and so on.
+      std::string unique_name = name;
+      for (int64_t occurrence = 2;; ++occurrence) {
+        bool clash = false;
+        for (size_t j = 0; !clash && j < column_names_.size(); ++j) {
+          clash = (column_names_[j] == unique_name);
         }
+        if (!clash) {
+          break;
+        }
+        unique_name = name + "__" + std::to_string(occurrence);
       }
-      column_names_.push_back(name);
+      column_names_.push_back(unique_name);
     }
   } else {
     for (size_t i = 0; i < record.size(); ++i) {
