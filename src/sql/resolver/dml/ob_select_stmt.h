@@ -128,7 +128,8 @@ struct ObSelectIntoItem
         max_file_size_(DEFAULT_MAX_FILE_SIZE),
         escaped_cht_(),
         buffer_size_(DEFAULT_BUFFER_SIZE),
-        external_properties_()
+        external_properties_(),
+        header_line_()
   {
     field_str_.set_varchar(DEFAULT_FIELD_TERM_STR);
     field_str_.set_collation_type(ObCharset::get_system_collation());
@@ -155,6 +156,7 @@ struct ObSelectIntoItem
     cs_type_ = other.cs_type_;
     buffer_size_ = other.buffer_size_;
     external_properties_ = other.external_properties_;
+    header_line_ = other.header_line_;
     return user_vars_.assign(other.user_vars_);
   }
   int deep_copy(ObIAllocator &allocator,
@@ -186,6 +188,9 @@ struct ObSelectIntoItem
   common::ObCollationType cs_type_;
   int64_t buffer_size_;
   common::ObString external_properties_;
+  // The first line of the exported file when the csv option PARSE_HEADER is
+  // set, it holds the names of the exported columns.
+  common::ObString header_line_;
 
   static const char* const DEFAULT_FIELD_TERM_STR;
   static const char* const DEFAULT_LINE_TERM_STR;

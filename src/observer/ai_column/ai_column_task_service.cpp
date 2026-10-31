@@ -340,7 +340,9 @@ void AiColumnTaskService::run1()
   lib::set_thread_name("AIColumn");
   share::AiColumnContext::WorkerScope guard;
   ObSqlString owner;
-  int ret = owner.assign_fmt("%s-%ld-%lu", to_cstring(GCTX.self_addr()),
+  char self_addr_buf[MAX_IP_PORT_SQL_LENGTH] = {};
+  const int64_t self_addr_len = GCTX.self_addr().to_string(self_addr_buf, sizeof(self_addr_buf));
+  int ret = owner.assign_fmt("%.*s-%ld-%lu", static_cast<int>(self_addr_len), self_addr_buf,
                             ObTimeUtility::current_time(), get_thread_idx());
   while (OB_SUCC(ret) && !has_set_stop()) {
     bool found = false;

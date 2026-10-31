@@ -3548,6 +3548,7 @@ _SQL_RUNTIME_GROUP_OBLIB_DEPS = {
         "//src/oblib:oblib_rpc",
         "//src/oblib:oblib_rpc_transport_services",
     ],
+    "ob_sql_engine_file_table_0": [],
 }
 
 def sql_runtime_group_oblib_deps(groups, base = {}):

@@ -30,6 +30,7 @@
 #include "sql/optimizer/ob_log_expr_values.h"
 #include "sql/optimizer/ob_log_function_table.h"
 #include "sql/optimizer/ob_log_json_table.h"
+#include "sql/optimizer/ob_log_file_table.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/optimizer/ob_log_subplan_filter.h"
 #include "sql/optimizer/ob_log_subplan_scan.h"
@@ -96,6 +97,7 @@
 #include "sql/engine/basic/ob_select_into_op.h"
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/basic/ob_json_table_op.h"
+#include "sql/engine/basic/ob_file_table_op.h"
 #include "sql/engine/dml/ob_table_insert_op.h"
 #include "sql/engine/basic/ob_stat_collector_op.h"
 #include "sql/engine/opt_statistics/ob_optimizer_stats_gathering_op.h"
@@ -5478,15 +5480,20 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       }
     }
     if (OB_SUCC(ret)) {
-      spec.into_type_ = op.get_into_type();
-      spec.is_optional_ = op.get_is_optional();
-      spec.is_single_ = op.get_is_single();
-      spec.max_file_size_ = op.get_max_file_size();
-      spec.buffer_size_ = op.get_buffer_size();
-      spec.cs_type_ = op.get_cs_type();
-      spec.parallel_ = op.get_parallel();
-      spec.is_overwrite_ = op.get_is_overwrite();
-      spec.plan_->need_drive_dml_query_ = true;
+      const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(op.get_plan()->get_stmt());
+      if (NULL != select_stmt && NULL != select_stmt->get_select_into()
+          && OB_FAIL(ob_write_string(alloc, select_stmt->get_select_into()->header_line_, spec.header_))) {
+      } else {
+        spec.into_type_ = op.get_into_type();
+        spec.is_optional_ = op.get_is_optional();
+        spec.is_single_ = op.get_is_single();
+        spec.max_file_size_ = op.get_max_file_size();
+        spec.buffer_size_ = op.get_buffer_size();
+        spec.cs_type_ = op.get_cs_type();
+        spec.parallel_ = op.get_parallel();
+        spec.is_overwrite_ = op.get_is_overwrite();
+        spec.plan_->need_drive_dml_query_ = true;
+      }
     }
   }
   return ret;
@@ -5532,7 +5539,107 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   return ret;
 }
 
-int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
+
+int ObStaticEngineCG::generate_spec(ObLogFileTable &op, ObFileTableSpec &spec, const bool in_root_job)
+{
+  UNUSED(in_root_job);
+  fprintf(stderr, "[file table] generate_spec, output exprs=%d\n", op.get_output_exprs().count());
+  int ret = OB_SUCCESS;
+  ObIAllocator &alloc = phy_plan_->get_allocator();
+  const ObFileTableDef *file_def = op.get_file_table_def();
+  if (OB_ISNULL(file_def)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(spec.column_exprs_.init(file_def->column_types_.count()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(spec.column_types_.init(file_def->column_types_.count()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    spec.format_ = static_cast<int32_t>(file_def->format_);
+    spec.has_header_ = file_def->has_header_;
+    spec.sample_size_ = file_def->sample_size_;
+    // The strings of the specification live in the allocator of the plan.
+    char *path_buf = static_cast<char *>(alloc.alloc(file_def->path_.length() + 1));
+    char *delimiter_buf = static_cast<char *>(alloc.alloc(file_def->delimiter_.length() + 1));
+    char *quote_buf = static_cast<char *>(alloc.alloc(file_def->quote_.length() + 1));
+    char *escape_buf = static_cast<char *>(alloc.alloc(file_def->escape_.length() + 1));
+    char *null_buf = static_cast<char *>(alloc.alloc(file_def->null_string_.length() + 1));
+    if (OB_ISNULL(path_buf) || OB_ISNULL(delimiter_buf) || OB_ISNULL(quote_buf)
+        || OB_ISNULL(escape_buf) || OB_ISNULL(null_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (!file_def->path_.empty()) {
+        MEMCPY(path_buf, file_def->path_.ptr(), file_def->path_.length());
+      }
+      path_buf[file_def->path_.length()] = '\0';
+      spec.path_.assign_ptr(path_buf, file_def->path_.length());
+      if (!file_def->delimiter_.empty()) {
+        MEMCPY(delimiter_buf, file_def->delimiter_.ptr(), file_def->delimiter_.length());
+      }
+      delimiter_buf[file_def->delimiter_.length()] = '\0';
+      spec.delimiter_.assign_ptr(delimiter_buf, file_def->delimiter_.length());
+      if (!file_def->quote_.empty()) {
+        MEMCPY(quote_buf, file_def->quote_.ptr(), file_def->quote_.length());
+      }
+      quote_buf[file_def->quote_.length()] = '\0';
+      spec.quote_.assign_ptr(quote_buf, file_def->quote_.length());
+      if (!file_def->escape_.empty()) {
+        MEMCPY(escape_buf, file_def->escape_.ptr(), file_def->escape_.length());
+      }
+      escape_buf[file_def->escape_.length()] = '\0';
+      spec.escape_.assign_ptr(escape_buf, file_def->escape_.length());
+      if (!file_def->null_string_.empty()) {
+        MEMCPY(null_buf, file_def->null_string_.ptr(), file_def->null_string_.length());
+      }
+      null_buf[file_def->null_string_.length()] = '\0';
+      spec.null_string_.assign_ptr(null_buf, file_def->null_string_.length());
+    }
+  }
+  if (OB_SUCC(ret)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
+      if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObSEArray<ColumnItem, 16> column_items;
+    if (OB_ISNULL(op.get_stmt())
+        || OB_FAIL(op.get_stmt()->get_column_items(op.get_table_id(), column_items))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (column_items.count() != file_def->column_types_.count()) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < file_def->column_names_.count(); ++i) {
+      const ObString &name = file_def->column_names_.at(i);
+      const ColumnItem *matched = nullptr;
+      for (int64_t j = 0; OB_ISNULL(matched) && j < column_items.count(); ++j) {
+        if (ObCharset::case_insensitive_equal(name, column_items.at(j).column_name_)) {
+          matched = &column_items.at(j);
+        }
+      }
+      ObExpr *column_expr = nullptr;
+      if (OB_ISNULL(matched) || OB_ISNULL(matched->expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(mark_expr_self_produced(matched->expr_))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(generate_rt_expr(*matched->expr_, column_expr))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_ISNULL(column_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(spec.column_exprs_.push_back(column_expr))) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < file_def->column_types_.count(); ++i) {
+      if (OB_FAIL(spec.column_types_.push_back(file_def->column_types_.at(i)))) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
+  }
+  fprintf(stderr, "[file table] generate_spec ret=%d exprs=%ld types=%ld\n", ret, spec.column_exprs_.count(), spec.column_types_.count());
+  return ret;
+}int ObStaticEngineCG::generate_spec(ObLogJsonTable &op, ObJsonTableSpec &spec,
     const bool in_root_job)
 {
   UNUSED(in_root_job);
@@ -6123,6 +6230,10 @@ int ObStaticEngineCG::get_phy_op_type(ObLogicalOperator &log_op,
       type = PHY_JSON_TABLE;
       break;
     }
+    case log_op_def::LOG_FILE_TABLE: {
+      type = PHY_FILE_TABLE;
+      break;
+    }
     case log_op_def::LOG_MONITORING_DUMP: {
       type = PHY_MONITORING_DUMP;
       break;
@@ -6569,3 +6680,6 @@ int ObStaticEngineCG::generate_spec(ObLogExpand &op, ObExpandVecSpec &spec, cons
 
 } // end namespace sql
 } // end namespace oceanbase
+
+
+

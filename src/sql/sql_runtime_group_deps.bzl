@@ -87,6 +87,7 @@ _SQL_RUNTIME_SHARE_FREE_GROUPS = [
     'ob_sql_engine_vector_cmp_0',
     'ob_sql_engine_vector_fixed_0',
     'ob_sql_engine_vector_uniform_0',
+    'ob_sql_engine_file_table_0',
 ]
 
 _SQL_RUNTIME_SPARSE_SHARE_GROUPS = [

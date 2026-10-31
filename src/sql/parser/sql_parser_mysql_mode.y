@@ -248,6 +248,7 @@ END_P SET_VAR DELIMITER
         ON OPTIMIZE /*OPTIMIZER_COSTS*/ OPTION OPTIONALLY OR ORDER OUT OUTER OUTFILE
         PARTITION PRECISION PRIMARY PROCEDURE PURGE
         RANGE READ READS READ_WRITE REAL REFERENCES REGEXP RELEASE RENAME REPEAT REPLACE REQUIRE
+        READ_CSV READ_JSON READ_PARQUET
         RESIGNAL RESTRICT RETURN REVOKE RIGHT RLIKE
         SCHEMA SCHEMAS SECOND_MICROSECOND SELECT SENSITIVE SEPARATOR SET SHOW SIGNAL SMALLINT SPATIAL
         SPECIFIC SQL SQLEXCEPTION SQLSTATE SQLWARNING SQL_BIG_RESULT SQL_CALC_FOUND_ROWS
@@ -293,7 +294,7 @@ END_P SET_VAR DELIMITER
         FOUND FORK FREEZE FREQUENCY FUNCTION FOLLOWING FLASHBACK FULL FRAGMENTATION FROZEN FILE_ID FILTER
         FIELD_OPTIONALLY_ENCLOSED_BY FIELD_DELIMITER FIELD_ENCLOSED_BY FILE_EXTENSION
 
-        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
+        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GLOB GRANTS GROUP_CONCAT GROUPING
         GLOBAL_ALIAS
 
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
@@ -503,6 +504,7 @@ END_P SET_VAR DELIMITER
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> file_table_expr file_table_arg_list file_table_arg
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -10879,6 +10881,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | hybrid_search_expr
 {
   $$ = $1;
@@ -17519,6 +17525,128 @@ JSON '(' column_name ')' STORE AS '(' lob_storage_parameters ')'
 }
 ;
 
+
+/**
+ * The table functions that read a local file.
+ *
+ * read_csv, read_json and read_parquet expose the content of a file as a
+ * table, glob lists the files that match a pattern.  The arguments are either
+ * positional or named, a named argument is written as name = value.
+ */
+file_table_expr:
+READ_CSV '(' file_table_arg_list ')'
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 0;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, NULL);
+}
+| READ_CSV '(' file_table_arg_list ')' relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 0;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $5);
+}
+| READ_CSV '(' file_table_arg_list ')' AS relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 0;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $6);
+}
+| READ_JSON '(' file_table_arg_list ')'
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, NULL);
+}
+| READ_JSON '(' file_table_arg_list ')' relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $5);
+}
+| READ_JSON '(' file_table_arg_list ')' AS relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $6);
+}
+| READ_PARQUET '(' file_table_arg_list ')'
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 2;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, NULL);
+}
+| READ_PARQUET '(' file_table_arg_list ')' relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 2;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $5);
+}
+| READ_PARQUET '(' file_table_arg_list ')' AS relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 2;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $6);
+}
+| GLOB '(' file_table_arg_list ')'
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, NULL);
+}
+| GLOB '(' file_table_arg_list ')' relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $5);
+}
+| GLOB '(' file_table_arg_list ')' AS relation_name
+{
+  ParseNode *format_node = NULL;
+  malloc_terminal_node(format_node, result->malloc_pool_, T_INT);
+  format_node->value_ = 3;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, format_node, $3, $6);
+}
+;
+
+file_table_arg_list:
+file_table_arg
+{
+  malloc_list_node($$, result->malloc_pool_, T_EXPR_LIST, 2, 1, $1);
+}
+| file_table_arg_list ',' file_table_arg
+{
+  // The path comes first and once, every further argument is named.  A second
+  // positional argument is a syntax error, like an unknown keyword.
+  if (NULL == $3 || T_FILE_TABLE_NAMED_ARG != $3->type_) {
+    yyerror(&@3, result, "a file table takes one path and named options only\n");
+    YYABORT_PARSE_SQL_ERROR;
+  }
+  push_back_list(result->malloc_pool_, result, $$, $1, $3);
+}
+;
+
+file_table_arg:
+simple_expr
+{
+  $$ = $1;
+}
+| column_name COMP_EQ simple_expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_NAMED_ARG, 2, $1, $3);
+}
+;
 unnest_expr:
 UNNEST '(' simple_expr_list ')' 
 {

@@ -325,6 +325,27 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
                                                                 col_name,
                                                                 is_exist))) {
     }
+  } else if (table_item.is_file_table()) {
+    ObArray<ColumnItem> file_columns;
+    if (OB_ISNULL(dml_stmt_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(dml_stmt_->get_column_items(table_item.table_id_, file_columns))) {
+    } else {
+      fprintf(stderr, "[file table] namespace item=%p table_id=%lu object=%.*s column=%.*s count=%ld\n",
+              &table_item, table_item.table_id_, table_item.get_object_name().length(),
+              table_item.get_object_name().ptr(), col_name.length(), col_name.ptr(),
+              file_columns.count());
+      for (int64_t i = 0; OB_SUCC(ret) && i < file_columns.count(); ++i) {
+        fprintf(stderr, "[file table] namespace candidate[%ld]=%.*s compare=%d\n", i,
+                file_columns.at(i).column_name_.length(), file_columns.at(i).column_name_.ptr(),
+                ObCharset::case_insensitive_equal(file_columns.at(i).column_name_, col_name));
+        if (!is_exist && ObCharset::case_insensitive_equal(file_columns.at(i).column_name_, col_name)) {
+          is_exist = true;
+        }
+      }
+      fprintf(stderr, "[file table] namespace result table_id=%lu column=%.*s exists=%d\n",
+              table_item.table_id_, col_name.length(), col_name.ptr(), is_exist);
+    }
   } else if (table_item.is_values_table()) {
     ObSEArray<ObColumnRefRawExpr *, 4> values_desc;
     if (OB_ISNULL(dml_stmt_)) {
@@ -529,3 +550,6 @@ int ObColumnNamespaceChecker::check_rowid_existence_in_joined_table(const ObSQLS
 
 }  // namespace sql
 }  // namespace oceanbase
+
+
+

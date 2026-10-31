@@ -71,7 +71,8 @@ public:
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
-      external_properties_(alloc)
+      external_properties_(alloc),
+      header_()
   {
   }
 
@@ -91,6 +92,8 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  // The header line written before the rows, empty when no header is needed.
+  common::ObString header_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -123,6 +126,7 @@ public:
       shared_buf_len_(0),
       use_shared_buf_(false),
       has_compress_(false),
+      header_written_(false),
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
@@ -288,6 +292,7 @@ private:
   int64_t shared_buf_len_;
   bool use_shared_buf_;
   bool has_compress_;
+  bool header_written_;
   ObExternalFileFormat external_properties_;
   ObExternalFileFormat::FormatType format_type_;
   uint32_t block_id_;
