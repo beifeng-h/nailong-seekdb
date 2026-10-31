@@ -1328,47 +1328,49 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
     const int64_t table_ids_size /*= 0 */)
 {
   int ret = OB_SUCCESS;
-  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-    ObMySQLResult *result = NULL;
-    ObSqlString sql;
-    const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+  {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      ObSqlString sql;
+      const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
     
-    if (INT64_MAX == schema_version) {
-      if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_SQL, OB_ALL_COLUMN_TNAME,
-                                 OB_INVALID_RUNTIME_ID))) {
-      } else {
-        if (NULL != table_ids && table_ids_size > 0) {
-          if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
-          } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+      if (INT64_MAX == schema_version) {
+        if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_SQL, OB_ALL_COLUMN_TNAME,
+                                   OB_INVALID_RUNTIME_ID))) {
+        } else {
+          if (NULL != table_ids && table_ids_size > 0) {
+            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
+            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+            }
+          }
+          if (FAILEDx(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID"))) {
           }
         }
-        if (FAILEDx(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID"))) {
-        }
-      }
-    } else {
-      if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_HISTORY_SQL, OB_ALL_COLUMN_HISTORY_TNAME,
-                                 OB_INVALID_RUNTIME_ID))) {
       } else {
-        if (NULL != table_ids && table_ids_size > 0) {
-          if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
-          } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+        if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_HISTORY_SQL, OB_ALL_COLUMN_HISTORY_TNAME,
+                                   OB_INVALID_RUNTIME_ID))) {
+        } else {
+          if (NULL != table_ids && table_ids_size > 0) {
+            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
+            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+            }
+          }
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(sql.append_fmt(" AND SCHEMA_VERSION <= %ld", schema_version))) {
+          } else if (OB_FAIL(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID, SCHEMA_VERSION"))) {
           }
         }
       }
-      if (OB_SUCC(ret)) {
-        if (OB_FAIL(sql.append_fmt(" AND SCHEMA_VERSION <= %ld", schema_version))) {
-        } else if (OB_FAIL(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID, SCHEMA_VERSION"))) {
-        }
-      }
-    }
 
-    if (OB_SUCC(ret)) {
-      const bool check_deleted = (INT64_MAX != schema_version);
-      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
-      if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
-      } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema_array))) {
+      if (OB_SUCC(ret)) {
+        const bool check_deleted = (INT64_MAX != schema_version);
+        DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+        if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+        } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema_array))) {
+        }
       }
     }
   }
@@ -4234,24 +4236,26 @@ int ObSchemaServiceSQLImpl::fetch_column_info(const ObRefreshSchemaStatus &schem
                                               ObTableSchema *&table_schema)
 {
   int ret = OB_SUCCESS;
-  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-    ObMySQLResult *result = NULL;
-    ObSqlString sql;
-    const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+  {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      ObSqlString sql;
+      const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
     
-    if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_HISTORY_SQL, OB_ALL_COLUMN_HISTORY_TNAME,
-                               OB_INVALID_RUNTIME_ID))) {
-    } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu and schema_version <= %ld"
-                                      " ORDER BY TABLE_ID, COLUMN_ID, SCHEMA_VERSION",
-                                      table_id,
-                                      schema_version))) {
-    } else {
-      const bool check_deleted = true;
-      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
-      if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
-      } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema))) {
+      if (OB_FAIL(sql.append_fmt(FETCH_ALL_COLUMN_HISTORY_SQL, OB_ALL_COLUMN_HISTORY_TNAME,
+                                 OB_INVALID_RUNTIME_ID))) {
+      } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu and schema_version <= %ld"
+                                        " ORDER BY TABLE_ID, COLUMN_ID, SCHEMA_VERSION",
+                                        table_id,
+                                        schema_version))) {
+      } else {
+        const bool check_deleted = true;
+        DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+        if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+        } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema))) {
+        }
       }
     }
   }
