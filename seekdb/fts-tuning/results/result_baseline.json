@@ -1,0 +1,64 @@
+{
+  "config": {
+    "batch": 1000,
+    "db": "fts_bench",
+    "host": "127.0.0.1",
+    "out": "/opt/ftsbench/bench/../results/result_baseline.json",
+    "password": "",
+    "phases": "setup,load,build,load_fts,query,query_topk",
+    "port": 2882,
+    "queries": 300,
+    "query_table": "bench_main",
+    "regress": "/opt/ftsbench/bench/../results/regress_baseline.tsv",
+    "rows": 100000,
+    "seed": 20261031,
+    "tag": "baseline",
+    "threads": 1,
+    "timeout": 600.0,
+    "user": "root"
+  },
+  "results": {
+    "build": {
+      "copy_s": 0.426,
+      "index_build_s": 25.847,
+      "rows_per_s": 3869.0
+    },
+    "load_fts": {
+      "load_s": 41.4,
+      "rows_per_s": 2415.4
+    },
+    "load_stage": {
+      "db_s": 0.824,
+      "rows": 100000,
+      "rows_per_s": 121401.7,
+      "wall_s": 4.654
+    },
+    "query": {
+      "count": 300,
+      "matched_rows_total": 17629778,
+      "max_ms": 483.702,
+      "mean_ms": 280.735,
+      "min_ms": 0.126,
+      "p50_ms": 329.377,
+      "p90_ms": 469.944,
+      "p99_ms": 476.68,
+      "qps": 3.56,
+      "threads": 1,
+      "total_s": 84.2204,
+      "wall_s": 102.063
+    },
+    "query_topk": {
+      "count": 300,
+      "matched_rows_total": 2890,
+      "max_ms": 34.006,
+      "mean_ms": 10.826,
+      "min_ms": 0.1,
+      "p50_ms": 8.51,
+      "p90_ms": 25.657,
+      "p99_ms": 33.807,
+      "qps": 92.37,
+      "total_s": 3.2479
+    }
+  },
+  "tag": "baseline"
+}
