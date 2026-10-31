@@ -1971,8 +1971,8 @@ int ObDDLResolver::resolve_ai_columns(ObTableSchema &table_schema)
         for (int64_t j = 0; OB_SUCC(ret) && j < hidden.count(); ++j) {
           ObColumnSchemaV2 &aux = hidden.at(j);
           if (OB_FAIL(check_default_value(aux.get_cur_default_value(), session_info_->get_tz_info_wrap(),
-              NULL, *allocator_, table_schema, aux, gen_exprs, session_info_->get_sql_mode(),
-              schema_checker_, params_.srs_provider_, params_.lob_read_service_))) {
+              NULL, *allocator_, table_schema, hidden, aux, gen_exprs, session_info_->get_sql_mode(),
+              session_info_, schema_checker_, params_.srs_provider_, params_.lob_read_service_))) {
           } else if (OB_FAIL(table_schema.add_column(aux))) {
           }
         }
