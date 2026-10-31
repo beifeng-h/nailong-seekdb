@@ -308,6 +308,10 @@ public:
       const ObConstraint &cst);
 
 private:
+  int write_ai_column_metadata(common::ObISQLClient &sql_client,
+                               const ObColumnSchemaV2 &column,
+                               int64_t definition_version,
+                               bool is_deleted = false);
   // just modify __all_core_table/__all_table/__all_column/__all_table_history/__all_column_history/__all_ddl_operation
   int inner_create_sys_table(ObTableSchema &table,
       ObSchemaOperation &opt,

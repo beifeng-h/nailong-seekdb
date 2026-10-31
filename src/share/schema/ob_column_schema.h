@@ -70,7 +70,11 @@ int assign(const ObColumnSchemaV2 &src_schema);
   
   inline void set_table_id(const uint64_t id) { table_id_ = id; }
   inline void set_column_id(const uint64_t id) { column_id_ = id; }
-  inline void set_schema_version(const int64_t schema_version) { schema_version_ = schema_version; }
+  inline void set_schema_version(const int64_t schema_version)
+  {
+    schema_version_ = schema_version;
+    if (is_ai_column() && ai_definition_version_ <= 0) { ai_definition_version_ = schema_version; }
+  }
   inline void set_rowkey_position(const int64_t rowkey_position) { rowkey_position_ = rowkey_position; }
   inline void set_order_in_rowkey(const common::ObOrderType order_in_rowkey) { order_in_rowkey_ = order_in_rowkey; }
   inline void set_udt_set_id(const uint64_t id) { udt_set_id_ = id; }
@@ -240,6 +244,22 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_cte_generated_column() const { return column_flags_ & CTE_GENERATED_COLUMN_FLAG; }
   inline bool is_default_expr_v2_column() const { return column_flags_ & DEFAULT_EXPR_V2_COLUMN_FLAG; }
   inline bool is_generated_column() const { return (is_virtual_generated_column() || is_stored_generated_column()); }
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline const common::ObString &get_ai_expr() const { return ai_expr_; }
+  inline const common::ObString &get_ai_normalized_expr() const { return ai_normalized_expr_; }
+  inline int64_t get_ai_max_retries() const { return ai_max_retries_; }
+  inline uint64_t get_ai_state_column_id() const { return ai_state_column_id_; }
+  inline uint64_t get_ai_request_column_id() const { return ai_request_column_id_; }
+  inline uint64_t get_ai_result_spec_column_id() const { return ai_result_spec_column_id_; }
+  inline int64_t get_ai_definition_version() const { return ai_definition_version_; }
+  inline const common::ObIArray<uint64_t> &get_ai_dependency_column_ids() const { return ai_dependency_column_ids_; }
+  inline int set_ai_expr(const common::ObString &expr) { return deep_copy_str(expr, ai_expr_); }
+  inline int set_ai_normalized_expr(const common::ObString &expr) { return deep_copy_str(expr, ai_normalized_expr_); }
+  inline void set_ai_max_retries(int64_t retries) { ai_max_retries_ = retries; }
+  inline void set_ai_hidden_column_ids(uint64_t state, uint64_t request, uint64_t result_spec)
+  { ai_state_column_id_ = state; ai_request_column_id_ = request; ai_result_spec_column_id_ = result_spec; }
+  inline void set_ai_definition_version(int64_t version) { ai_definition_version_ = version; }
+  int set_ai_dependency_column_ids(const common::ObIArray<uint64_t> &ids);
   inline bool is_generated_column_using_udf() const { return /*is_generated_column() && global index table clean the virtual gen col flag*/ !!(column_flags_ & GENERATED_COLUMN_UDF_EXPR); }
   // to check whether storing column in index table is specified by user.
   inline bool is_user_specified_storing_column() const { return column_flags_ & USER_SPECIFIED_STORING_COLUMN_FLAG; }
@@ -398,6 +418,14 @@ private:
   ObSkipIndexColumnAttr skip_index_attr_;
   int64_t lob_chunk_size_;
   share::ObLocalSessionVar local_session_vars_;
+  common::ObString ai_expr_;
+  common::ObString ai_normalized_expr_;
+  int64_t ai_max_retries_;
+  uint64_t ai_state_column_id_;
+  uint64_t ai_request_column_id_;
+  uint64_t ai_result_spec_column_id_;
+  int64_t ai_definition_version_;
+  common::ObArrayHelper<uint64_t> ai_dependency_column_ids_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

@@ -3529,6 +3529,7 @@ int ObAlterTableResolver::resolve_alter_table_column_definition(AlterColumnSchem
               false,
               false,
               allow_has_default))) {
+  } else if (column.is_ai_column() && OB_FAIL(resolve_ai_column(column, *table_schema_))) {
   } else { // add column level constraint
     add_or_modify_check_cst_times_ += alter_table_schema.get_constraint_count() - cst_cnt;
   }

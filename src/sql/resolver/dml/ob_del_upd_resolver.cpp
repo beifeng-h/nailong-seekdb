@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_del_upd_resolver.h"
+#include "share/ai_service/ai_column_context.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/resolver/dml/ob_insert_stmt.h"
@@ -33,6 +34,36 @@ using namespace share::schema;
 using namespace pl;
 namespace sql
 {
+namespace
+{
+bool ai_control_column(const ObTableSchema &table, uint64_t column_id)
+{
+  bool found = false;
+  for (auto it = table.column_begin(); !found && it != table.column_end(); ++it) {
+    const ObColumnSchemaV2 *column = *it;
+    if (OB_NOT_NULL(column) && column->is_ai_column()) {
+      found = column_id == column->get_column_id()
+          || column_id == column->get_ai_state_column_id()
+          || column_id == column->get_ai_request_column_id();
+    }
+  }
+  return found;
+}
+
+bool ai_retry_spec_column(const ObTableSchema &table, uint64_t column_id)
+{
+  bool found = false;
+  for (auto it = table.column_begin(); !found && it != table.column_end(); ++it) {
+    const ObColumnSchemaV2 *column = *it;
+    found = OB_NOT_NULL(column) && column->is_ai_column()
+        && column_id == column->get_ai_result_spec_column_id()
+        && share::AiColumnContext::is_retry_column(table.get_table_id(), column->get_column_id());
+  }
+  return found;
+}
+
+}
+
 
 int ObTableAssignment::expand_expr(ObRawExprFactory &expr_factory,
                                    const ObIArray<ObAssignment> &assigns,
@@ -129,7 +160,16 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         ObRawExpr *expr = value_list.at(i);
         bool is_generated_column = true;
         // Mysql only allows updating generated columns to their default value
-        if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
+        if ((ref_expr->get_column_flags() & AI_COLUMN_FLAG)
+            && !share::AiColumnContext::is_worker_sql()
+            && !share::AiColumnContext::is_retry_column(table->get_base_table_item().ref_id_,
+                                                       ref_expr->get_column_id())
+            && (T_UPDATE_SCOPE == scope || is_resolve_insert_update_ || T_DEFAULT != expr->get_expr_type())) {
+          ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+          LOG_USER_ERROR(OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN,
+                         ref_expr->get_column_name().length(), ref_expr->get_column_name().ptr(),
+                         ref_expr->get_table_name().length(), ref_expr->get_table_name().ptr());
+        } else if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
         } else {
           if (T_DEFAULT == expr->get_expr_type()) {
             ObDefaultValueUtils utils(stmt, &params_, this);
@@ -533,6 +573,9 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                  table_item->table_id_,
                                                  trigger_exist,
                                                  *column_schema,
+                                                 !share::AiColumnContext::is_worker_sql()
+                                                   && (ai_control_column(*table_schema, column_id)
+                                                       || ai_retry_spec_column(*table_schema, column_id)),
                                                  need_assigned))) {
         } else if (FALSE_IT(need_assigned = need_assigned || 
                                             ((column_schema->is_vec_hnsw_vid_column() ||
@@ -563,7 +606,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                            col_item->expr_->get_dependant_expr(),
                                            assignment.expr_))) {
               }
-            } else if (trigger_exist) {
+            } else if (trigger_exist || ai_control_column(*table_schema, column_id)) {
               assignment.expr_ = col_item->expr_;
             }
             if (OB_FAIL(ret)) {
@@ -573,7 +616,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                                       *col_item->get_expr(),
                                                                       assignment.expr_,
                                                                       session_info_))) {
-            } else if (trigger_exist &&
+            } else if ((trigger_exist || ai_control_column(*table_schema, column_id)) &&
                       OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, assignment.expr_, assignment.expr_))) {
             } else {
               // 1. set geo sub type to cast mode to column covert expr when update
@@ -704,6 +747,7 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
                                             uint64_t table_id,
                                             bool before_update_row_trigger_exist,
                                             const ObColumnSchemaV2 &column,
+                                            bool ai_control,
                                             bool &need_assign)
 {
   need_assign = false;
@@ -712,6 +756,11 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
   ObDMLStmt *stmt = get_stmt();
   if (OB_ISNULL(stmt)) {
     ret = OB_NOT_INIT;
+  } else if (ai_control) {
+    if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
+    } else {
+      need_assign = !exist;
+    }
   } else if (column.is_generated_column()) {
     if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
     } else if (!exist) {
@@ -1097,8 +1146,12 @@ int ObDelUpdResolver::add_all_column_to_updatable_view(ObDMLStmt &stmt,
 bool ObDelUpdResolver::need_all_columns(const ObTableSchema &table_schema,
                                         const int64_t binlog_row_image)
 {
+  bool has_ai_columns = false;
+  for (auto it = table_schema.column_begin(); !has_ai_columns && it != table_schema.column_end(); ++it) {
+    has_ai_columns = OB_NOT_NULL(*it) && (*it)->is_ai_column();
+  }
   // Returns true for MINIMAL too because the optimizer currently needs full rows.
-  return (table_schema.is_table_without_pk() ||
+  return (has_ai_columns || table_schema.is_table_without_pk() ||
           table_schema.get_foreign_key_infos().count() > 0 ||
           table_schema.get_trigger_list().count() > 0 ||
           table_schema.has_check_constraint() ||
@@ -2340,6 +2393,12 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
                 }
               } else if (OB_FAIL(utils.resolve_default_expr(*column_item, expr, T_INSERT_SCOPE))) {
               }
+            } else if ((column_expr->get_column_flags() & AI_COLUMN_FLAG)
+                       && !share::AiColumnContext::is_worker_sql()) {
+              ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+              LOG_USER_ERROR(OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN,
+                             column_expr->get_column_name().length(), column_expr->get_column_name().ptr(),
+                             column_expr->get_table_name().length(), column_expr->get_table_name().ptr());
             } else if (OB_FAIL(check_basic_column_generated(column_expr, del_upd_stmt,
                                                             is_generated_column))) {
             } else if (is_generated_column) {

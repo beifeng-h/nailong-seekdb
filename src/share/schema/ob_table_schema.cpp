@@ -2891,6 +2891,27 @@ int ObTableSchema::convert_column_ids_for_ddl(const ObHashMap<uint64_t, uint64_t
   } else {
     // index, foreign key will be converted when manually rebuilt
   }
+  for (int64_t i = 0; OB_SUCC(ret) && i < column_cnt_; ++i) {
+    ObColumnSchemaV2 *column = column_array_[i];
+    if (NULL != column && column->is_ai_column()) {
+      uint64_t state = OB_INVALID_ID, request = OB_INVALID_ID, spec = OB_INVALID_ID;
+      ObSEArray<uint64_t, 4> dependencies;
+      if (OB_FAIL(column_id_map.get_refactored(column->get_ai_state_column_id(), state))) {
+      } else if (OB_FAIL(column_id_map.get_refactored(column->get_ai_request_column_id(), request))) {
+      } else if (OB_FAIL(column_id_map.get_refactored(column->get_ai_result_spec_column_id(), spec))) {
+      }
+      for (int64_t j = 0; OB_SUCC(ret) && j < column->get_ai_dependency_column_ids().count(); ++j) {
+        uint64_t id = OB_INVALID_ID;
+        if (OB_FAIL(column_id_map.get_refactored(column->get_ai_dependency_column_ids().at(j), id))) {
+        } else if (OB_FAIL(dependencies.push_back(id))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        column->set_ai_hidden_column_ids(state, request, spec);
+        ret = column->set_ai_dependency_column_ids(dependencies);
+      }
+    }
+  }
   return ret;
 }
 

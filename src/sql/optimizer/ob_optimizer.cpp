@@ -30,6 +30,47 @@ using namespace oceanbase::common;
 
 namespace
 {
+int disable_parallel_ai_column_writes(const ObDMLStmt &stmt,
+    const ObSQLSessionInfo &session, ObOptimizerContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  const ObDelUpdStmt *dml = nullptr;
+  if (!stmt.is_dml_write_stmt()
+      || (session.is_inner() && session.get_ddl_info().is_ddl())) {
+    // Native offline DDL builds its own outbox when the copied table takes effect.
+  } else if (nullptr == (dml = dynamic_cast<const ObDelUpdStmt *>(&stmt))) {
+  } else {
+    share::schema::ObSchemaGetterGuard *schema = ctx.get_schema_guard();
+    ObSEArray<const ObDmlTableInfo *, 2> targets;
+    bool has_ai = false;
+    if (OB_ISNULL(schema)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(dml->get_dml_table_infos(targets))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !has_ai && i < targets.count(); ++i) {
+      const share::schema::ObTableSchema *table = nullptr;
+      if (OB_ISNULL(targets.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_INVALID_ID == targets.at(i)->ref_table_id_) {
+      } else if (OB_FAIL(schema->get_table_schema(targets.at(i)->ref_table_id_, table))) {
+      } else if (OB_ISNULL(table)) {
+        ret = OB_SCHEMA_ERROR;
+      } else {
+        for (auto it = table->column_begin(); !has_ai && it != table->column_end(); ++it) {
+          has_ai = nullptr != *it && (*it)->is_ai_column();
+        }
+      }
+    }
+    if (OB_SUCC(ret) && has_ai) {
+      // The outbox uses coordinator nested SQL after a row survives its write.
+      // Keep that native DML path; its source query may still use PX.
+      ctx.set_can_use_pdml(false);
+      ctx.set_can_use_parallel_das_dml(false);
+    }
+  }
+  return ret;
+}
+
 bool has_query_ref_expr(const ObRawExpr *expr)
 {
   bool bret = false;
@@ -697,6 +738,7 @@ int ObOptimizer::init_env_info(ObDMLStmt &stmt)
   } else if (OB_FAIL(check_pdml_enabled(stmt, *session_info))) {
   } else if (OB_FAIL(check_parallel_das_dml_enabled(stmt, *session_info))) {
   } else if (OB_FAIL(check_dml_parallel_mode())) {
+  } else if (OB_FAIL(disable_parallel_ai_column_writes(stmt, *session_info, ctx_))) {
   } else if (OB_FAIL(init_parallel_policy(stmt, *session_info))) {
   } else if (OB_FAIL(init_correlation_model(*session_info))) {
   } else if (OB_FAIL(opt_params.get_enum_sys_var(ObOptParamHint::ENABLE_OPTIMIZER_ROWGOAL,

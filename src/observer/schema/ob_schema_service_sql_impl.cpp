@@ -24,6 +24,7 @@
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "share/ob_sql_client_decorator.h"
+#include "common/json_type/ob_json_base.h"
 
 #define COMMON_SQL              "SELECT * FROM %s"
 #define COMMON_SCHEMA_SQL         "SELECT * FROM %s WHERE 1 = 1"
@@ -1368,6 +1369,91 @@ int ObSchemaServiceSQLImpl::fetch_all_column_info(
       } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema_array))) {
+      }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schema_array.count(); ++i) {
+    if (OB_FAIL(fetch_ai_column_info(schema_status, schema_version, sql_client, *table_schema_array.at(i)))) {
+    }
+  }
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::fetch_ai_column_info(const ObRefreshSchemaStatus &schema_status,
+    const int64_t schema_version, ObISQLClient &sql_client, ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  bool has_ai = false;
+  for (int64_t i = 0; !has_ai && i < table_schema.get_column_count(); ++i) {
+    has_ai = table_schema.get_column_schema_by_idx(i)->is_ai_column();
+  }
+  if (has_ai) {
+    ObArenaAllocator allocator("AiColSchema");
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObSqlString sql;
+      ObMySQLResult *result = NULL;
+      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, schema_status.snapshot_timestamp_);
+      if (OB_FAIL(sql.append_fmt("SELECT * FROM oceanbase.__all_ai_column_history "
+          "WHERE table_id=%lu AND definition_version<=%ld ORDER BY column_id,definition_version",
+          table_schema.get_table_id(), schema_version))) {
+      } else if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+      while (OB_SUCC(ret) && OB_SUCC(ret = result->next())) {
+        uint64_t column_id = OB_INVALID_ID;
+        bool deleted = false;
+        EXTRACT_INT_FIELD_MYSQL(*result, "column_id", column_id, uint64_t);
+        EXTRACT_INT_FIELD_MYSQL(*result, "is_deleted", deleted, bool);
+        ObColumnSchemaV2 *column = table_schema.get_column_schema(column_id);
+        if (OB_SUCC(ret) && NULL != column && column->is_ai_column() && !deleted) {
+          ObString original, normalized, dependency_json;
+          int64_t retries = 0, version = 0;
+          uint64_t state = 0, request = 0, spec = 0;
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "original_expr", original);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "normalized_expr", normalized);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, "dependency_column_ids", dependency_json);
+          EXTRACT_INT_FIELD_MYSQL(*result, "max_retries", retries, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "definition_version", version, int64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "state_column_id", state, uint64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "request_column_id", request, uint64_t);
+          EXTRACT_INT_FIELD_MYSQL(*result, "result_spec_column_id", spec, uint64_t);
+          ObIJsonBase *json = NULL;
+          ObSEArray<uint64_t, 4> dependencies;
+          if (OB_SUCC(ret) && OB_FAIL(ObJsonBaseFactory::get_json_base(&allocator,
+              dependency_json, ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, json))) {
+          } else if (OB_SUCC(ret) && (OB_ISNULL(json) || json->json_type() != ObJsonNodeType::J_ARRAY)) {
+            ret = OB_ERR_UNEXPECTED;
+          }
+          for (uint64_t j = 0; OB_SUCC(ret) && j < json->element_count(); ++j) {
+            ObIJsonBase *id = NULL;
+            if (OB_FAIL(json->get_array_element(j, id))) {
+            } else if (OB_ISNULL(id) || (id->json_type() != ObJsonNodeType::J_INT
+                && id->json_type() != ObJsonNodeType::J_UINT)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(dependencies.push_back(id->json_type() == ObJsonNodeType::J_UINT
+                ? id->get_uint() : static_cast<uint64_t>(id->get_int())))) {
+            }
+          }
+          if (OB_SUCC(ret) && OB_FAIL(column->set_ai_expr(original))) {
+          } else if (OB_SUCC(ret) && OB_FAIL(column->set_ai_normalized_expr(normalized))) {
+          } else if (OB_SUCC(ret) && OB_FAIL(column->set_ai_dependency_column_ids(dependencies))) {
+          }
+          if (OB_SUCC(ret)) {
+            column->set_ai_max_retries(retries);
+            column->set_ai_definition_version(version);
+            column->set_ai_hidden_column_ids(state, request, spec);
+          }
+        }
+      }
+      if (OB_ITER_END == ret) { ret = OB_SUCCESS; }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_column_count(); ++i) {
+      const ObColumnSchemaV2 *column = table_schema.get_column_schema_by_idx(i);
+      if (column->is_ai_column() && (column->get_ai_expr().empty()
+          || column->get_ai_normalized_expr().empty())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("AI column metadata missing for schema version", K(ret), K(schema_version), KPC(column));
       }
     }
   }
@@ -4168,6 +4254,9 @@ int ObSchemaServiceSQLImpl::fetch_column_info(const ObRefreshSchemaStatus &schem
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema))) {
       }
     }
+  }
+  if (OB_SUCC(ret) && NULL != table_schema
+      && OB_FAIL(fetch_ai_column_info(schema_status, schema_version, sql_client, *table_schema))) {
   }
   return ret;
 }

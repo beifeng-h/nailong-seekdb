@@ -20,11 +20,39 @@
 #include "sql/code_generator/ob_code_generator.h"
 #include "sql/code_generator/ob_static_engine_cg.h"
 #include "sql/engine/ob_physical_plan.h"
+#include "sql/resolver/dml/ob_update_stmt.h"
 
 namespace oceanbase
 {
 namespace sql
 {
+
+namespace
+{
+int collect_ai_column_references(const ObDMLStmt &stmt, ObPhysicalPlan &plan)
+{
+  int ret = common::OB_SUCCESS;
+  const ObQueryCtx *query = stmt.get_query_ctx();
+  if (query == nullptr) {
+    ret = common::OB_ERR_UNEXPECTED;
+  } else {
+    const auto &references = query->ai_column_references_;
+    const ObUpdateStmt *update = stmt.is_update_stmt() ? static_cast<const ObUpdateStmt *>(&stmt) : nullptr;
+    if (references.count() % 2 != 0) {
+      ret = common::OB_ERR_UNEXPECTED;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < references.count(); i += 2) {
+      const uint64_t table_id = references.at(i);
+      const uint64_t column_id = references.at(i + 1);
+      const bool retry_target = update != nullptr && update->get_ai_retry_table_id() == table_id
+          && update->get_ai_retry_column_id() == column_id;
+      if (!retry_target && OB_FAIL(plan.add_ai_column_reference(table_id, column_id))) {
+      }
+    }
+  }
+  return ret;
+}
+}
 
 int ObCodeGenerator::generate(const ObLogPlan &log_plan,
                               ObPhysicalPlan &phy_plan)
@@ -39,6 +67,9 @@ int ObCodeGenerator::generate(const ObLogPlan &log_plan,
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(generate_exprs(log_plan, phy_plan))) {
   } else if (OB_FAIL(generate_operators(log_plan, phy_plan))) {
+  } else if (log_plan.get_stmt() == nullptr) {
+    ret = common::OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(collect_ai_column_references(*log_plan.get_stmt(), phy_plan))) {
   }
 
   return ret;

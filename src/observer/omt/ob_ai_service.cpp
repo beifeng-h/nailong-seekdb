@@ -29,7 +29,7 @@ namespace omt
 {
 
 ObAiService::ObAiService()
-  : is_inited_(false)
+  : is_inited_(false), column_tasks_()
 {
 }
 
@@ -53,6 +53,7 @@ int ObAiService::init()
   int ret = OB_SUCCESS;
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
+  } else if (OB_FAIL(column_tasks_.init())) {
   } else {
     is_inited_ = true;
   }
@@ -61,7 +62,23 @@ int ObAiService::init()
 
 void ObAiService::destroy()
 {
+  column_tasks_.destroy();
   is_inited_ = false;
+}
+
+int ObAiService::start()
+{
+  return is_inited_ ? column_tasks_.start() : OB_NOT_INIT;
+}
+
+void ObAiService::stop()
+{
+  column_tasks_.stop();
+}
+
+void ObAiService::wait()
+{
+  column_tasks_.wait();
 }
 
 int ObAiService::get_ai_service_guard(ObAiServiceGuard &ai_service_guard)

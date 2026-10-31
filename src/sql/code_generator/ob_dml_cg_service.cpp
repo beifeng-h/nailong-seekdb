@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_CG
 #include "ob_dml_cg_service.h"
+#include "sql/resolver/dml/ob_update_stmt.h"
 #include "sql/code_generator/ob_static_engine_cg.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "sql/parser/ob_parser.h"
@@ -32,6 +33,18 @@ using namespace share;
 using namespace share::schema;
 namespace sql
 {
+namespace
+{
+bool dml_table_has_ai_columns(const ObTableSchema &schema)
+{
+  bool found = false;
+  for (auto it = schema.column_begin(); !found && it != schema.column_end(); ++it) {
+    found = OB_NOT_NULL(*it) && (*it)->is_ai_column();
+  }
+  return found;
+}
+}
+
 template <typename T>
 bool var_exist_in_array(const ObIArray<T> &array, const T &var, int32_t &idx)
 {
@@ -1345,7 +1358,7 @@ int ObDmlCgService::check_upd_need_all_columns(ObLogDelUpd &op,
   if (OB_ISNULL(session) || OB_ISNULL(schema_guard) || OB_ISNULL(table_schema)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(session->get_binlog_row_image(binlog_row_image))) {
-  } else if (binlog_row_image == ObBinlogRowImage::FULL) {
+  } else if (binlog_row_image == ObBinlogRowImage::FULL || dml_table_has_ai_columns(*table_schema)) {
     // full mode
     need_all_columns = true;
   } else if (!is_primary_index) {
@@ -1467,7 +1480,7 @@ int ObDmlCgService::check_del_need_all_columns(ObLogDelUpd &op,
   if (OB_ISNULL(session) || OB_ISNULL(schema_guard) || OB_ISNULL(table_schema)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(session->get_binlog_row_image(binlog_row_image))) {
-  } else if (binlog_row_image == ObBinlogRowImage::FULL) {
+  } else if (binlog_row_image == ObBinlogRowImage::FULL || dml_table_has_ai_columns(*table_schema)) {
     // full mode
     need_all_columns = true;
   } else if (table_schema->is_multivalue_index_aux()) {
@@ -2127,6 +2140,21 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
     }
   }
 
+  if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
+    const ObTableSchema *table = nullptr;
+    if (OB_FAIL(cg_.opt_ctx_->get_schema_guard()->get_table_schema(index_dml_info.ref_table_id_, table))) {
+    } else if (OB_ISNULL(table)) {
+      ret = OB_SCHEMA_ERROR;
+    } else {
+      dml_base_ctdef.has_ai_columns_ = dml_table_has_ai_columns(*table);
+      if (op.get_stmt()->is_update_stmt()) {
+        const ObUpdateStmt &update = static_cast<const ObUpdateStmt &>(*op.get_stmt());
+        if (update.get_ai_retry_table_id() == index_dml_info.ref_table_id_) {
+          dml_base_ctdef.ai_retry_column_id_ = update.get_ai_retry_column_id();
+        }
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
     // Mark the ctdef as a main-table operation.
     dml_base_ctdef.das_base_ctdef_.is_access_main_table_ = true;

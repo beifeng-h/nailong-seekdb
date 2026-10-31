@@ -33,6 +33,10 @@
 
 namespace oceanbase
 {
+namespace transaction
+{
+class ObTxReadSnapshot;
+}
 namespace common
 {
 class ObMySQLProxy;
@@ -524,6 +528,8 @@ public:
   bool is_sensitive_;    // whether it contains sensitive information, if so, do not record in sql_audit
   common::ObFixedArray<int64_t, common::ObIAllocator> multi_stmt_rowkey_pos_;
   ObRawExpr *snapshot_query_expr_;
+  // Borrowed only by the synchronous internal AI readiness probe.
+  const transaction::ObTxReadSnapshot *ai_column_read_snapshot_;
   ObSqlPlanKey plan_key_;
   bool is_execute_call_stmt_;
   bool is_text_ps_mode_;
@@ -585,7 +591,8 @@ public:
       injected_random_status_(false),
       ori_question_marks_count_(0),
       type_demotion_flag_(0),
-      has_hybrid_search_(false)
+      has_hybrid_search_(false),
+      ai_column_references_()
   {
   }
   TO_STRING_KV(N_PARAM_NUM, question_marks_count_,
@@ -629,6 +636,7 @@ public:
     filter_ds_stat_cache_.reuse();
     type_demotion_flag_ = 0;
     has_hybrid_search_ = false;
+    ai_column_references_.reset();
   }
 
   int64_t get_new_stmt_id() { return stmt_count_++; }
@@ -739,6 +747,8 @@ public:
     };
   };
   bool has_hybrid_search_;
+  // Original user references survive optimizer removal of empty subqueries.
+  common::ObSEArray<uint64_t, 8, common::ModulePageAllocator, true> ai_column_references_;
 };
 
 } /* ns sql*/

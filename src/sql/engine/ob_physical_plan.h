@@ -335,6 +335,8 @@ public:
   inline const ObExprFrameInfo &get_expr_frame_info() const { return expr_frame_info_; }
 
   const ObOpSpec *get_root_op_spec() const { return root_op_spec_; }
+  int add_ai_column_reference(uint64_t table_id, uint64_t column_id);
+  const common::ObIArray<uint64_t> &get_ai_column_references() const { return ai_column_references_; }
   void set_root_op_spec(ObOpSpec *spec) { root_op_spec_ = spec; is_new_engine_ = true; }
   inline bool need_consistent_snapshot() const { return need_consistent_snapshot_; }
   inline void set_need_consistent_snapshot(bool need_snapshot)
@@ -528,6 +530,7 @@ private:
 private:
   bool insertup_can_do_gts_opt_;
   int64_t px_worker_share_plan_enabled_;
+  common::ObSEArray<uint64_t, 8> ai_column_references_;
 };
 
 inline void ObPhysicalPlan::set_affected_last_insert_id(bool affected_last_insert_id)

@@ -19,6 +19,7 @@
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "ob_default_value_utils.h"
+#include "share/ai_service/ai_column_context.h"
 
 namespace oceanbase
 {
@@ -834,6 +835,13 @@ int ObInsertResolver::check_insert_select_field(ObInsertStmt &insert_stmt,
     const ObColumnRefRawExpr *value_desc = values_desc.at(i);
     if (OB_ISNULL(value_desc)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if ((value_desc->get_column_flags() & AI_COLUMN_FLAG)
+               && !share::AiColumnContext::is_worker_sql()
+               && !(session_info_->is_inner() && session_info_->get_ddl_info().is_ddl())) {
+      ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+      LOG_USER_ERROR(OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN,
+                     value_desc->get_column_name().length(), value_desc->get_column_name().ptr(),
+                     value_desc->get_table_name().length(), value_desc->get_table_name().ptr());
     } else if (OB_FAIL(ObDMLResolver::check_basic_column_generated(value_desc,
                                                                    &insert_stmt,
                                                                    is_generated_column))) {

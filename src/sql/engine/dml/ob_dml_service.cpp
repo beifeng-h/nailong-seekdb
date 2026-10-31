@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "config_bridge.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "sql/engine/dml/ai_column_dml.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "share/rc/ob_server_runtime.h"
 #include "sql/das/ob_das_insert_op.h"
@@ -629,6 +630,7 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
                                       ins_ctdef.is_single_value_,
                                       dml_op))) {
     } else if (OB_FAIL(check_filter_row(ins_ctdef, dml_op.get_eval_ctx(), is_skipped))) {
+    } else if (!is_skipped && OB_FAIL(AiColumnDml::prepare(ins_ctdef, dml_op, false))) {
     }
 
   }
@@ -827,6 +829,13 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
     ret = OB_ERR_ROW_IS_REFERENCED;
   }
 
+  if (OB_SUCC(ret) && !is_skipped && upd_ctdef.is_primary_index_
+      && (upd_rtdef.is_row_changed_ || upd_ctdef.ai_retry_column_id_ != OB_INVALID_ID)) {
+    if (OB_FAIL(AiColumnDml::prepare(upd_ctdef, dml_op, true))) {
+    } else if (upd_ctdef.has_ai_columns_) {
+      ret = check_row_whether_changed(upd_ctdef, upd_rtdef, dml_op.get_eval_ctx());
+    }
+  }
   if (OB_SUCC(ret) && !is_skipped) {
     LOG_DEBUG("process update row", K(ret), K(is_skipped), K(upd_ctdef), K(upd_rtdef),
                 "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
@@ -2165,6 +2174,10 @@ int ObDMLService::handle_after_processing_multi_row(ObDMLModifyRowsList *dml_mod
             }
           }
         }
+        // Store outbox rows only after the corresponding business row survived DAS/IGNORE.
+        if (OB_SUCC(ret)) {
+          ret = AiColumnDml::after_row(dml_ctdef, op, t_insert == dml_event, t_delete == dml_event);
+        }
         // process after row trigger
         if (OB_SUCC(ret) && dml_ctdef.trig_ctdef_.all_tm_points_.has_after_row()) {
           ObEvalCtx &eval_ctx = op.get_eval_ctx();
@@ -2216,6 +2229,9 @@ int ObDMLService::handle_after_processing_single_row(ObDMLModifyRowNode &modify_
         }
       } else if (OB_FAIL(ForeignKeyHandle::do_handle(op, dml_ctdef, dml_rtdef))) {
       }
+    }
+    if (OB_SUCC(ret)) {
+      ret = AiColumnDml::after_row(dml_ctdef, op, t_insert == dml_event, t_delete == dml_event);
     }
     if (OB_SUCC(ret) && OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
     }

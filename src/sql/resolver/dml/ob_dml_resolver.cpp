@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "share/ai_service/ai_column_context.h"
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
@@ -1832,6 +1833,8 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
                                              ColumnItem *&col_item,
                                              ObDMLStmt *stmt /* = NULL */)
 {
+  const bool ai_user_reference = !include_hidden;
+  include_hidden = include_hidden || share::AiColumnContext::is_worker_sql();
   int ret = OB_SUCCESS;
   ObColumnRefRawExpr *col_expr = NULL;
   ObSchemaGetterGuard *schema_guard = NULL;
@@ -1957,6 +1960,26 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
       } else if (OB_FAIL(col_expr->pull_relation_id())) {
       } else {
         col_item = stmt->get_column_item(stmt->get_column_size() - 1);
+      }
+    }
+  }
+  if (OB_SUCC(ret) && ai_user_reference && OB_NOT_NULL(col_item) && OB_NOT_NULL(col_item->expr_)
+      && (col_item->expr_->get_column_flags() & AI_COLUMN_FLAG)
+      && (stmt->is_select_stmt() || stmt->is_update_stmt() || stmt->is_delete_stmt())) {
+    ObQueryCtx *query_ctx = stmt->get_query_ctx();
+    if (OB_ISNULL(query_ctx)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      auto &references = query_ctx->ai_column_references_;
+      bool found = false;
+      for (int64_t i = 0; i + 1 < references.count() && !found; i += 2) {
+        found = references.at(i) == table_item.ref_id_ && references.at(i + 1) == col_item->column_id_;
+      }
+      if (!found) {
+        if (OB_FAIL(references.push_back(table_item.ref_id_))) {
+        } else if (OB_FAIL(references.push_back(col_item->column_id_))) {
+          references.pop_back();
+        }
       }
     }
   }

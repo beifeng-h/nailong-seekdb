@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_update_resolver.h"
+#include "share/ai_service/ai_column_context.h"
+#include <optional>
 
 namespace oceanbase
 {
@@ -25,7 +27,8 @@ using namespace share::schema;
 namespace sql
 {
 ObUpdateResolver::ObUpdateResolver(ObResolverParams &param)
-  : ObDelUpdResolver(param)
+  : ObDelUpdResolver(param),
+    ai_retry_state_column_name_()
 {
   param.contain_dml_ = true;
 }
@@ -39,6 +42,7 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   int ret = OB_SUCCESS;
   ObUpdateStmt *update_stmt = NULL;
   ObSEArray<ObTableAssignment, 2> tables_assign;
+  std::optional<share::AiColumnContext::RetryScope> retry_scope;
   if (T_UPDATE != parse_tree.type_
       || 3 > parse_tree.num_child_
       || OB_ISNULL(parse_tree.children_)
@@ -74,6 +78,14 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   if (OB_SUCC(ret)) {
     ParseNode *table_node = parse_tree.children_[TABLE];
     if (OB_FAIL(resolve_table_list(*table_node))) {
+    }
+  }
+
+  if (OB_SUCC(ret) && parse_tree.value_ == 1) {
+    if (OB_FAIL(resolve_ai_retry_target(parse_tree))) {
+    } else if (OB_FAIL(rewrite_ai_retry_status(parse_tree.children_[WHERE]))) {
+    } else {
+      retry_scope.emplace(update_stmt->get_ai_retry_table_id(), update_stmt->get_ai_retry_column_id());
     }
   }
 
@@ -149,6 +161,101 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     } else if (OB_FAIL(update_stmt->check_dml_source_from_join())) {
     } else if (OB_FAIL(check_safe_update_mode(update_stmt))) {
     } else { /*do nothing*/ }
+  }
+  return ret;
+}
+
+int ObUpdateResolver::resolve_ai_retry_target(const ParseNode &parse_tree)
+{
+  int ret = OB_SUCCESS;
+  ObUpdateStmt *stmt = get_update_stmt();
+  const ParseNode *assignments = parse_tree.children_[UPDATE_LIST];
+  const ObTableSchema *schema = NULL;
+  if (OB_ISNULL(stmt) || stmt->get_table_items().count() != 1
+      || OB_ISNULL(stmt->get_table_items().at(0))
+      || !stmt->get_table_items().at(0)->is_basic_table()
+      || OB_ISNULL(assignments) || assignments->num_child_ != 1
+      || OB_ISNULL(assignments->children_[0]) || assignments->children_[0]->num_child_ != 2) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column retry requires one base table and one AI column");
+  } else if (OB_FAIL(schema_checker_->get_table_schema(stmt->get_table_items().at(0)->ref_id_, schema))) {
+  } else if (OB_ISNULL(schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const ParseNode *ref = assignments->children_[0]->children_[0];
+    if (OB_ISNULL(ref) || ref->type_ != T_COLUMN_REF || ref->num_child_ != 3
+        || OB_ISNULL(ref->children_[2])) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ObString name(ref->children_[2]->str_len_, ref->children_[2]->str_value_);
+      const ObColumnSchemaV2 *column = schema->get_column_schema(name);
+      if (OB_ISNULL(column) || !column->is_ai_column() || column->is_hidden()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+      } else {
+        const ObColumnSchemaV2 *state = schema->get_column_schema(column->get_ai_state_column_id());
+        if (OB_ISNULL(state)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ob_write_string(*allocator_, state->get_column_name_str(), ai_retry_state_column_name_))) {
+        } else {
+          stmt->set_ai_retry_target(schema->get_table_id(), column->get_column_id());
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObUpdateResolver::rewrite_ai_retry_status(ParseNode *node)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == node || node->type_ == T_SELECT) {
+    // Subqueries keep their own column namespace.
+  } else if (node->type_ == T_COLUMN_REF && node->num_child_ == 3
+      && NULL == node->children_[0] && NULL == node->children_[1]
+      && NULL != node->children_[2] && !node->children_[2]->is_input_quoted_
+      && ObString(node->children_[2]->str_len_, node->children_[2]->str_value_).case_compare("status") == 0) {
+    node->children_[2]->str_value_ = ai_retry_state_column_name_.ptr();
+    node->children_[2]->str_len_ = ai_retry_state_column_name_.length();
+    node->str_value_ = ai_retry_state_column_name_.ptr();
+    node->str_len_ = ai_retry_state_column_name_.length();
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      ret = SMART_CALL(rewrite_ai_retry_status(node->children_[i]));
+    }
+  }
+  return ret;
+}
+
+int ObUpdateResolver::resolve_column_ref_expr(const ObQualifiedName &q_name, ObRawExpr *&real_ref_expr)
+{
+  int ret = OB_SUCCESS;
+  ObUpdateStmt *stmt = get_update_stmt();
+  if (OB_NOT_NULL(stmt) && stmt->get_ai_retry_column_id() != OB_INVALID_ID
+      && current_scope_ == T_WHERE_SCOPE && q_name.database_name_.empty()
+      && q_name.tbl_name_.empty() && !ai_retry_state_column_name_.empty()
+      && q_name.col_name_ == ai_retry_state_column_name_) {
+    const ObTableSchema *schema = NULL;
+    const ObColumnSchemaV2 *column = NULL;
+    const ObColumnSchemaV2 *state = NULL;
+    if (OB_FAIL(schema_checker_->get_table_schema(stmt->get_ai_retry_table_id(), schema))) {
+    } else if (OB_ISNULL(schema) || OB_ISNULL(column = schema->get_column_schema(stmt->get_ai_retry_column_id()))
+        || OB_ISNULL(state = schema->get_column_schema(column->get_ai_state_column_id()))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ColumnItem *item = NULL;
+      if (stmt->get_table_items().count() != 1 || OB_ISNULL(stmt->get_table_items().at(0))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(resolve_basic_column_item(*stmt->get_table_items().at(0),
+          state->get_column_name_str(), true, item))) {
+      } else if (OB_ISNULL(item)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        real_ref_expr = item->expr_;
+      }
+    }
+  } else {
+    ret = ObDelUpdResolver::resolve_column_ref_expr(q_name, real_ref_expr);
   }
   return ret;
 }

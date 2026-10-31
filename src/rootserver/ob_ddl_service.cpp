@@ -74,6 +74,9 @@
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "common/ob_timeout_ctx.h"
 #include "share/ob_share_util.h"
+#include "common/mysqlclient/ob_isql_connection.h"
+#include "lib/utility/utility.h"
+#include "query/vector/ob_vector_index_util.h"
 
 namespace oceanbase
 {
@@ -85,6 +88,75 @@ using namespace palf;
 using namespace transaction::tablelock;
 namespace rootserver
 {
+namespace
+{
+int append_ai_offline_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if (name.ptr()[i] == '`' && OB_FAIL(sql.append("`"))) {
+    } else {
+      ret = sql.append(name.ptr() + i, 1);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("`");
+  }
+  return ret;
+}
+
+int append_ai_offline_rowkey(const ObTableSchema &table, ObSqlString &sql)
+{
+  int ret = sql.append("CONCAT(");
+  const ObRowkeyInfo &keys = table.get_rowkey_info();
+  if (keys.get_size() == 0) {
+    ret = OB_SCHEMA_ERROR;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < keys.get_size(); ++i) {
+    const ObRowkeyColumn *key = keys.get_column(i);
+    const ObColumnSchemaV2 *column = nullptr;
+    ObSqlString prefix;
+    if (OB_ISNULL(key) || OB_ISNULL(column = table.get_column_schema(key->column_id_))) {
+      ret = OB_SCHEMA_ERROR;
+    } else if (i > 0 && OB_FAIL(prefix.append(" AND "))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(prefix, column->get_column_name_str()))) {
+    } else if (OB_FAIL(prefix.append(ob_is_numeric_type(column->get_data_type()) ? " = " : " = X'"))) {
+    } else if (i > 0 && OB_FAIL(sql.append(","))) {
+    } else if (OB_FAIL(sql_append_hex_escape_str(prefix.string(), sql))) {
+    } else if (OB_FAIL(sql.append(ob_is_numeric_type(column->get_data_type())
+        ? ",CAST(" : ",HEX(CAST("))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, column->get_column_name_str()))) {
+    } else {
+      ret = sql.append(ob_is_numeric_type(column->get_data_type())
+          ? " AS CHAR)" : " AS BINARY)),X'27'");
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append(")");
+  }
+  return ret;
+}
+
+int ai_offline_target_type(const ObColumnSchemaV2 &column, ObSqlString &type)
+{
+  int ret = OB_SUCCESS;
+  if (column.is_json()) {
+    ret = type.append("json");
+  } else if (ob_is_integer_type(column.get_data_type())) {
+    ret = type.append(ob_is_unsigned_type(column.get_data_type()) ? "unsigned" : "signed");
+  } else if (column.is_collection()) {
+    int64_t dimension = 0;
+    if (OB_FAIL(share::ObVectorIndexUtil::get_vector_dim_from_extend_type_info(
+        column.get_extended_type_info(), dimension))) {
+    } else {
+      ret = type.append_fmt("vector(%ld)", dimension);
+    }
+  } else {
+    ret = type.append("char");
+  }
+  return ret;
+}
+} // namespace
 
 #define GRANT_SYS_ROLE_NUM 2       /* len of role array is 2 */
 #define GRANT_ROLE_MIN_ROLE_NUM 3  /* min len of role array is 3 */
@@ -2150,7 +2222,10 @@ int ObDDLService::check_alter_column_is_offline(
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "performing offline DDL operations on primary key columns or changing primary key columns to be NOT NULL in a heap table is");
     }
     add_pk = orig_table_schema.is_table_without_pk() && alter_column_schema.is_primary_key_;
-    is_offline = is_change_column_order || need_rewrite_data || add_pk;
+    // An AI definition changes the stored input specification and invalidates
+    // existing results. Rebuild both through the native offline copy path.
+    is_offline = is_change_column_order || need_rewrite_data || add_pk
+        || alter_column_schema.is_ai_column();
 
     bool has_vector_index = false;
     if (OB_FAIL(ret) || is_offline) {
@@ -2188,6 +2263,12 @@ int ObDDLService::check_exist_stored_gen_col(
   for (; OB_SUCC(ret) && !is_exist && it_begin != it_end; it_begin++) {
     if (OB_ISNULL(alter_column_schema = static_cast<AlterColumnSchema *>(*it_begin))) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (alter_column_schema->is_ai_column()
+        && (OB_DDL_ADD_COLUMN == alter_column_schema->alter_type_
+            || OB_DDL_MODIFY_COLUMN == alter_column_schema->alter_type_
+            || OB_DDL_CHANGE_COLUMN == alter_column_schema->alter_type_)) {
+      // The resolver adds a stored result specification for every AI column.
+      is_exist = true;
     } else if (alter_column_schema->is_stored_generated_column()) {
       if (OB_DDL_DROP_COLUMN == alter_column_schema->alter_type_) {
         column_cnt--;
@@ -2253,7 +2334,7 @@ int ObDDLService::check_is_add_column_online_(const AlterTableSchema &alter_tabl
 
   if (OB_SUCC(ret)) {
     if (ObDDLType::DDL_INVALID != tmp_ddl_type) {
-    } else if (alter_column_schema.is_stored_generated_column()) {
+    } else if (alter_column_schema.is_stored_generated_column() || alter_column_schema.is_ai_column()) {
       tmp_ddl_type = ObDDLType::DDL_ADD_COLUMN_OFFLINE;
     } else if (OB_FAIL(check_is_change_column_order(table_schema, alter_column_schema, is_change_column_order))) {
     } else if (!can_add_column_instant) {
@@ -4151,6 +4232,98 @@ int ObDDLService::remap_index_tablets_to_new_indexs(
   return ret;
 }
 
+int ObDDLService::prepare_ai_column_offline_outbox(const ObTableSchema &origin_table_schema,
+    const ObTableSchema &hidden_table_schema, ObSchemaGetterGuard &schema_guard,
+    ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  bool has_ai = false;
+  for (auto it = origin_table_schema.column_begin(); !has_ai && it != origin_table_schema.column_end(); ++it) {
+    has_ai = nullptr != *it && (*it)->is_ai_column();
+  }
+  for (auto it = hidden_table_schema.column_begin(); !has_ai && it != hidden_table_schema.column_end(); ++it) {
+    has_ai = nullptr != *it && (*it)->is_ai_column();
+  }
+  if (!has_ai) {
+    return ret;
+  }
+  const ObDatabaseSchema *database = nullptr;
+  sqlclient::ObISQLConnection *connection = trans.get_connection();
+  ObSessionDDLInfo visibility;
+  visibility.set_is_dummy_ddl_for_inner_visibility(true);
+  visibility.set_source_table_hidden(true);
+  visibility.set_dest_table_hidden(false);
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (OB_ISNULL(connection)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_guard.get_database_schema(hidden_table_schema.get_database_id(), database))) {
+  } else if (OB_ISNULL(database)) {
+    ret = OB_SCHEMA_ERROR;
+  } else if (OB_FAIL(sql.append_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id IN (%lu,%lu)",
+      origin_table_schema.get_table_id(), hidden_table_schema.get_table_id()))) {
+  } else if (OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
+  } else if (OB_FAIL(connection->set_ddl_info(&visibility))) {
+  }
+  // The hidden schema is already published and its native SSTable build has
+  // completed. Only the outbox is written here; the copied table is not updated.
+  // These rows and the schema swap commit together, so no worker can observe a
+  // request whose final table name has not taken effect.
+  for (auto it = hidden_table_schema.column_begin(); OB_SUCC(ret) && it != hidden_table_schema.column_end(); ++it) {
+    const ObColumnSchemaV2 *column = *it;
+    if (nullptr == column || !column->is_ai_column()) {
+      continue;
+    }
+    const ObColumnSchemaV2 *state = hidden_table_schema.get_column_schema(column->get_ai_state_column_id());
+    const ObColumnSchemaV2 *request = hidden_table_schema.get_column_schema(column->get_ai_request_column_id());
+    const ObColumnSchemaV2 *spec = hidden_table_schema.get_column_schema(column->get_ai_result_spec_column_id());
+    ObSqlString type;
+    sql.reuse();
+    if (OB_ISNULL(state) || OB_ISNULL(request) || OB_ISNULL(spec)) {
+      ret = OB_SCHEMA_ERROR;
+    } else if (OB_FAIL(ai_offline_target_type(*column, type))) {
+    } else if (OB_FAIL(sql.append_fmt("INSERT INTO oceanbase.__all_ai_column_task "
+        "(table_id,column_id,request_id,database_name,table_name,column_name,rowkey_predicate,"
+        "input_json,target_type,definition_version,max_retries,state,retry_count,eligible_ts,"
+        "lease_owner,lease_until,result_value) SELECT %lu,%lu,",
+        hidden_table_schema.get_table_id(), column->get_column_id()))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, request->get_column_name_str()))) {
+    } else if (OB_FAIL(sql.append(","))) {
+    } else if (OB_FAIL(sql_append_hex_escape_str(database->get_database_name_str(), sql))) {
+    } else if (OB_FAIL(sql.append(","))) {
+    } else if (OB_FAIL(sql_append_hex_escape_str(origin_table_schema.get_table_name_str(), sql))) {
+    } else if (OB_FAIL(sql.append(","))) {
+    } else if (OB_FAIL(sql_append_hex_escape_str(column->get_column_name_str(), sql))) {
+    } else if (OB_FAIL(sql.append(","))) {
+    } else if (OB_FAIL(append_ai_offline_rowkey(hidden_table_schema, sql))) {
+    } else if (OB_FAIL(sql.append(",CAST("))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, spec->get_column_name_str()))) {
+    } else if (OB_FAIL(sql.append(" AS CHAR),"))) {
+    } else if (OB_FAIL(sql_append_hex_escape_str(type.string(), sql))) {
+    } else if (OB_FAIL(sql.append_fmt(",%ld,%ld,0,0,NOW(6),'',NULL,NULL FROM ",
+        column->get_ai_definition_version(), column->get_ai_max_retries()))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, database->get_database_name_str()))) {
+    } else if (OB_FAIL(sql.append("."))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, hidden_table_schema.get_table_name_str()))) {
+    } else if (OB_FAIL(sql.append(" WHERE "))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, state->get_column_name_str()))) {
+    } else if (OB_FAIL(sql.append(" = 'PENDING' AND "))) {
+    } else if (OB_FAIL(append_ai_offline_identifier(sql, request->get_column_name_str()))) {
+    } else if (OB_FAIL(sql.append(" IS NOT NULL"))) {
+    } else {
+      ret = trans.write(sql.ptr(), affected_rows);
+    }
+  }
+  if (nullptr != connection) {
+    ObSessionDDLInfo reset_visibility;
+    const int reset_ret = connection->set_ddl_info(&reset_visibility);
+    if (OB_SUCC(ret)) {
+      ret = reset_ret;
+    }
+  }
+  return ret;
+}
+
 // remap and rename index tables, and then take effect.
 int ObDDLService::swap_orig_and_hidden_table_state(
     obcall::ObAlterTableArg &alter_table_arg,
@@ -4172,6 +4345,8 @@ int ObDDLService::swap_orig_and_hidden_table_state(
                 || OB_FAIL(new_hidden_table_schema.assign(hidden_table_schema))) {
       } else if (OB_FAIL(orig_table_schema.get_simple_index_infos(
                  orig_simple_index_infos))) {
+      } else if (OB_FAIL(prepare_ai_column_offline_outbox(orig_table_schema,
+          hidden_table_schema, schema_guard, trans))) {
       } else {
         // if the original table is a parent table, after swap the status of the two tables
         // need to rename the original fk name to the newly generated hidden fk name , and then
@@ -7457,6 +7632,14 @@ int ObDDLService::fill_new_column_attributes(
     new_column_schema.set_lob_chunk_size(alter_column_schema.get_lob_chunk_size());
     if (OB_FAIL(new_column_schema.get_local_session_var().deep_copy(alter_column_schema.get_local_session_var()))) {
     }
+    if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
+      new_column_schema.set_ai_definition_version(new_schema_version);
+      new_column_schema.set_ai_max_retries(alter_column_schema.get_ai_max_retries());
+      if (OB_FAIL(new_column_schema.set_ai_expr(alter_column_schema.get_ai_expr()))) {
+      } else if (OB_FAIL(new_column_schema.set_ai_normalized_expr(alter_column_schema.get_ai_normalized_expr()))) {
+      } else if (OB_FAIL(new_column_schema.set_ai_dependency_column_ids(alter_column_schema.get_ai_dependency_column_ids()))) {
+      }
+    }
   }
   return ret;
 }
@@ -7771,6 +7954,10 @@ int ObDDLService::add_new_column_to_table_schema(
       alter_column_schema.set_index_position(0);
       alter_column_schema.set_not_part_key();
       alter_column_schema.set_table_id(new_table_schema.get_table_id());
+      if (alter_column_schema.is_ai_column()) {
+        alter_column_schema.set_ai_hidden_column_ids(max_used_column_id + 1,
+            max_used_column_id + 2, max_used_column_id + 3);
+      }
       
       new_table_schema.set_max_used_column_id(max_used_column_id);
     }
@@ -7827,6 +8014,22 @@ int ObDDLService::add_new_column_to_table_schema(
       if (update_inner_table) {
         if (OB_FAIL(ddl_operator->insert_single_column(*trans,
                 new_table_schema, alter_column_schema))) {
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && alter_column_schema.is_ai_column()) {
+    ObSEArray<ObColumnSchemaV2, 3> hidden_columns;
+    if (OB_FAIL(ObDDLResolver::build_ai_auxiliary_columns(alter_column_schema,
+        new_table_schema.get_max_used_column_id(), hidden_columns))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < hidden_columns.count(); ++i) {
+        AlterColumnSchema hidden;
+        hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+        if (OB_FAIL(static_cast<ObColumnSchemaV2 &>(hidden).assign(hidden_columns.at(i)))) {
+        } else if (OB_FAIL(add_new_column_to_table_schema(origin_table_schema, alter_table_schema,
+            tz_info_wrap, local_session_var, allocator, new_table_schema, hidden,
+            gen_col_expr_arr, schema_guard, curr_udt_set_id, ddl_operator, trans))) {
         }
       }
     }
@@ -15325,6 +15528,8 @@ int ObDDLService::swap_orig_and_hidden_table_state(obcall::ObAlterTableArg &alte
       } else if (0 == hidden_table_schema->get_table_name_str().case_compare(alter_table_arg.alter_table_schema_.get_origin_table_name())) {
         // ignore case sensitivity is expected.
         ret = OB_NO_NEED_UPDATE;
+      } else if (OB_FAIL(prepare_ai_column_offline_outbox(*orig_table_schema,
+          *hidden_table_schema, schema_guard, trans))) {
       } else if (OB_FAIL(drop_child_table_fk(alter_table_arg, new_orig_table_schema,
           *hidden_table_schema, schema_guard, trans))) {
       } else if (OB_FAIL(rebuild_hidden_table_foreign_key(alter_table_arg,
@@ -22474,6 +22679,68 @@ int ObDDLService::prepare_change_modify_column_online(AlterColumnSchema &alter_c
                                                 allocator))) {
     }
   }
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()
+      && OB_FAIL(sync_ai_column_auxiliary_schema(origin_table_schema, alter_table_schema, alter_table_arg,
+          new_table_schema, new_column_schema, schema_guard, &ddl_operator, &trans))) {
+  }
+  return ret;
+}
+
+int ObDDLService::sync_ai_column_auxiliary_schema(const ObTableSchema &origin_table_schema,
+    const AlterTableSchema &alter_table_schema, obcall::ObAlterTableArg &alter_table_arg,
+    ObTableSchema &new_table_schema, ObColumnSchemaV2 &column, ObSchemaGetterGuard &schema_guard,
+    ObDDLOperator *ddl_operator, ObMySQLTransaction *trans)
+{
+  int ret = OB_SUCCESS;
+  const bool persist = NULL != ddl_operator && NULL != trans;
+  const ObColumnSchemaV2 *old = origin_table_schema.get_column_schema(column.get_column_id());
+  if (!column.is_ai_column()) {
+  } else if (OB_ISNULL(old)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!old->is_ai_column()) {
+    const uint64_t max_id = new_table_schema.get_max_used_column_id();
+    column.set_ai_hidden_column_ids(max_id + 1, max_id + 2, max_id + 3);
+    ObSEArray<ObColumnSchemaV2, 3> hidden_columns;
+    ObSEArray<ObString, 4> generated;
+    uint64_t curr_udt_set_id = 0;
+    if (OB_FAIL(ObDDLResolver::build_ai_auxiliary_columns(column, max_id, hidden_columns))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < hidden_columns.count(); ++i) {
+        AlterColumnSchema hidden;
+        hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+        if (OB_FAIL(static_cast<ObColumnSchemaV2 &>(hidden).assign(hidden_columns.at(i)))) {
+        } else if (OB_FAIL(add_new_column_to_table_schema(origin_table_schema, alter_table_schema,
+            alter_table_arg.tz_info_wrap_, alter_table_arg.local_session_var_, alter_table_arg.allocator_,
+            new_table_schema, hidden, generated, schema_guard, curr_udt_set_id, ddl_operator, trans))) {
+        }
+      }
+    }
+  } else {
+    column.set_ai_hidden_column_ids(old->get_ai_state_column_id(), old->get_ai_request_column_id(),
+        old->get_ai_result_spec_column_id());
+    const ObColumnSchemaV2 *old_spec = new_table_schema.get_column_schema(column.get_ai_result_spec_column_id());
+    ObColumnSchemaV2 spec;
+    ObObj expression;
+    ObSEArray<ObString, 4> generated;
+    ObSchemaChecker checker;
+    expression.set_varchar(column.get_ai_normalized_expr());
+    expression.set_collation_type(ObCharset::get_system_collation());
+    expression.set_collation_level(CS_LEVEL_COERCIBLE);
+    if (OB_ISNULL(old_spec)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(spec.assign(*old_spec))) {
+    } else if (OB_FAIL(spec.set_cur_default_value(expression, false))) {
+    } else if (OB_FAIL(spec.set_orig_default_value(expression))) {
+    } else if (OB_FAIL(checker.init(schema_guard))) {
+    } else if (OB_FAIL(ObDDLResolver::check_default_value(spec.get_cur_default_value(),
+        alter_table_arg.tz_info_wrap_, &alter_table_arg.local_session_var_, alter_table_arg.allocator_,
+        new_table_schema, spec, generated, alter_table_schema.get_sql_mode(), &checker, nullptr, nullptr))) {
+    } else if (OB_FAIL(new_table_schema.alter_column(spec, persist ? ObTableSchema::CHECK_MODE_ONLINE
+        : ObTableSchema::CHECK_MODE_OFFLINE, false))) {
+    } else if (persist && OB_FAIL(ddl_operator->update_single_column(*trans,
+        origin_table_schema, new_table_schema, spec, false))) {
+    }
+  }
   return ret;
 }
 
@@ -22532,6 +22799,7 @@ int ObDDLService::drop_column_online(
     ::localtime_r(&t.tv_sec, &tm);
 #endif
     new_column_schema->set_unused();
+    new_column_schema->del_column_flag(AI_COLUMN_FLAG);
     new_column_schema->set_prev_column_id(new_column_schema->get_column_id());
     new_column_schema->set_next_column_id(new_column_schema->get_column_id());
     new_column_schema->drop_not_null_cst(); // change column to null.
@@ -22546,6 +22814,19 @@ int ObDDLService::drop_column_online(
     } else if (OB_FAIL(ddl_operator.update_single_column(trans, origin_table_schema, new_table_schema,
                                                                    *new_column_schema, true/*need_del_stats*/))) {
     } else if (OB_FAIL(alter_table_update_index_and_view_column(new_table_schema, *new_column_schema, ddl_operator, trans))) {
+    }
+  }
+  if (OB_SUCC(ret) && orig_column_schema->is_ai_column()) {
+    const uint64_t ids[] = {orig_column_schema->get_ai_state_column_id(),
+        orig_column_schema->get_ai_request_column_id(), orig_column_schema->get_ai_result_spec_column_id()};
+    for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+      const ObColumnSchemaV2 *hidden = origin_table_schema.get_column_schema(ids[i]);
+      if (OB_ISNULL(hidden) || !hidden->is_hidden()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(drop_column_online(schema_guard, origin_table_schema,
+          hidden->get_column_name_str(), new_tbl_visible_cols_cnt_after_alter, last_drop_column_id,
+          ddl_operator, trans, new_table_schema, update_column_name_set))) {
+      }
     }
   }
   return ret;
@@ -22569,8 +22850,16 @@ int ObDDLService::drop_column_offline(const ObTableSchema &origin_table_schema,
                                     last_drop_column_id,
                                     schema_guard))) {
   } else if (OB_FAIL(drop_column_update_new_table(orig_column_schema->get_column_name_str(), new_table_schema))) {
-  } else {
-    // do nothing
+  } else if (orig_column_schema->is_ai_column()) {
+    const uint64_t ids[] = {orig_column_schema->get_ai_state_column_id(),
+        orig_column_schema->get_ai_request_column_id(), orig_column_schema->get_ai_result_spec_column_id()};
+    for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+      const ObColumnSchemaV2 *hidden = origin_table_schema.get_column_schema(ids[i]);
+      if (OB_ISNULL(hidden) || !hidden->is_hidden()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(drop_column_update_new_table(hidden->get_column_name_str(), new_table_schema))) {
+      }
+    }
   }
   return ret;
 }
@@ -22678,6 +22967,10 @@ int ObDDLService::prepare_change_modify_column_offline(AlterColumnSchema &alter_
                                                 new_column_schema, tz_info_wrap,
                                                 allocator))) {
     }
+  }
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()
+      && OB_FAIL(sync_ai_column_auxiliary_schema(origin_table_schema, alter_table_schema, alter_table_arg,
+          new_table_schema, new_column_schema, schema_guard, nullptr, nullptr))) {
   }
   return ret;
 }

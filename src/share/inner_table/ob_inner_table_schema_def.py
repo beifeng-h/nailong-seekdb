@@ -2447,6 +2447,7 @@ all_ai_model_endpoint_def = dict(
 def_table_schema(**all_ai_model_endpoint_def)
 
 
+
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',
     table_name     = '__all_objauth_mysql',
@@ -2466,6 +2467,95 @@ all_objauth_mysql_def = dict(
   )
 def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
+
+def_table_schema(
+    owner = 'database',
+    table_name = '__all_ai_column',
+    table_id = '1135',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:256', 'false'),
+        ('original_expr', 'longtext', 'false'),
+        ('normalized_expr', 'longtext', 'false'),
+        ('max_retries', 'int', 'false', 2),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('sync_mode', 'varchar:16', 'false', 'async'),
+        ('definition_version', 'int', 'false', 1),
+        ('dependency_column_ids', 'longtext', 'false')
+    ]
+)
+
+def_table_schema(
+    owner = 'database',
+    table_name = '__all_ai_column_task',
+    table_id = '1136',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int'),
+        ('request_id', 'varchar:64')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('database_name', 'varchar:256', 'false'),
+        ('table_name', 'varchar:256', 'false'),
+        ('column_name', 'varchar:256', 'false'),
+        ('rowkey_predicate', 'longtext', 'false'),
+        ('input_json', 'longtext', 'false'),
+        ('target_type', 'varchar:256', 'false'),
+        ('definition_version', 'int', 'false', 1),
+        ('max_retries', 'int', 'false', 2),
+        ('state', 'int', 'false', 0),
+        ('retry_count', 'int', 'false', 0),
+        ('attempt_count', 'int', 'false', 0),
+        ('eligible_ts', 'timestamp:6', 'true'),
+        ('lease_owner', 'varchar:128', 'false', ''),
+        ('lease_until', 'timestamp:6', 'true'),
+        ('result_value', 'longtext', 'true'),
+        ('last_error', 'int', 'false', 0)
+    ]
+)
+
+def_table_schema(
+    owner = 'database',
+    table_name = '__all_ai_column_history',
+    table_id = '1137',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int'),
+        ('definition_version', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:256', 'false'),
+        ('original_expr', 'longtext', 'false'),
+        ('normalized_expr', 'longtext', 'false'),
+        ('max_retries', 'int', 'false', 2),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('sync_mode', 'varchar:16', 'false', 'async'),
+        ('dependency_column_ids', 'longtext', 'false'),
+        ('is_deleted', 'int', 'false', 0)
+    ]
+)
+
+
+
 
 
 # Reserved position (placeholder before this line)

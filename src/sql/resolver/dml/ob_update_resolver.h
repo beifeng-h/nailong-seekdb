@@ -45,6 +45,9 @@ public:
   virtual int resolve(const ParseNode &parse_tree);
   inline ObUpdateStmt *get_update_stmt() { return static_cast<ObUpdateStmt*>(stmt_); }
 private:
+  int resolve_ai_retry_target(const ParseNode &parse_tree);
+  int rewrite_ai_retry_status(ParseNode *node);
+  int resolve_column_ref_expr(const ObQualifiedName &q_name, ObRawExpr *&real_ref_expr) override;
   int resolve_table_list(const ParseNode &parse_tree);
   int generate_update_table_info(ObTableAssignment &table_assign);
   int check_multi_update_table_conflict();
@@ -58,6 +61,7 @@ private:
   int check_safe_update_mode(ObUpdateStmt *update_stmt);
   int resolve_update_constraints();
   int generate_batched_stmt_info();
+  common::ObString ai_retry_state_column_name_;
 };
 
 } // namespace sql

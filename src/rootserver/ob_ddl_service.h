@@ -1993,6 +1993,18 @@ private:
                            ObIArray<ObTableSchema> *global_idx_schema_array,
                            common::hash::ObHashSet<ObColumnNameHashWrapper> &update_column_name_set,
                            ObColumnSchemaV2 &new_column_schema);
+  int sync_ai_column_auxiliary_schema(const ObTableSchema &origin_table_schema,
+                           const AlterTableSchema &alter_table_schema,
+                           obcall::ObAlterTableArg &alter_table_arg,
+                           ObTableSchema &new_table_schema,
+                           ObColumnSchemaV2 &column,
+                           ObSchemaGetterGuard &schema_guard,
+                           ObDDLOperator *ddl_operator,
+                           common::ObMySQLTransaction *trans);
+  int prepare_ai_column_offline_outbox(const ObTableSchema &origin_table_schema,
+                           const ObTableSchema &hidden_table_schema,
+                           ObSchemaGetterGuard &schema_guard,
+                           common::ObMySQLTransaction &trans);
 
   int prepare_change_modify_column_offline(AlterColumnSchema &alter_col,
                            const ObTableSchema &origin_table_schema,

@@ -40,6 +40,10 @@
 #include "../../../src/sql/parser/sql_parser_mysql_mode_lex.h"
 #include "../../../src/sql/parser/sql_parser_base.h"
 
+/* Retry actions are lifted to native UPDATE only when they are the sole action. */
+#define IS_AI_COLUMN_RETRY_ACTION(node) \
+  ((node) != NULL && (node)->type_ == T_UPDATE && (node)->value_ == 1)
+
 #define GEN_EXPLAN_STMT(no_use, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
   (void)(no_use); \
   ParseNode *type_node = NULL; \
@@ -333,7 +337,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -395,6 +399,7 @@ END_P SET_VAR DELIMITER
 %type <node> update_basic_stmt delete_basic_stmt
 %type <node> table_element_list table_element column_definition column_definition_ref column_definition_list column_name_list
 %type <node> opt_generated_keyname opt_generated_option_list opt_generated_column_attribute_list generated_column_attribute opt_storage_type
+%type <node> opt_ai_column_options ai_column_option_list ai_column_option ai_column_retry_action
 %type <node> data_type special_table_type opt_if_not_exists opt_if_exists opt_charset collation opt_collation cast_data_type
 %type <node> replace_with_opt_hint insert_with_opt_hint column_list opt_on_duplicate_key_clause opt_into opt_replace opt_temporary no_param_column_ref
 %type <node> insert_vals_list insert_vals value_or_values opt_insert_row_alias
@@ -4840,6 +4845,14 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   set_data_type_collation($2, attributes, false, true);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $5);
 }
+| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' opt_ai_column_options opt_position_column
+{
+  ParseNode *ai_column = NULL;
+  set_data_type_collation($2, $3, true, false);
+  dup_expr_string($7, result, @7.first_column, @7.last_column);
+  malloc_non_terminal_node(ai_column, result->malloc_pool_, T_AI_COLUMN, 1, $9);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, NULL, $7, NULL, $10, ai_column);
+}
 | column_definition_ref data_type opt_collation opt_generated_keyname AS '(' expr ')' opt_storage_type opt_generated_column_attribute_list opt_column_reference opt_position_column
 {
   (void)($11);
@@ -4875,6 +4888,28 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, attributes);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, unsigned_bigint_type, attributes, $4);
 }
+;
+
+opt_ai_column_options:
+WITH '(' ai_column_option_list ')'
+{
+  merge_nodes($$, result, T_EXPR_LIST, $3);
+}
+| /*empty*/
+{ $$ = NULL; }
+;
+
+ai_column_option_list:
+ai_column_option { $$ = $1; }
+| ai_column_option_list ',' ai_column_option
+{ malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3); }
+;
+
+ai_column_option:
+column_name COMP_EQ STRING_VALUE
+{ malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3); }
+| column_name COMP_EQ INTNUM
+{ malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3); }
 ;
 
 constraint_definition:
@@ -12646,6 +12681,15 @@ SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_conditi
   $$->value_ = $2[0];
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $5, $6, $7);
 }
+| SHOW AI COLUMNS from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
+{
+  (void)$4;
+  ParseNode *mode = NULL;
+  malloc_terminal_node(mode, result->malloc_pool_, T_INT);
+  mode->value_ = 0;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, mode, $5, $6, $7);
+  $$->value_ = 1; /* AI column definitions. */
+}
 | SHOW TABLE STATUS opt_from_or_in_database_clause opt_show_condition
 { malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_TABLE_STATUS, 2, $4, $5); }
 | SHOW PROCEDURE STATUS opt_from_or_in_database_clause opt_show_condition
@@ -14652,13 +14696,40 @@ relation_factor TO relation_factor
  *	ALTER TABLE grammar
  *
  *****************************************************************************/
+
 alter_table_stmt:
 alter_with_opt_hint TABLE relation_factor alter_table_actions
 {
-  ParseNode *table_actions = NULL;
-  merge_nodes(table_actions, result, T_ALTER_TABLE_ACTION_LIST, $4);
-  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE, 4, $3, table_actions, NULL, $1);
-  $$->value_ = 0;
+  if (IS_AI_COLUMN_RETRY_ACTION($4)) {
+    ParseNode *table = NULL;
+    ParseNode *tables = NULL;
+    ParseNode *column = NULL;
+    ParseNode *value = NULL;
+    ParseNode *assignment = NULL;
+    ParseNode *assignments = NULL;
+    malloc_non_terminal_node(table, result->malloc_pool_, T_ORG, 4, $3, NULL, NULL, NULL);
+    malloc_non_terminal_node(tables, result->malloc_pool_, T_TABLE_REFERENCES, 1, table);
+    malloc_non_terminal_node(column, result->malloc_pool_, T_COLUMN_REF, 3, NULL, NULL, $4->children_[0]);
+    malloc_terminal_node(value, result->malloc_pool_, T_NULL);
+    malloc_non_terminal_node(assignment, result->malloc_pool_, T_ASSIGN_ITEM, 2, column, value);
+    malloc_non_terminal_node(assignments, result->malloc_pool_, T_ASSIGN_LIST, 1, assignment);
+    malloc_non_terminal_node($$, result->malloc_pool_, T_UPDATE, 11,
+        NULL, tables, assignments, $4->children_[1], NULL, NULL, NULL, $1, NULL, NULL, NULL);
+    $$->value_ = 1; /* Native retry target is persisted in the resolved DML plan. */
+  } else {
+    ParseNode *table_actions = NULL;
+    merge_nodes(table_actions, result, T_ALTER_TABLE_ACTION_LIST, $4);
+    malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_TABLE, 4, $3, table_actions, NULL, $1);
+    $$->value_ = 0;
+  }
+}
+;
+
+ai_column_retry_action:
+RETRY AI COLUMN column_name opt_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_UPDATE, 2, $4, $5);
+  $$->value_ = 1;
 }
 ;
 
@@ -14683,16 +14754,36 @@ alter_table_action
 }
 | alter_table_actions ',' alter_table_action
 {
+  if (IS_AI_COLUMN_RETRY_ACTION($1) || IS_AI_COLUMN_RETRY_ACTION($3)) {
+    yyerror(&@2, result, "AI column retry cannot be combined with another ALTER action");
+    YYABORT_WITH_ERROR(OB_PARSER_ERR_UNSUPPORTED);
+  }
   if ($3 != NULL) {
     malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
   } else {
     $$ = $1;
   }
 }
+| alter_table_actions ',' standalone_alter_action
+{
+  $$ = NULL;
+  (void)$3;
+  if (IS_AI_COLUMN_RETRY_ACTION($1)) {
+    yyerror(&@2, result, "AI column retry cannot be combined with another ALTER action");
+    YYABORT_WITH_ERROR(OB_PARSER_ERR_UNSUPPORTED);
+  } else {
+    yyerror(&@2, result, "standalone ALTER action cannot follow another action");
+    YYABORT_PARSE_SQL_ERROR;
+  }
+}
 ;
 
 alter_table_action:
-opt_set table_option_list_space_seperated
+ai_column_retry_action
+{
+  $$ = $1;
+}
+| opt_set table_option_list_space_seperated
 {
   (void)$1;
   merge_nodes($$, result, T_TABLE_OPTION_LIST, $2);
@@ -17959,6 +18050,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

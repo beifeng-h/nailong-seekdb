@@ -56,6 +56,125 @@ namespace oceanbase
 {
 namespace rootserver
 {
+namespace
+{
+int append_ai_ddl_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if (name.ptr()[i] == '`' && OB_FAIL(sql.append("`"))) {
+    } else {
+      ret = sql.append(name.ptr() + i, 1);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("`");
+  }
+  return ret;
+}
+
+// Every pending column of one copied row receives the same durable request.
+// The DDL identity separates retries/rebuilds, and hex-encoded keys retain
+// embedded separators, binary data and composite-key boundaries.
+int append_ai_ddl_request(const ObTableSchema &source, const int64_t task_id,
+    const uint64_t dest_table_id, ObSqlString &sql)
+{
+  int ret = sql.append_fmt("SHA2(CONCAT('ddl:%ld:%lu'", task_id, dest_table_id);
+  const ObRowkeyInfo &keys = source.get_rowkey_info();
+  for (int64_t i = 0; OB_SUCC(ret) && i < keys.get_size(); ++i) {
+    const ObRowkeyColumn *key = keys.get_column(i);
+    const ObColumnSchemaV2 *column = nullptr;
+    if (OB_ISNULL(key) || OB_ISNULL(column = source.get_column_schema(key->column_id_))) {
+      ret = OB_SCHEMA_ERROR;
+    } else if (OB_FAIL(sql.append(",':',HEX(CAST("))) {
+    } else if (OB_FAIL(append_ai_ddl_identifier(sql, column->get_column_name_str()))) {
+    } else {
+      ret = sql.append(" AS BINARY))");
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("),256)");
+  }
+  return ret;
+}
+
+bool is_ai_ddl_value_column(const ObTableSchema &table, uint64_t column_id)
+{
+  bool found = false;
+  if (table.is_user_table() && table.is_user_hidden_table()) {
+    for (auto it = table.column_begin(); !found && it != table.column_end(); ++it) {
+      const ObColumnSchemaV2 *column = *it;
+      found = nullptr != column && column->is_ai_column()
+          && (column_id == column->get_column_id()
+              || column_id == column->get_ai_state_column_id()
+              || column_id == column->get_ai_request_column_id());
+    }
+  }
+  return found;
+}
+
+int append_ai_ddl_copy_columns(const ObTableSchema &source, const ObTableSchema &dest,
+    const ObColumnNameMap *names, const int64_t task_id, ObSqlString &query,
+    ObSqlString &insert)
+{
+  int ret = OB_SUCCESS;
+  if (dest.is_user_table() && dest.is_user_hidden_table()) {
+    for (auto it = dest.column_begin(); OB_SUCC(ret) && it != dest.column_end(); ++it) {
+      const ObColumnSchemaV2 *column = *it;
+      if (nullptr == column || !column->is_ai_column()) {
+        continue;
+      }
+      ObString source_name = column->get_column_name_str();
+      const ObColumnSchemaV2 *old = nullptr;
+      if (nullptr != names && OB_FAIL(names->get_orig_column_name(column->get_column_name_str(), source_name))) {
+        if (OB_ENTRY_NOT_EXIST == ret) {
+          ret = OB_SUCCESS;
+          source_name.reset();
+        }
+      }
+      if (OB_SUCC(ret) && !source_name.empty()) {
+        old = source.get_column_schema(source_name);
+      }
+      const bool refresh = nullptr == old || !old->is_ai_column()
+          || old->get_ai_definition_version() != column->get_ai_definition_version();
+      const uint64_t ids[] = {column->get_column_id(), column->get_ai_state_column_id(),
+          column->get_ai_request_column_id()};
+      const uint64_t old_ids[] = {nullptr == old ? OB_INVALID_ID : old->get_column_id(),
+          nullptr == old ? OB_INVALID_ID : old->get_ai_state_column_id(),
+          nullptr == old ? OB_INVALID_ID : old->get_ai_request_column_id()};
+      for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+        const ObColumnSchemaV2 *target = dest.get_column_schema(ids[i]);
+        const ObColumnSchemaV2 *origin = refresh ? nullptr : source.get_column_schema(old_ids[i]);
+        const ObColumnSchemaV2 *state = refresh ? nullptr : source.get_column_schema(old_ids[1]);
+        if (OB_ISNULL(target) || (!refresh && (OB_ISNULL(origin) || OB_ISNULL(state)))) {
+          ret = OB_SCHEMA_ERROR;
+        } else if (OB_FAIL(query.append(", ")) || OB_FAIL(insert.append(", "))) {
+        } else if (OB_FAIL(append_ai_ddl_identifier(insert, target->get_column_name_str()))) {
+        } else if (refresh && i < 2) {
+          ret = query.append(i == 0 ? "NULL" : "'PENDING'");
+        } else if (refresh) {
+          ret = append_ai_ddl_request(source, task_id, dest.get_table_id(), query);
+        } else if (i < 2) {
+          ret = append_ai_ddl_identifier(query, origin->get_column_name_str());
+        } else if (OB_FAIL(query.append("CASE WHEN "))) {
+        } else if (OB_FAIL(append_ai_ddl_identifier(query, state->get_column_name_str()))) {
+        } else if (OB_FAIL(query.append(" = 'PENDING' THEN "))) {
+        } else if (OB_FAIL(append_ai_ddl_request(source, task_id, dest.get_table_id(), query))) {
+        } else if (OB_FAIL(query.append(" ELSE "))) {
+        } else if (OB_FAIL(append_ai_ddl_identifier(query, origin->get_column_name_str()))) {
+        } else {
+          ret = query.append(" END");
+        }
+        if (OB_SUCC(ret) && OB_FAIL(query.append(" AS "))) {
+        } else if (OB_SUCC(ret)) {
+          ret = append_ai_ddl_identifier(query, target->get_column_name_str());
+        }
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
 
 int ObDDLTaskUtil::hold_snapshot(
     common::ObMySQLTransaction &trans,
@@ -363,6 +482,8 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
           // do nothing
         } else if (column_schema->is_generated_column()) {
           // cannot insert to generated columns.
+        } else if (is_ai_ddl_value_column(*dest_table_schema, col_id)) {
+          // AI values and request groups are projected together below.
         } else if (nullptr == col_name_map && OB_FALSE_IT(orig_column_name.assign_ptr(column_schema->get_column_name_str().ptr(), column_schema->get_column_name_str().length()))) {
         } else if (nullptr != col_name_map && OB_FAIL(col_name_map->get_orig_column_name(column_schema->get_column_name_str(), orig_column_name))) {
           if (OB_ENTRY_NOT_EXIST == ret) {
@@ -495,6 +616,8 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(ObDDLUtil::generate_column_name_str(column_names, true/*with origin name*/, true/*with alias name*/, use_heap_table_ddl_plan, query_column_sql_string))) {
         } else if (OB_FAIL(ObDDLUtil::generate_column_name_str(insert_column_names, true/*with origin name*/, false/*with alias name*/, use_heap_table_ddl_plan, insert_column_sql_string))) {
+        } else if (OB_FAIL(append_ai_ddl_copy_columns(*source_table_schema, *dest_table_schema,
+            col_name_map, task_id, query_column_sql_string, insert_column_sql_string))) {
         } else if (!use_heap_table_ddl_plan && OB_FAIL(ObDDLTaskUtil::generate_order_by_str(
             select_column_ids, order_column_ids, rowkey_column_sql_string))) {
         }

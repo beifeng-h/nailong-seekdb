@@ -413,6 +413,8 @@ public:
                        K_(full_row),
                        K_(view_check_exprs),
                        K_(is_primary_index),
+                       K_(has_ai_columns),
+                       K_(ai_retry_column_id),
                        K_(is_table_without_pk),
                        KPC_(trans_info_expr));
 
@@ -434,6 +436,8 @@ public:
   static const int64_t MAX_ROWKEY_DISTINCT_BUCKET_NUM = 1 * 1024 * 1024;
   ExprFixedArray view_check_exprs_;
   bool is_primary_index_;
+  bool has_ai_columns_;
+  uint64_t ai_retry_column_id_;
   bool is_table_without_pk_;
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
@@ -453,6 +457,8 @@ protected:
       das_base_ctdef_(das_base_ctdef),
       view_check_exprs_(alloc),
       is_primary_index_(false),
+      has_ai_columns_(false),
+      ai_retry_column_id_(OB_INVALID_ID),
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),

@@ -136,6 +136,9 @@ _SQL_RUNTIME_EXTRA_DEP_CONSUMERS = {
         'ob_sql_engine_cmd_1',
     ],
     '//src/share:ai_endpoint_interface': [
+        'ob_sql_engine_dml_0',
+        'ob_sql_resolver_dml_0',
+        'ob_sql_executor_0',
         'ob_sql_engine_expr_13',
         'ob_sql_engine_expr_15',
         'ob_sql_engine_expr_2',

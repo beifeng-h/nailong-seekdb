@@ -950,6 +950,12 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       } else if (OB_FAIL(resolve_primary_key_node_in_heap_table(primary_node_in_heap_table, stats, resolved_cols))) {
       }
     }
+    if (OB_SUCC(ret) && RESOLVE_NON_COL != resolve_rule) {
+      if (OB_FAIL(resolve_ai_columns(table_schema))) {
+      } else {
+        cur_column_id_ = table_schema.get_max_used_column_id();
+      }
+    }
   }
   return ret;
 }

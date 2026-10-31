@@ -39,6 +39,9 @@ bool ObIndexBuilderUtil::is_do_create_dense_vec_index(const ObIndexType index_ty
 
 void ObIndexBuilderUtil::del_column_flags_and_default_value(ObColumnSchemaV2 &column)
 {
+  // An index stores the value of its base column; AI ownership and its hidden
+  // state belong to the base table and must not create another AI definition.
+  column.del_column_flag(AI_COLUMN_FLAG);
   if ((column.is_generated_column() && 
        !column.is_fulltext_column() &&
        !column.is_vec_index_column() &&

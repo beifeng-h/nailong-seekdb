@@ -395,7 +395,14 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                */
               bool is_full = (1 == ((parse_tree.children_[0]->value_)&1));
               bool is_extended = (1 == (((parse_tree.children_[0]->value_)>>1)&1));
-              if (OB_UNLIKELY(((parse_tree.children_[0]->value_)>>2) != 0)) {
+              if (parse_tree.value_ == 1) {
+                ObSqlString sql;
+                show_resv_ctx.like_column_ = ObString::make_string("column_name");
+                if (OB_FAIL(sql.append_fmt("SELECT column_name,original_expr,normalized_expr,sync_mode,max_retries "
+                    "FROM oceanbase.__all_ai_column WHERE table_id=%lu ORDER BY column_id", show_table_id))) {
+                } else if (OB_FAIL(ob_write_string(*allocator_, sql.string(), select_sql))) {
+                }
+              } else if (OB_UNLIKELY(((parse_tree.children_[0]->value_)>>2) != 0)) {
                 ret = OB_ERR_UNEXPECTED;
               } else if (is_full) {
                 if (is_extended) {

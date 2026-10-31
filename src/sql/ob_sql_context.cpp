@@ -147,6 +147,7 @@ ObSqlCtx::ObSqlCtx()
     cur_plan_(nullptr),
     is_sensitive_(false),
     snapshot_query_expr_(nullptr),
+    ai_column_read_snapshot_(nullptr),
     is_execute_call_stmt_(false),
     is_text_ps_mode_(false),
     first_plan_hash_(0),
@@ -197,6 +198,7 @@ void ObSqlCtx::reset()
   first_expr_cons_cnt_ = 0;
   clear();
   snapshot_query_expr_ = nullptr;
+  ai_column_read_snapshot_ = nullptr;
   stmt_type_ = stmt::T_NONE;
   cur_plan_ = nullptr;
   is_execute_call_stmt_ = false;

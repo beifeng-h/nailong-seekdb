@@ -111,7 +111,8 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     need_switch_to_table_lock_worker_(false),
     data_complement_gen_doc_id_(false),
     insertup_can_do_gts_opt_(false),
-    px_worker_share_plan_enabled_(false)
+    px_worker_share_plan_enabled_(false),
+    ai_column_references_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator_))
 {
 }
 
@@ -122,6 +123,7 @@ ObPhysicalPlan::~ObPhysicalPlan()
 
 void ObPhysicalPlan::reset()
 {
+  ai_column_references_.reset();
   ObPlanCacheObject::reset();
   phy_hint_.reset();
   root_op_spec_ = NULL;
@@ -649,7 +651,28 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     need_switch_to_table_lock_worker_,
                     data_complement_gen_doc_id_,
                     px_parallel_rule_,
-                    px_worker_share_plan_enabled_);
+                    px_worker_share_plan_enabled_,
+                    ai_column_references_);
+
+int ObPhysicalPlan::add_ai_column_reference(uint64_t table_id, uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  bool found = false;
+  for (int64_t i = 0; i + 1 < ai_column_references_.count() && !found; i += 2) {
+    found = ai_column_references_.at(i) == table_id && ai_column_references_.at(i + 1) == column_id;
+  }
+  if (!found) {
+    if (OB_FAIL(ai_column_references_.push_back(table_id))) {
+    } else if (OB_FAIL(ai_column_references_.push_back(column_id))) {
+      ai_column_references_.pop_back();
+    }
+  }
+  if (OB_SUCC(ret)) {
+    // References are collected after operator generation calculated this flag.
+    calc_whether_need_trans();
+  }
+  return ret;
+}
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)
@@ -915,6 +938,11 @@ void ObPhysicalPlan::calc_whether_need_trans()
   }
   // mysql allows select udf to contain dml, needs to ensure the atomicity of the entire select
   if (!bool_ret && contain_pl_udf_or_trigger() && udf_has_dml_stmt() && stmt::T_EXPLAIN != stmt_type_) {
+    bool_ret = true;
+  }
+  if (!ai_column_references_.empty() && stmt::T_EXPLAIN != stmt_type_) {
+    // Strict mode can change after a cached plan is built. Even when rewrite
+    // removes its scans, original AI references require a statement snapshot.
     bool_ret = true;
   }
   is_need_trans_ = bool_ret;

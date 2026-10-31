@@ -383,7 +383,29 @@ int ObDDLRedefinitionTask::get_validate_checksum_columns_id(const ObTableSchema 
       } else if (OB_SUCCESS == (col_name_map.get(cur_column_schema->get_column_name_str(), dest_column_name))) {
         dest_column_schema = dest_table_schema.get_column_schema(dest_column_name);
       }
+      bool ai_value_recomputed = nullptr != dest_column_schema
+          && dest_column_schema->is_ai_column() && !cur_column_schema->is_ai_column();
+      for (auto it = data_table_schema.column_begin(); OB_SUCC(ret) && !ai_value_recomputed
+          && it != data_table_schema.column_end(); ++it) {
+        const ObColumnSchemaV2 *ai = *it;
+        if (nullptr == ai || !ai->is_ai_column()
+            || (cur_column_id != ai->get_column_id()
+                && cur_column_id != ai->get_ai_state_column_id()
+                && cur_column_id != ai->get_ai_request_column_id())) {
+          continue;
+        }
+        ObString target_name;
+        if (OB_SUCCESS == col_name_map.get(ai->get_column_name_str(), target_name)) {
+          const ObColumnSchemaV2 *target = dest_table_schema.get_column_schema(target_name);
+          ai_value_recomputed = nullptr != target && target->is_ai_column()
+              && (cur_column_id == ai->get_ai_request_column_id()
+                  || ai->get_ai_definition_version() != target->get_ai_definition_version());
+        }
+      }
       if (OB_FAIL(ret)) {
+      } else if (ai_value_recomputed) {
+        // Offline copy re-groups pending requests and invalidates only changed
+        // definitions. Unchanged result/state columns retain normal validation.
       } else if (cur_column_schema->is_hidden_pk_column_id(cur_column_id) || cur_column_schema->is_generated_column()) {
         // do nothing, notice that the destination column schema of hidden pk is null while adding primary key for no primary key table;
       } else if (nullptr == dest_column_schema) {

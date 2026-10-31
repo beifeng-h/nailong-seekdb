@@ -653,7 +653,18 @@ int ObSqlTransControl::stmt_setup_snapshot_(ObSQLSessionInfo *session,
   ObConsistencyLevel cl = plan_ctx->get_consistency_level();
   ObTxReadSnapshot &snapshot = das_ctx.get_snapshot();
   bool can_plain_insert = false;
-  if (cl == ObConsistencyLevel::WEAK || cl == ObConsistencyLevel::FROZEN) {
+  const ObSqlCtx *sql_ctx = exec_ctx.get_sql_ctx();
+  if (nullptr != sql_ctx && nullptr != sql_ctx->ai_column_read_snapshot_) {
+    if (!session->is_inner() || !plan->is_plain_select()
+        || !sql_ctx->ai_column_read_snapshot_->is_valid()
+        || sql_ctx->ai_column_read_snapshot_->is_none_read()) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      // The probe must observe exactly the rows visible to its parent statement,
+      // including that transaction's sequence and uncommitted write state.
+      ret = das_ctx.set_snapshot(*sql_ctx->ai_column_read_snapshot_);
+    }
+  } else if (cl == ObConsistencyLevel::WEAK || cl == ObConsistencyLevel::FROZEN) {
     SCN snapshot_version = SCN::min_scn();
     if (OB_FAIL(txs->get_weak_read_snapshot_version(session->get_ob_max_read_stale_time(),
                                                     snapshot_version))) {
