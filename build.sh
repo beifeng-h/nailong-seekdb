@@ -25,6 +25,13 @@ cd "$HERE" || exit 1
 JOBS="$(nproc 2>/dev/null || echo 8)"
 [ "$JOBS" -gt 32 ] && JOBS=32
 
+# --- 0. build offline --------------------------------------------------------
+# The rust components (sql_nio, ...) are vendored in the cargo cache; without
+# this the build stops at `rust-target/release/libsql_nio.a` with a crates.io
+# connect error on a machine that has no egress.
+export CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-true}"
+export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
+
 # --- 1. prepare deps/3rd from a prebuilt cache when possible -----------------
 if [ ! -f deps/3rd/DONE ]; then
   for cat in "${SEEKDB_DEPS_CACHE:-}" /opt/seekdb-deps-cache/*; do
