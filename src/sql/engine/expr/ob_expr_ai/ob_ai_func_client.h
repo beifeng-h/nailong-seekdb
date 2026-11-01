@@ -23,12 +23,16 @@
 
 namespace oceanbase 
 {
+namespace query { class ObIAiEndpointResolver; }
 namespace common 
 {
+class UrlAdmissionRegistration;
+class UrlRequestPermit;
+
 class ObAIFuncClient: public ObAIFuncHandle
 {
 public:
-  ObAIFuncClient();
+  explicit ObAIFuncClient(query::ObIAiEndpointResolver *resolver = nullptr);
   virtual ~ObAIFuncClient();
   int init(common::ObIAllocator &allocator, const ObString &url, ObArray<ObString> &headers);
   void clean_up();
@@ -56,6 +60,9 @@ private:
   int send_post_batch(ObArray<ObJsonObject *> &data_array, ObArray<ObJsonObject *> &responses);
   int init_easy_handle(CURL *curl, ObJsonObject *data, ObStringBuffer &response_buf);
   int set_request_timeout(CURL *curl);
+  int start_batch_wave();
+  int finish_batch_wave();
+  void stop_batch_wave();
   static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp);
   bool is_retryable_status_code(int64_t http_code);
   bool is_timeout();
@@ -74,6 +81,14 @@ private:
   int64_t max_retry_times_;
   int64_t abs_timeout_ts_;
   int64_t timeout_sec_;
+  query::ObIAiEndpointResolver *endpoint_resolver_;
+  UrlAdmissionRegistration *url_admission_;
+  UrlRequestPermit *wave_permit_;
+  ObArray<ObJsonObject *> pending_bodies_;
+  int64_t next_body_;
+  int64_t completed_bodies_;
+  int64_t wave_start_;
+  int64_t wave_end_;
   DISALLOW_COPY_AND_ASSIGN(ObAIFuncClient);
 };
 

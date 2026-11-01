@@ -17,16 +17,191 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_ai_func_client.h"
 #include "share/ai_service/ai_column_context.h"
+#include "query/ai/ob_ai_endpoint_resolver.h"
+#include "share/rc/ob_server_runtime.h"
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <new>
 
 namespace oceanbase 
 {
 namespace common 
 {
 
+namespace
+{
+struct UrlAdmissionEntry
+{
+  char *url_ = nullptr;
+  int64_t length_ = 0;
+  int64_t active_ = 0;
+  UrlAdmissionRegistration *registrations_ = nullptr;
+  UrlAdmissionEntry *next_ = nullptr;
+};
+std::mutex url_admission_mutex;
+std::condition_variable url_admission_changed;
+UrlAdmissionEntry *url_admission_entries = nullptr;
+
+void erase_quiescent_url(UrlAdmissionEntry *entry)
+{
+  if (entry->active_ == 0 && entry->registrations_ == nullptr) {
+    UrlAdmissionEntry **link = &url_admission_entries;
+    while (*link != nullptr && *link != entry) {
+      link = &(*link)->next_;
+    }
+    if (*link == entry) {
+      *link = entry->next_;
+      std::free(entry->url_);
+      delete entry;
+    }
+  }
+}
+} // namespace
+
+// A registration owns one logical call's committed-metadata snapshot.
+class UrlAdmissionRegistration
+{
+public:
+  static int create(const ObString &url, int64_t cap, UrlAdmissionRegistration *&out)
+  {
+    int ret = OB_SUCCESS;
+    out = nullptr;
+    UrlAdmissionRegistration *registration = nullptr;
+    UrlAdmissionEntry *candidate = nullptr;
+    if (url.empty() || cap < 1 || cap > 1024) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if ((registration = new (std::nothrow) UrlAdmissionRegistration(cap)) == nullptr
+        || (candidate = new (std::nothrow) UrlAdmissionEntry()) == nullptr) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if ((candidate->url_ = static_cast<char *>(std::malloc(url.length()))) == nullptr) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      candidate->length_ = url.length();
+      std::memcpy(candidate->url_, url.ptr(), url.length());
+      {
+        std::lock_guard<std::mutex> lock(url_admission_mutex);
+        UrlAdmissionEntry *entry = url_admission_entries;
+        while (entry != nullptr && (entry->length_ != url.length()
+            || std::memcmp(entry->url_, url.ptr(), url.length()) != 0)) {
+          entry = entry->next_;
+        }
+        if (entry == nullptr) {
+          entry = candidate;
+          candidate = nullptr;
+          entry->next_ = url_admission_entries;
+          url_admission_entries = entry;
+        }
+        registration->entry_ = entry;
+        registration->next_ = entry->registrations_;
+        entry->registrations_ = registration;
+        out = registration;
+        registration = nullptr;
+      }
+      url_admission_changed.notify_all();
+    }
+    if (candidate != nullptr) {
+      std::free(candidate->url_);
+      delete candidate;
+    }
+    delete registration;
+    return ret;
+  }
+
+  ~UrlAdmissionRegistration()
+  {
+    if (entry_ != nullptr) {
+      {
+        std::lock_guard<std::mutex> lock(url_admission_mutex);
+        UrlAdmissionRegistration **link = &entry_->registrations_;
+        while (*link != nullptr && *link != this) {
+          link = &(*link)->next_;
+        }
+        if (*link == this) {
+          *link = next_;
+        }
+        erase_quiescent_url(entry_);
+      }
+      url_admission_changed.notify_all();
+    }
+  }
+
+private:
+  explicit UrlAdmissionRegistration(int64_t cap) : entry_(nullptr), next_(nullptr), cap_(cap) {}
+  UrlAdmissionEntry *entry_;
+  UrlAdmissionRegistration *next_;
+  int64_t cap_;
+  friend class UrlRequestPermit;
+  DISALLOW_COPY_AND_ASSIGN(UrlAdmissionRegistration);
+};
+
+// One bundle can own a bounded wave, with one counted unit per physical HTTP.
+class UrlRequestPermit
+{
+public:
+  UrlRequestPermit() : entry_(nullptr), units_(0) {}
+  ~UrlRequestPermit() { release(); }
+  int64_t count() const { return units_; }
+  int acquire(UrlAdmissionRegistration &registration, int64_t deadline, bool wait)
+  {
+    int ret = OB_SUCCESS;
+    bool acquired = false;
+    while (OB_SUCC(ret) && !acquired) {
+      const int64_t remaining = deadline - ObTimeUtility::current_time();
+      if (OB_FAIL(THIS_WORKER.check_status())) {
+      } else if (remaining <= 0) {
+        ret = OB_TIMEOUT;
+      } else {
+        std::unique_lock<std::mutex> lock(url_admission_mutex);
+        UrlAdmissionEntry *entry = registration.entry_;
+        int64_t cap = registration.cap_;
+        for (UrlAdmissionRegistration *item = entry->registrations_; item != nullptr; item = item->next_) {
+          cap = std::min(cap, item->cap_);
+        }
+        if (entry_ != nullptr && entry_ != entry) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (entry->active_ < cap) {
+          ++entry->active_;
+          ++units_;
+          entry_ = entry;
+          acquired = true;
+        } else if (!wait) {
+          ret = OB_EAGAIN;
+        } else {
+          url_admission_changed.wait_for(lock, std::chrono::microseconds(std::min(remaining, int64_t(10000))));
+        }
+      }
+    }
+    return ret;
+  }
+  void release()
+  {
+    if (entry_ != nullptr) {
+      {
+        std::lock_guard<std::mutex> lock(url_admission_mutex);
+        OB_ASSERT(entry_->active_ >= units_);
+        entry_->active_ -= units_;
+        erase_quiescent_url(entry_);
+        entry_ = nullptr;
+        units_ = 0;
+      }
+      url_admission_changed.notify_all();
+    }
+  }
+private:
+  UrlAdmissionEntry *entry_;
+  int64_t units_;
+  DISALLOW_COPY_AND_ASSIGN(UrlRequestPermit);
+};
+
 const int64_t ObAIFuncClient::CURL_MAX_TIMEOUT_SEC = INT_MAX/1000;
-ObAIFuncClient::ObAIFuncClient()
+ObAIFuncClient::ObAIFuncClient(query::ObIAiEndpointResolver *resolver)
     : allocator_(nullptr), url_(nullptr), header_list_(nullptr),
-      curlm_(nullptr), curl_(nullptr), curl_handles_(), response_buffers_(), batch_ret_(OB_SUCCESS)
+      curlm_(nullptr), curl_(nullptr), curl_handles_(), response_buffers_(), batch_ret_(OB_SUCCESS),
+      endpoint_resolver_(resolver), url_admission_(nullptr), wave_permit_(nullptr),
+      pending_bodies_(), next_body_(0), completed_bodies_(0), wave_start_(0), wave_end_(0)
 {
   is_finished_.store(false);
   abs_timeout_ts_ = 0;
@@ -39,6 +214,8 @@ ObAIFuncClient::ObAIFuncClient()
 void ObAIFuncClient::reset() 
 {
   clean_up();
+  delete url_admission_;
+  url_admission_ = nullptr;
   if (OB_NOT_NULL(curl_)) {
     curl_easy_reset(curl_);
   }
@@ -60,6 +237,8 @@ void ObAIFuncClient::reset()
 ObAIFuncClient::~ObAIFuncClient() 
 {
   clean_up();
+  delete url_admission_;
+  url_admission_ = nullptr;
   if (OB_NOT_NULL(header_list_)) {
     curl_slist_free_all(header_list_);
     header_list_ = nullptr;
@@ -86,7 +265,7 @@ int ObAIFuncClient::init(common::ObIAllocator &allocator, const common::ObString
   if (share::AiColumnContext::is_worker_sql()) {
     remain_timeout_us = std::min(remain_timeout_us, static_cast<int64_t>(10 * 1000000));
   }
-  if (share::AiColumnContext::is_worker_sql() && remain_timeout_us <= 0) {
+  if (remain_timeout_us <= 0) {
     ret = OB_TIMEOUT;
   } else if (OB_ISNULL(url) || headers.empty()) {
     ret = OB_INVALID_ARGUMENT;
@@ -113,6 +292,21 @@ int ObAIFuncClient::init(common::ObIAllocator &allocator, const common::ObString
           }
         }
       }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    query::ObIAiEndpointResolver *resolver = endpoint_resolver_;
+    int64_t cap = 0;
+    if (resolver == nullptr) {
+      resolver = ::oceanbase::share::server_service<query::ObIAiEndpointResolver>();
+    }
+    if (OB_ISNULL(resolver)) {
+      ret = OB_NOT_INIT;
+    } else if (OB_FAIL(resolver->resolve_url_max_concurrency(url, abs_timeout_ts_, cap))) {
+    } else if (abs_timeout_ts_ <= ObTimeUtility::current_time()) {
+      ret = OB_TIMEOUT;
+    } else {
+      ret = UrlAdmissionRegistration::create(url, cap, url_admission_);
     }
   }
   return ret;
@@ -145,7 +339,9 @@ int ObAIFuncClient::send_post(ObJsonObject *data, ObJsonObject *&response)
 {
   int ret = OB_SUCCESS;
   response = nullptr;
-  if (OB_ISNULL(data)) {
+  if (OB_ISNULL(url_admission_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_ISNULL(data)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_ISNULL(curl_)) {
     if (OB_ISNULL(curl_ = curl_easy_init())) {
@@ -161,7 +357,10 @@ int ObAIFuncClient::send_post(ObJsonObject *data, ObJsonObject *&response)
     } 
     // retry if need
     for (int64_t i = 0; OB_SUCC(ret) && i <= max_retry_times_; ++i) {
-      if (OB_FAIL(set_request_timeout(curl_))) {
+      UrlRequestPermit permit;
+      if (OB_FAIL(permit.acquire(*url_admission_, abs_timeout_ts_, true))) {
+        break;
+      } else if (OB_FAIL(set_request_timeout(curl_))) {
         break;
       }
       if (i > 0) {
@@ -173,6 +372,7 @@ int ObAIFuncClient::send_post(ObJsonObject *data, ObJsonObject *&response)
       } else if (CURLE_OK != (res = curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &http_code))) {
         LOG_WARN("curl get response code failed", K(res));
       } 
+      permit.release();
       if (is_timeout()) {
         ret = OB_TIMEOUT;
       } else if (res == CURLE_OK && !is_retryable_status_code(http_code)) {
@@ -295,58 +495,142 @@ int ObAIFuncClient::send_post_batch(common::ObIAllocator &allocator,
   return ret;
 }
 
-int ObAIFuncClient::send_post_batch_no_wait(ObArray<ObJsonObject *> &data_array) 
+int ObAIFuncClient::send_post_batch_no_wait(ObArray<ObJsonObject *> &data_array)
 {
   int ret = OB_SUCCESS;
   clean_up();
-  if (data_array.empty() || OB_ISNULL(allocator_) || OB_ISNULL(url_) || OB_ISNULL(header_list_)) {
+  if (data_array.empty() || OB_ISNULL(allocator_) || OB_ISNULL(url_)
+      || OB_ISNULL(header_list_) || OB_ISNULL(url_admission_)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_ISNULL(curlm_)) {
-    if (OB_ISNULL(curlm_ = curl_multi_init())) {
-      ret = OB_INVALID_ARGUMENT;
-    }
-  } 
-  if (OB_SUCC(ret)) {
-    const int64_t num_data = data_array.count();
-    for (int64_t i = 0; OB_SUCC(ret) && i < num_data; ++i) {
-      ObJsonObject *data_item = data_array.at(i);
-      CURL *curl_handle = curl_easy_init();
-      ObStringBuffer *response_buf = OB_NEWx(ObStringBuffer, allocator_, allocator_);
-      if (OB_ISNULL(data_item)) {
+  } else {
+    // Snapshot every body before HTTP starts. Checked serialization avoids
+    // retaining input-arena strings, including on partial allocation failure.
+    for (int64_t i = 0; OB_SUCC(ret) && i < data_array.count(); ++i) {
+      ObJsonBuffer buffer(allocator_);
+      ObString serialized;
+      ObString owned;
+      ObIJsonBase *copy = nullptr;
+      if (OB_ISNULL(data_array.at(i))) {
         ret = OB_INVALID_ARGUMENT;
-      } else if (OB_ISNULL(curl_handle) || OB_ISNULL(response_buf)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else if (OB_FAIL(init_easy_handle(curl_handle, data_item, *response_buf))) {
-      } else if (OB_FAIL(curl_handles_.push_back(curl_handle))) {
+      } else if (OB_FAIL(data_array.at(i)->print(buffer, 0))) {
+      } else if (OB_FAIL(buffer.get_result_string(serialized))) {
+      } else if (OB_FAIL(ob_write_string(*allocator_, serialized, owned))) {
+      } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(allocator_, owned,
+          ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, copy))) {
+      } else if (OB_ISNULL(copy) || copy->json_type() != ObJsonNodeType::J_OBJECT) {
+        ret = OB_INVALID_DATA;
       } else {
-        curl_handle = nullptr;
-        if (OB_FAIL(response_buffers_.push_back(response_buf))) {
-        } else {
-          response_buf = nullptr;
-          if (CURLM_OK != curl_multi_add_handle(curlm_, curl_handles_.at(i))) {
-            ret = OB_CURL_ERROR;
-          }
-        }
+        ret = pending_bodies_.push_back(static_cast<ObJsonObject *>(copy));
       }
-      if (OB_NOT_NULL(curl_handle)) {
-        curl_easy_cleanup(curl_handle);
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < data_array.count(); ++i) {
+      ObStringBuffer *buffer = nullptr;
+      if (OB_ISNULL(data_array.at(i))) {
+        ret = OB_INVALID_ARGUMENT;
+      } else if (OB_FAIL(curl_handles_.push_back(nullptr))) {
+      } else if (OB_ISNULL(buffer = OB_NEWx(ObStringBuffer, allocator_, allocator_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(response_buffers_.push_back(buffer))) {
+        OB_DELETEx(ObStringBuffer, allocator_, buffer);
       }
-      if (OB_NOT_NULL(response_buf)) {
-        OB_DELETEx(ObStringBuffer, allocator_, response_buf);
-      }
+    }
+    if (OB_SUCC(ret) && OB_ISNULL(curlm_) && OB_ISNULL(curlm_ = curl_multi_init())) {
+      ret = OB_INIT_FAIL;
     }
     if (OB_SUCC(ret)) {
-      int running_handles = 0;
-      if (CURLM_OK != curl_multi_perform(curlm_, &running_handles)) {
-        ret = OB_CURL_ERROR;
-      } else if (running_handles == 0) {
-        is_finished_.store(true);
-      }
+      ret = start_batch_wave();
     }
   }
   if (OB_FAIL(ret)) {
     clean_up();
   }
+  return ret;
+}
+
+int ObAIFuncClient::start_batch_wave()
+{
+  int ret = OB_SUCCESS;
+  wave_start_ = next_body_;
+  if (OB_ISNULL(url_admission_) || next_body_ >= pending_bodies_.count()
+      || OB_NOT_NULL(wave_permit_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(wave_permit_ = new (std::nothrow) UrlRequestPermit())) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(wave_permit_->acquire(*url_admission_, abs_timeout_ts_, true))) {
+  } else {
+    const int64_t remaining = pending_bodies_.count() - next_body_;
+    while (OB_SUCC(ret) && wave_permit_->count() < remaining) {
+      const int acquire_ret = wave_permit_->acquire(*url_admission_, abs_timeout_ts_, false);
+      if (acquire_ret == OB_EAGAIN) {
+        break;
+      } else if (acquire_ret != OB_SUCCESS) {
+        ret = acquire_ret;
+      }
+    }
+    wave_end_ = wave_start_ + wave_permit_->count();
+    for (int64_t i = wave_start_; OB_SUCC(ret) && i < wave_end_; ++i) {
+      CURL *handle = curl_easy_init();
+      curl_handles_.at(i) = handle;
+      if (OB_ISNULL(handle)) {
+        ret = OB_INIT_FAIL;
+      } else if (OB_FAIL(init_easy_handle(handle, pending_bodies_.at(i), *response_buffers_.at(i)))) {
+      } else if (CURLM_OK != curl_multi_add_handle(curlm_, handle)) {
+        ret = OB_CURL_ERROR;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      next_body_ = wave_end_;
+      int running_handles = 0;
+      if (CURLM_OK != curl_multi_perform(curlm_, &running_handles)) {
+        ret = OB_CURL_ERROR;
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    stop_batch_wave();
+  }
+  return ret;
+}
+
+void ObAIFuncClient::stop_batch_wave()
+{
+  // Retire I/O before publishing any free URL capacity.
+  for (int64_t i = 0; i < curl_handles_.count(); ++i) {
+    CURL *handle = curl_handles_.at(i);
+    if (handle != nullptr) {
+      if (curlm_ != nullptr) {
+        curl_multi_remove_handle(curlm_, handle);
+      }
+      curl_easy_cleanup(handle);
+      curl_handles_.at(i) = nullptr;
+    }
+  }
+  delete wave_permit_;
+  wave_permit_ = nullptr;
+}
+
+int ObAIFuncClient::finish_batch_wave()
+{
+  int ret = OB_SUCCESS;
+  int64_t finished_count = 0;
+  int messages = 0;
+  CURLMsg *msg = nullptr;
+  while ((msg = curl_multi_info_read(curlm_, &messages)) != nullptr) {
+    if (msg->msg == CURLMSG_DONE) {
+      ++finished_count;
+      long response_code = 0;
+      if (msg->data.result != CURLE_OK
+          || curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_OK
+          || response_code / 100 != 2) {
+        ret = OB_CURL_ERROR;
+      }
+    }
+  }
+  if (finished_count != wave_end_ - wave_start_) {
+    ret = OB_CURL_ERROR;
+  }
+  completed_bodies_ += finished_count;
+  stop_batch_wave();
   return ret;
 }
 
@@ -360,8 +644,16 @@ bool ObAIFuncClient::check_batch_finished()
       batch_ret_ = OB_TIMEOUT;
     } else if (CURLM_OK != curl_multi_perform(curlm_, &running_handles)) {
       batch_ret_ = OB_CURL_ERROR;
+    } else if (running_handles == 0) {
+      batch_ret_ = finish_batch_wave();
+      if (batch_ret_ == OB_SUCCESS && next_body_ < pending_bodies_.count()) {
+        batch_ret_ = start_batch_wave();
+      } else {
+        is_finished_.store(true);
+      }
     }
-    if (OB_SUCCESS != batch_ret_ || running_handles == 0) {
+    if (batch_ret_ != OB_SUCCESS) {
+      stop_batch_wave();
       is_finished_.store(true);
     }
   }
@@ -377,40 +669,20 @@ int ObAIFuncClient::get_batch_result(ObArray<ObJsonObject *> &responses)
     ret = OB_NOT_INIT;
   } else if (!is_finished_.load()) {
     ret = OB_EAGAIN;
-  } else {
-    CURLMsg *msg = nullptr;
-    int msgs_in_queue = 0;
-    int64_t finished_count = 0;
-    while ((msg = curl_multi_info_read(curlm_, &msgs_in_queue))) {
-      if (msg->msg == CURLMSG_DONE) {
-        ++finished_count;
-        long response_code = 0;
-        CURLcode res = CURLE_OK;
-        if (msg->data.result != CURLE_OK) {
-          ret = OB_CURL_ERROR;
-        } else if (CURLE_OK != (res = curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &response_code))
-                   || response_code / 100 != 2) {
-          ret = OB_CURL_ERROR;
-        }
-      }
-    }
-    if (OB_SUCC(ret) && (finished_count != curl_handles_.count()
-        || response_buffers_.count() != curl_handles_.count())) {
-      ret = OB_CURL_ERROR;
-    }
+  } else if (completed_bodies_ != pending_bodies_.count()
+      || response_buffers_.count() != pending_bodies_.count()) {
+    ret = OB_CURL_ERROR;
   }
   if (OB_SUCC(ret)) {
-    ObIJsonBase *j_tree = NULL;
+    ObIJsonBase *j_tree = nullptr;
     for (int64_t i = 0; OB_SUCC(ret) && i < response_buffers_.count(); ++i) {
-      ObStringBuffer *response_buf = response_buffers_.at(i);
-      ObString response_str;
-      response_str.reset();
-      if (OB_ISNULL(response_buf)) {
+      ObStringBuffer *buffer = response_buffers_.at(i);
+      ObString response;
+      if (OB_ISNULL(buffer)) {
         ret = OB_INVALID_ARGUMENT;
-      } else if (OB_FAIL(ob_write_string(*allocator_, response_buf->string(), response_str))) {
+      } else if (OB_FAIL(ob_write_string(*allocator_, buffer->string(), response))) {
       } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(
-              allocator_, response_str, ObJsonInType::JSON_TREE,
-              ObJsonInType::JSON_TREE, j_tree))) {
+          allocator_, response, ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, j_tree))) {
         ret = OB_ERR_INVALID_JSON_TEXT;
       } else if (OB_ISNULL(j_tree) || j_tree->json_type() != ObJsonNodeType::J_OBJECT) {
         ret = OB_INVALID_DATA;
@@ -483,25 +755,19 @@ int ObAIFuncClient::init_easy_handle(CURL *curl, ObJsonObject *body, ObStringBuf
   return ret;
 }
 
-void ObAIFuncClient::clean_up() 
+void ObAIFuncClient::clean_up()
 {
-  for (int64_t i = 0; i < curl_handles_.count(); ++i) {
-    CURL *curl_handle = curl_handles_.at(i);
-    if (curl_handle != nullptr) {
-      curl_multi_remove_handle(curlm_, curl_handle);
-      curl_easy_cleanup(curl_handle);
-      curl_handles_.at(i) = nullptr;
-    }
-  }
+  stop_batch_wave();
   curl_handles_.reset();
   for (int64_t i = 0; i < response_buffers_.count(); ++i) {
-    ObStringBuffer *response_buf = response_buffers_.at(i);
-    if (response_buf != nullptr) {
-      OB_DELETEx(ObStringBuffer, allocator_, response_buf);
-      response_buffers_.at(i) = nullptr;
+    ObStringBuffer *buffer = response_buffers_.at(i);
+    if (buffer != nullptr) {
+      OB_DELETEx(ObStringBuffer, allocator_, buffer);
     }
   }
   response_buffers_.reset();
+  pending_bodies_.reset();
+  next_body_ = completed_bodies_ = wave_start_ = wave_end_ = 0;
   batch_ret_ = OB_SUCCESS;
   is_finished_.store(false);
 }

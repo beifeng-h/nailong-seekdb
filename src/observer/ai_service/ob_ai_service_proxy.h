@@ -47,6 +47,9 @@ public:
   static int select_ai_endpoint_by_ai_model_name(common::ObArenaAllocator &allocator, common::ObISQLClient &sql_proxy,
                                                  const ObString &ai_model_name, common::ObNameCaseMode name_case_mode, ObAiModelEndpointInfo &endpoint);
   static int check_ai_endpoint_exists(common::ObArenaAllocator &allocator, common::ObISQLClient &sql_proxy, const ObString &name, bool &is_exists);
+  static int select_url_max_concurrency(common::ObISQLClient &sql_proxy,
+                                       const ObString &url, int64_t abs_timeout_ts,
+                                       int64_t &max_concurrency);
 
 private:
   // ai endpoint

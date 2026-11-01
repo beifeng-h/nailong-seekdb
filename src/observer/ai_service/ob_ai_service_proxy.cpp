@@ -182,6 +182,53 @@ int ObAiServiceProxy::select_ai_endpoint_by_ai_model_name(ObArenaAllocator &allo
   return ret;
 }
 
+int ObAiServiceProxy::select_url_max_concurrency(
+    ObISQLClient &sql_proxy, const ObString &url, int64_t abs_timeout_ts,
+    int64_t &max_concurrency)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  ObTimeoutCtx ctx;
+  const int64_t now = ObTimeUtility::current_time();
+  const int64_t default_timeout = config::internal_sql_execute_timeout();
+  const int64_t internal_deadline = now + default_timeout;
+  const int64_t deadline = abs_timeout_ts < internal_deadline ? abs_timeout_ts : internal_deadline;
+  max_concurrency = 0;
+  if (url.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (deadline <= now) {
+    ret = OB_TIMEOUT;
+  } else if (OB_FAIL(ctx.set_abs_timeout(deadline))) {
+  } else if (OB_FAIL(sql.assign_fmt(
+      "SELECT COUNT(*) AS endpoint_count, MIN(max_concurrency) AS url_max_concurrency "
+      "FROM %s WHERE CAST(url AS BINARY) = CAST(", OB_ALL_AI_MODEL_ENDPOINT_TNAME))) {
+  } else if (OB_FAIL(sql_append_hex_escape_str(url, sql))) {
+  } else if (OB_FAIL(sql.append(" AS BINARY)"))) {
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = nullptr;
+      int64_t count = 0;
+      if (OB_FAIL(sql_proxy.read(res, sql.ptr()))) {
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(result->next())) {
+      } else {
+        EXTRACT_INT_FIELD_MYSQL(*result, "endpoint_count", count, int64_t);
+        if (OB_FAIL(ret)) {
+        } else if (count == 0) {
+          ret = OB_ENTRY_NOT_EXIST;
+        } else {
+          EXTRACT_INT_FIELD_MYSQL(*result, "url_max_concurrency", max_concurrency, int64_t);
+          if (OB_SUCC(ret) && (max_concurrency < 1 || max_concurrency > 1024)) {
+            ret = OB_INVALID_DATA;
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAiServiceProxy::build_ai_endpoint_(ObArenaAllocator &allocator, ObMySQLResult &result, ObAiModelEndpointInfo &endpoint)
 {
   int ret = OB_SUCCESS;

@@ -644,6 +644,9 @@ public:
       common::ObIAllocator &allocator,
       share::ObAiModelEndpointInfo &endpoint,
       bool check_access = true) const override;
+  int resolve_url_max_concurrency(
+      const common::ObString &url, int64_t abs_timeout_ts,
+      int64_t &max_concurrency) const override;
   int try_acquire_ddl_execution(int64_t cpu_quota_concurrency) override;
   void release_ddl_execution() override;
   concurrency_control::ObMultiVersionGarbageCollector * multi_version_garbage_collector() { return mods_multi_version_garbage_collector_; }

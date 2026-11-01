@@ -42,3 +42,22 @@ add_dependencies(ai_function_contracts
 add_test(NAME ai_function_contracts COMMAND ai_function_contracts)
 set_tests_properties(ai_function_contracts PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# Developer HTTP admission contracts are separate from the original nine cases.
+add_executable(ai_url_concurrency_contracts EXCLUDE_FROM_ALL
+  ai_function_contracts_main.cpp
+  sql/engine/expr/test_ai_http_admission.cpp)
+target_include_directories(ai_url_concurrency_contracts PRIVATE
+  "${_ai_contracts_gtest_include}")
+target_link_libraries(ai_url_concurrency_contracts PRIVATE
+  oceanbase
+  "${_ai_contracts_gtest_archive}"
+  pthread
+  dl)
+add_dependencies(ai_url_concurrency_contracts
+  ai_function_contracts_check_dependencies
+  oceanbase)
+add_test(NAME ai_url_concurrency_contracts COMMAND ai_url_concurrency_contracts)
+set_tests_properties(ai_url_concurrency_contracts PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+  TIMEOUT 60)

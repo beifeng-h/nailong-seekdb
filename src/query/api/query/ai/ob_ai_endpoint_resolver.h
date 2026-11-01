@@ -33,6 +33,10 @@ public:
       common::ObIAllocator &allocator,
       share::ObAiModelEndpointInfo &endpoint,
       bool check_access = true) const = 0;
+  // Snapshot the minimum cap across committed rows with this exact URL.
+  virtual int resolve_url_max_concurrency(
+      const common::ObString &url, int64_t abs_timeout_ts,
+      int64_t &max_concurrency) const = 0;
 };
 
 } // namespace query

@@ -236,6 +236,19 @@ int ObAiServiceExecutor::read_ai_endpoint_by_ai_model_name(ObArenaAllocator &all
   return ret;
 }
 
+int ObAiServiceExecutor::read_url_max_concurrency(
+    const ObString &url, int64_t abs_timeout_ts, int64_t &max_concurrency)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ret = ObAiServiceProxy::select_url_max_concurrency(
+        *GCTX.sql_proxy_, url, abs_timeout_ts, max_concurrency);
+  }
+  return ret;
+}
+
 int ObAiServiceExecutor::fetch_new_ai_model_endpoint_id(uint64_t &new_ai_model_endpoint_id)
 {
   int ret = OB_SUCCESS;

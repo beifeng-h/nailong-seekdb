@@ -346,6 +346,14 @@ int ObServer::resolve_by_model_name(
   return ret;
 }
 
+int ObServer::resolve_url_max_concurrency(
+    const common::ObString &url, int64_t abs_timeout_ts,
+    int64_t &max_concurrency) const
+{
+  return share::ObAiServiceExecutor::read_url_max_concurrency(
+      url, abs_timeout_ts, max_concurrency);
+}
+
 int ObServer::try_acquire_ddl_execution(const int64_t cpu_quota_concurrency)
 {
   return server_runtime_controller_.inc_ddl_count(cpu_quota_concurrency);
