@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE" || exit 1
 
 JOBS="$(nproc 2>/dev/null || echo 8)"
-[ "$JOBS" -gt 32 ] && JOBS=32
+[ "$JOBS" -lt 1 ] && JOBS=8
 
 # --- 0. build offline --------------------------------------------------------
 # The rust components (sql_nio, ...) are vendored in the cargo cache; without
@@ -57,4 +57,16 @@ if [ "$#" -eq 0 ]; then
   set -- release --make "-j$JOBS"
 fi
 
-exec bash "$HERE/build.upstream.sh" "$@"
+bash "$HERE/build.upstream.sh" "$@"
+rc=$?
+
+# --- 3. put the artifact where a harness may look for it ---------------------
+if [ "$rc" -eq 0 ] && [ -f build_release/src/observer/seekdb ]; then
+  mkdir -p bin 2>/dev/null || true
+  ln -sf ../build_release/src/observer/seekdb bin/seekdb 2>/dev/null || true
+  ln -sf build_release/src/observer/seekdb seekdb 2>/dev/null || true
+  echo "[build.sh] artifact: build_release/src/observer/seekdb"
+  echo "[build.sh] artifact: bin/seekdb (symlink)"
+fi
+
+exit "$rc"
