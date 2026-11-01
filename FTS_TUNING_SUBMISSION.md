@@ -28,16 +28,27 @@ src/storage/fts/ob_fts_struct.cpp             (ObFTWord 比较)
 
 ## 构建入口
 
-```bash
-# Ubuntu 24.04 x86_64；依赖 cmake / ninja / g++ / libaio / ncurses / ssl / lz4 / zstd
-export CARGO_NET_OFFLINE=true
-./build.sh release --make -j$(nproc)
+根目录的 `build.sh` 是一个薄的包装脚本（原版入口保留为 `build.upstream.sh`），
+这样无论评测机怎么调用都能直接跑起来：
 
-# 产物
-build_release/src/observer/seekdb
+```bash
+./build.sh                    # 等价于 release --make -j32，不需要额外参数
+./build.sh release --make -j96
+# 产物：build_release/src/observer/seekdb
 ```
 
-本机（128 核）实测：`--make -j96` 全量构建 **395 s**，产物 1.38 GB。
+包装脚本做两件事：
+
+1. **无参数时默认 `release --make`**。上游 `build.sh` 不带参数只会打印 usage 并
+   以退出码 2 结束（`./build.sh` → exit 2），直接调用会“秒失败”。
+2. **自动链接平台预置的依赖缓存**：`deps/3rd` 未准备时，从
+   `/opt/seekdb-deps-cache/*/3rd`（seekdb notebook 镜像自带的那份，可用
+   `SEEKDB_DEPS_CACHE` 覆盖）硬链接 `deps` 与 `devtools`，并复制 `DONE` 标记，
+   因此构建**不需要联网**。缺了它，`./build.sh release --make` 会立刻报
+   `cmake not found; initialize dependencies or install CMake 3.20+` 并退出 2。
+
+环境：Ubuntu 24.04 x86_64。本机（128 核）实测 `-j96` 全量构建 **395 s**，
+产物 1.38 GB；`-j32` 约 12 分钟。
 
 ## 验证结果
 
