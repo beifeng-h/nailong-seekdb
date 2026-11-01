@@ -1,0 +1,183 @@
+name: Seekdb free Linux validation
+
+on:
+  push:
+    branches: [codex/seekdb-verify-20261101]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seekdb-free-linux-validation
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Checkout exact public push SHA without persisted credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" checkout --detach FETCH_HEAD
+          # The native harness compares untouched public tests against this
+          # exact ancestor. Fetching the object must not move the candidate HEAD.
+          git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin 6fc7f80b57484a1c00e2d18304e284c39a07da36
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git cat-file -e 6fc7f80b57484a1c00e2d18304e284c39a07da36^{commit}
+          test -z "$(git status --porcelain)"
+          mkdir -p "$RUNNER_TEMP/seekdb-evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/seekdb-evidence/checkout-sha.txt"
+
+      - name: Reclaim only disposable runner image tools and measure actual resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # These are fixed, unrelated preinstalled tool directories on this
+          # ephemeral GitHub VM. No workspace/user data, Rust, Python or C++
+          # compiler directory is targeted.
+          for image_tool in /usr/local/lib/android /usr/share/dotnet /opt/ghc; do
+            if test -e "$image_tool"; then
+              resolved=$(realpath -- "$image_tool")
+              test "$resolved" = "$image_tool"
+              case "$resolved" in
+                /usr/local/lib/android|/usr/share/dotnet|/opt/ghc) sudo rm -rf -- "$resolved" ;;
+                *) exit 2 ;;
+              esac
+            fi
+          done
+          {
+            uname -srmo
+            getconf GNU_LIBC_VERSION
+            nproc
+            free -b
+            df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          } | tee "$RUNNER_TEMP/seekdb-evidence/resources.txt"
+          free_bytes=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')
+          # This is a conservative admission threshold, not measured full-build
+          # sufficiency; the job retains actual disk/time evidence throughout.
+          test "$free_bytes" -ge 37580963840
+
+      - name: Install official documented Linux host packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git wget curl rpm rpm2cpio cpio make build-essential binutils m4 file python3 libtool-bin libaio1t64
+
+      - name: Preserve dependency profile while upgrading its exact official mirror transport to HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum deps/init/dep_create.sh deps/init/oceanbase.el9.x86_64.deps | tee "$RUNNER_TEMP/seekdb-evidence/dependency-source-before.sha256"
+          tools="$RUNNER_TEMP/seekdb-https-tools"
+          mkdir -p "$tools"
+          cat > "$tools/wget" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          for value in "$@"; do
+            case "$value" in
+              http://mirrors.oceanbase.com/*) value="https://mirrors.oceanbase.com/${value#http://mirrors.oceanbase.com/}" ;;
+              https://mirrors.oceanbase.com/*) ;;
+              http://*|https://*) echo 'Unexpected dependency download host' >&2; exit 93 ;;
+            esac
+            args+=("$value")
+          done
+          exec /usr/bin/wget --https-only --timeout=30 --tries=1 "${args[@]}"
+          SH
+          chmod 0755 "$tools/wget"
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+
+      - name: Set up repository-pinned Rust with cache writes disabled
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+          crates-mirror: 'false'
+
+      - name: Initialize exact repository Release Unity configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 45m ./build.sh release --init 2>&1 | tee "$RUNNER_TEMP/seekdb-evidence/configure.log"
+          grep -E '^(CMAKE_BUILD_TYPE|OB_ENABLE_UNITY|OB_USE_LLD):' build_release/CMakeCache.txt | tee "$RUNNER_TEMP/seekdb-evidence/configuration.txt"
+          (cd rust && rustc --version && cargo --version) | tee "$RUNNER_TEMP/seekdb-evidence/rust-versions.txt"
+          du -sx -B1 deps/3rd build_release | tee "$RUNNER_TEMP/seekdb-evidence/size-after-configure.txt"
+
+      - name: Verify exact official native SQL clients before the long C++ build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum -c "$RUNNER_TEMP/seekdb-evidence/dependency-source-before.sha256"
+          test -x deps/3rd/usr/local/oceanbase/devtools/bin/cmake
+          test -f deps/3rd/DONE
+          # dep_create.sh processes all package sections, including [test-utils].
+          # These identities were measured from the same official 2.2.3 RPMs
+          # in the prior real Linux run; no client source/version is substituted.
+          printf '%s\n' \
+            '798aa952d536563ee0291e69251a6d0cd0d85e0c470d5499768fa0731ff3c1be  deps/3rd/u01/obclient/bin/obclient' \
+            '64e0323b385af2831c5b166a375e8320ec40e3ead0bd925295de1b8f5a2196c6  deps/3rd/u01/obclient/bin/mysqltest' \
+            | tee "$RUNNER_TEMP/seekdb-evidence/expected-clients.sha256"
+          sha256sum -c "$RUNNER_TEMP/seekdb-evidence/expected-clients.sha256"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib:$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib64:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          for client in obclient mysqltest; do
+            test -x "deps/3rd/u01/obclient/bin/$client"
+            ldd "deps/3rd/u01/obclient/bin/$client" | tee "$RUNNER_TEMP/seekdb-evidence/$client-ldd.txt"
+            if grep -F 'not found' "$RUNNER_TEMP/seekdb-evidence/$client-ldd.txt"; then exit 2; fi
+            timeout 10s "deps/3rd/u01/obclient/bin/$client" --version | tee "$RUNNER_TEMP/seekdb-evidence/$client-version.txt"
+          done
+
+      - name: Build actual production executable with two compiler jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
+          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 225m "$cmake_bin" --build build_release --target seekdb -j2 2>&1 | tee "$RUNNER_TEMP/seekdb-evidence/build.log"
+
+      - name: Build focused production-linked contracts for the single validation run
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
+          timeout --signal=TERM --kill-after=30s 10m "$cmake_bin" --build build_release --target ai_function_contracts ai_url_concurrency_contracts -j2 2>&1 | tee "$RUNNER_TEMP/seekdb-evidence/contracts-build.log"
+          # The native harness executes and validates each contract suite once.
+          sha256sum build_release/src/observer/seekdb build_release/src/observer/liboceanbase.so build_release/unittest/ai_function_contracts build_release/unittest/ai_url_concurrency_contracts | tee "$RUNNER_TEMP/seekdb-evidence/binaries.sha256"
+
+      - name: Run reviewed original native SQL validation without test expectation changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .github/script/seekdb/contest_validation.py
+          timeout --signal=TERM --kill-after=30s 40m python3 .github/script/seekdb/contest_validation.py \
+            --source "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/seekdb-contest-validation" \
+            --expected-sha "$GITHUB_SHA" \
+            --reference-sha 6fc7f80b57484a1c00e2d18304e284c39a07da36 \
+            --execute 2>&1 | tee "$RUNNER_TEMP/seekdb-evidence/native-validation.log"
+
+      - name: Always report final resources and source identity in normal logs
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          git rev-parse HEAD
+          git status --short
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          free -b
+          test ! -d deps/3rd || du -sx -B1 deps/3rd
+          test ! -d build_release || du -sx -B1 build_release
+          {
+            printf '### Seekdb candidate validation\n\n'
+            printf 'Exact checkout SHA: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Runner: standard `ubuntu-24.04`; no Actions cache or artifact upload.\n\n'
+            printf 'Compilation, contracts and native SQL outcomes must be read separately from their steps.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
