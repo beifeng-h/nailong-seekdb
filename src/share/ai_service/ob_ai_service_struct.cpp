@@ -81,6 +81,7 @@ int ObAiModelEndpointInfo::deep_copy(
   int ret = OB_SUCCESS;
   reset();
   endpoint_id_ = other.endpoint_id_;
+  max_concurrency_ = other.max_concurrency_;
   if (OB_FAIL(ob_write_string(allocator, other.name_, name_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.scope_, scope_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.ai_model_name_, ai_model_name_))) {
@@ -123,6 +124,9 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (!is_valid_provider(provider_)) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("provider"), "provider");
+  } else if (max_concurrency_ < 1 || max_concurrency_ > MAX_ENDPOINT_CONCURRENCY) {
+    ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("max_concurrency"), "max_concurrency");
   } else if (!parameters_.empty()) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("parameters"), "parameters");
@@ -157,6 +161,23 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
     ObJsonObjPair elem;
     if (OB_FAIL(iter.get_elem(elem))) {
     } else {
+      if (elem.first.case_compare("max_concurrency") == 0) {
+        const bool is_signed = OB_NOT_NULL(elem.second)
+            && elem.second->json_type() == ObJsonNodeType::J_INT;
+        const bool is_unsigned = OB_NOT_NULL(elem.second)
+            && elem.second->json_type() == ObJsonNodeType::J_UINT;
+        const bool valid_value = (is_signed && elem.second->get_int() >= 1
+            && elem.second->get_int() <= MAX_ENDPOINT_CONCURRENCY)
+            || (is_unsigned && elem.second->get_uint() >= 1
+                && elem.second->get_uint() <= static_cast<uint64_t>(MAX_ENDPOINT_CONCURRENCY));
+        if (!valid_value) {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+        } else {
+          max_concurrency_ = is_signed ? elem.second->get_int()
+              : static_cast<int64_t>(elem.second->get_uint());
+        }
+      } else
       EXTRACT_JSON_ELEM_STR("scope", scope_)
       EXTRACT_JSON_ELEM_STR("ai_model_name", ai_model_name_)
       EXTRACT_JSON_ELEM_STR("url", url_)

@@ -115,10 +115,31 @@ bool is_ai_ddl_value_column(const ObTableSchema &table, uint64_t column_id)
 
 int append_ai_ddl_copy_columns(const ObTableSchema &source, const ObTableSchema &dest,
     const ObColumnNameMap *names, const int64_t task_id, ObSqlString &query,
-    ObSqlString &insert)
+    ObSqlString &insert, const ObIArray<ObColumnNameInfo> &copied_columns,
+    ObSqlString &source_projection)
 {
   int ret = OB_SUCCESS;
+  bool has_ai_column = false;
+  ObSEArray<ObString, 16> source_columns;
   if (dest.is_user_table() && dest.is_user_hidden_table()) {
+    for (auto it = dest.column_begin(); !has_ai_column && it != dest.column_end(); ++it) {
+      has_ai_column = nullptr != *it && (*it)->is_ai_column();
+    }
+    // The inner query exposes only real source columns. The outer query retains
+    // the existing aliases, conversions and AI initialization expressions.
+    for (int64_t i = 0; OB_SUCC(ret) && has_ai_column && i < copied_columns.count(); ++i) {
+      if (OB_FAIL(add_var_to_array_no_dup(source_columns, copied_columns.at(i).column_name_))) {
+      }
+    }
+    const ObRowkeyInfo &keys = source.get_rowkey_info();
+    for (int64_t i = 0; OB_SUCC(ret) && has_ai_column && i < keys.get_size(); ++i) {
+      const ObRowkeyColumn *key = keys.get_column(i);
+      const ObColumnSchemaV2 *column = nullptr;
+      if (OB_ISNULL(key) || OB_ISNULL(column = source.get_column_schema(key->column_id_))) {
+        ret = OB_SCHEMA_ERROR;
+      } else if (OB_FAIL(add_var_to_array_no_dup(source_columns, column->get_column_name_str()))) {
+      }
+    }
     for (auto it = dest.column_begin(); OB_SUCC(ret) && it != dest.column_end(); ++it) {
       const ObColumnSchemaV2 *column = *it;
       if (nullptr == column || !column->is_ai_column()) {
@@ -148,6 +169,7 @@ int append_ai_ddl_copy_columns(const ObTableSchema &source, const ObTableSchema 
         const ObColumnSchemaV2 *state = refresh ? nullptr : source.get_column_schema(old_ids[1]);
         if (OB_ISNULL(target) || (!refresh && (OB_ISNULL(origin) || OB_ISNULL(state)))) {
           ret = OB_SCHEMA_ERROR;
+        } else if (!refresh && OB_FAIL(add_var_to_array_no_dup(source_columns, origin->get_column_name_str()))) {
         } else if (OB_FAIL(query.append(", ")) || OB_FAIL(insert.append(", "))) {
         } else if (OB_FAIL(append_ai_ddl_identifier(insert, target->get_column_name_str()))) {
         } else if (refresh && i < 2) {
@@ -170,6 +192,11 @@ int append_ai_ddl_copy_columns(const ObTableSchema &source, const ObTableSchema 
           ret = append_ai_ddl_identifier(query, target->get_column_name_str());
         }
       }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && has_ai_column && i < source_columns.count(); ++i) {
+    if (i > 0 && OB_FAIL(source_projection.append(", "))) {
+    } else if (OB_FAIL(append_ai_ddl_identifier(source_projection, source_columns.at(i)))) {
     }
   }
   return ret;
@@ -586,6 +613,7 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
     // generate local build sql
     if (OB_SUCC(ret)) {
       ObSqlString query_column_sql_string;
+      ObSqlString ai_source_projection;
       ObSqlString insert_column_sql_string;
       ObSqlString rowkey_column_sql_string;
       ObSqlString src_table_schema_version_hint_sql_string;
@@ -617,7 +645,8 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
         } else if (OB_FAIL(ObDDLUtil::generate_column_name_str(column_names, true/*with origin name*/, true/*with alias name*/, use_heap_table_ddl_plan, query_column_sql_string))) {
         } else if (OB_FAIL(ObDDLUtil::generate_column_name_str(insert_column_names, true/*with origin name*/, false/*with alias name*/, use_heap_table_ddl_plan, insert_column_sql_string))) {
         } else if (OB_FAIL(append_ai_ddl_copy_columns(*source_table_schema, *dest_table_schema,
-            col_name_map, task_id, query_column_sql_string, insert_column_sql_string))) {
+            col_name_map, task_id, query_column_sql_string, insert_column_sql_string,
+            column_names, ai_source_projection))) {
         } else if (!use_heap_table_ddl_plan && OB_FAIL(ObDDLTaskUtil::generate_order_by_str(
             select_column_ids, order_column_ids, rowkey_column_sql_string))) {
         }
@@ -656,6 +685,25 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
           src_table_schema_version_hint_sql_string.reset();
         }
         if (OB_FAIL(ret)) {
+        } else if (!ai_source_projection.empty()) {
+          // Preserve the source-scan DDL checksum projection. NO_MERGE keeps
+          // constants and request hashes in the outer SELECT's subplan scan.
+          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', 'false') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT %.*s FROM (SELECT /*+ NO_MERGE index(`%.*s` primary) %.*s */ %.*s FROM `%.*s`.`%.*s` %.*s AS OF SNAPSHOT %ld) `__ai_ddl_source` %.*s",
+              real_parallelism, execution_id, task_id,
+              static_cast<int>(strlen(io_read_hint)), io_read_hint,
+              static_cast<int>(new_dest_database_name.length()), new_dest_database_name.ptr(),
+              static_cast<int>(new_dest_table_name.length()), new_dest_table_name.ptr(),
+              static_cast<int>(partition_names.length()), partition_names.ptr(),
+              static_cast<int>(insert_column_sql_string.length()), insert_column_sql_string.ptr(),
+              static_cast<int>(query_column_sql_string.length()), query_column_sql_string.ptr(),
+              static_cast<int>(new_source_table_name.length()), new_source_table_name.ptr(),
+              static_cast<int>(src_table_schema_version_hint_sql_string.length()), src_table_schema_version_hint_sql_string.ptr(),
+              static_cast<int>(ai_source_projection.length()), ai_source_projection.ptr(),
+              static_cast<int>(new_source_database_name.length()), new_source_database_name.ptr(),
+              static_cast<int>(new_source_table_name.length()), new_source_table_name.ptr(),
+              static_cast<int>(partition_names.length()), partition_names.ptr(),
+              snapshot_version, static_cast<int>(rowkey_column_sql_string.length()), rowkey_column_sql_string.ptr()))) {
+          }
         } else {
           if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', 'false') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
               real_parallelism, execution_id, task_id,
