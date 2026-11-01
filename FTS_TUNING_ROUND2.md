@@ -71,9 +71,11 @@
 * 每线程复用 IK 词典对象：实测 PARSER_INIT 每次约 1 µs，构建/分词收益在噪声内。
 * 逐 token 小写化/词频聚合的进一步改造：合计约 263 cycles/token，
   相对分词总成本（~2000 cycles/token）占比较小。
-* 查询侧：`is_index_back=false`、每命中约 0.19 µs，已经很紧；
-  `LIMIT` 未下推到 TEXT RETRIEVAL SCAN 是 `query_limit` 的根因，
-  但需要改优化器 + DAS 两层，本轮未做。
+* 查询侧：`is_index_back=false`、每命中约 0.19 µs，已经很紧。
+  `query_limit` 的 `LIMIT` 其实**已经下推**成 `TEXT RETRIEVAL SCAN` 上的
+  top-N（`sort_keys([MATCH(...) DESC]), limit(20)`）：要返回"相关度最高的 20 行"
+  必须扫完所有命中做堆排序，因此它和全量检索同量级是语义决定的，
+  不是缺失的优化点。真正的剩余空间只在逐命中的 DAAT 合并与打分本身。
 
 ## 7. 第二实例复核（36.150.116.206:31872，全新机器从零重建）
 
