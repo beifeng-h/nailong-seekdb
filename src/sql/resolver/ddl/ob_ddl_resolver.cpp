@@ -1797,7 +1797,6 @@ int ObDDLResolver::resolve_ai_column(ObColumnSchemaV2 &column, const ObTableSche
           static_cast<int>(strlen("AI column expression")), "AI column expression");
     } else if (dependency->is_hidden() || dependency->is_ai_column()) {
       ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column dependencies on AI or hidden columns");
     } else if (OB_FAIL(add_var_to_array_no_dup(dependencies, dependency->get_column_id()))) {
     }
   }
