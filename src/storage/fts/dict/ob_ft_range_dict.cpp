@@ -389,21 +389,65 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+namespace
+{
+// utf8mb4_bin compares two strings by code point.  For UTF-8 that is the plain
+// byte order, so it can be evaluated without going through the collation
+// function: compare the common prefix byte by byte, then the lengths.  The
+// dictionary ranges are always built with that collation.
+OB_INLINE int ft_bin_cmp(const ObString &lhs, const ObString &rhs)
+{
+  const int64_t min_len = lhs.length() < rhs.length() ? lhs.length() : rhs.length();
+  int cmp = 0;
+  if (min_len > 0 && 0 != (cmp = MEMCMP(lhs.ptr(), rhs.ptr(), min_len))) {
+    return cmp < 0 ? -1 : 1;
+  } else if (lhs.length() == rhs.length()) {
+    return 0;
+  }
+  return lhs.length() < rhs.length() ? -1 : 1;
+}
+
+OB_INLINE bool ft_range_contains(const ObFTRangeDict::ObFTRange &range, const ObString &word)
+{
+  return ft_bin_cmp(range.start_.get_word(), word) <= 0
+         && ft_bin_cmp(range.end_.get_word(), word) >= 0;
+}
+} // end anonymous namespace
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
+  const int64_t range_cnt = range_dicts_.size();
+  if (ObCollationType::CS_TYPE_UTF8MB4_BIN != desc_.coll_type_) {
+    // keep the collation function for the (never used) other collations
+    for (int64_t i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
+      if (ObCharset::strcmp(desc_.coll_type_,
+                            range_dicts_[i].start_.get_word(),
+                            single_word)
+              <= 0
+          && ObCharset::strcmp(desc_.coll_type_,
+                               range_dicts_[i].end_.get_word(),
+                               single_word)
+                 >= 0) {
+        dict = range_dicts_[i].dict_;
+        found = true;
+      }
+    }
+  } else {
+    // Try the range that served the previous lookup first: a document is
+    // usually made of characters of a single range.
+    const int32_t hint = last_range_idx_;
+    if (hint >= 0 && hint < range_cnt && ft_range_contains(range_dicts_[hint], single_word)) {
+      dict = range_dicts_[hint].dict_;
       found = true;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
+      if (ft_range_contains(range_dicts_[i], single_word)) {
+        dict = range_dicts_[i].dict_;
+        last_range_idx_ = static_cast<int32_t>(i);
+        found = true;
+      }
     }
   }
   if (!found) {

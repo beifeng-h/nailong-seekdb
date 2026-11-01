@@ -76,15 +76,32 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
 
-
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObStopWordChecker hasn't been initialized", K(ret), K(inited_));
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("word is empty", K(ret), K(word));
+  } else if (OB_LIKELY(word.get_collation_type() == stopword_type_.get_collation_type())) {
+    // Converting a string to its own collation is the identity, so the word can
+    // be looked up directly.  This is the common case and it saves both the
+    // temporary allocator and the copy of the word, which were paid once per
+    // token.
+    ret = stopword_set_.exist_refactored(word);
+    if (OB_HASH_NOT_EXIST == ret) {
+      is_stopword = false;
+      ret = OB_SUCCESS;
+    } else if (OB_HASH_EXIST == ret) {
+      is_stopword = true;
+      ret = OB_SUCCESS;
+    } else if (OB_SUCC(ret)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the exist of hastset shouldn't return success", K(ret), K(word));
+    } else {
+      LOG_WARN("fail to do exist", K(ret), K(word));
+    }
   } else {
+    common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
     common::ObString cmp_str;
     // do nothing set out with in if type is the same.
     if (OB_FAIL(common::ObCharset::charset_convert(
