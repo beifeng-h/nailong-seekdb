@@ -183,6 +183,15 @@ def zip_logs(base, target):
     return {'path': str(target), 'bytes': target.stat().st_size, 'sha256': digest(target)}
 
 
+def database_cleanup_passed(row):
+    return (row.get('ownDatabaseDestroyed') is True and
+            row.get('stop', {}).get('exitCode') == 0 and
+            row.get('destroy', {}).get('exitCode') == 0 and
+            row.get('logs', {}).get('stoppedBeforeCapture') is True and
+            bool(row.get('logs', {}).get('sha256')) and
+            not row.get('cleanupError'))
+
+
 def run_case(args, source, native, case, number):
     out = args.out / case.name
     out.mkdir()
@@ -264,6 +273,7 @@ def run_case(args, source, native, case, number):
         row['testUnchanged'] = digest(case.test_file) == row['testSha256']
         row['expectedUnchanged'] = digest(case.result_file) == row['expectedSha256']
         row['finishedUtc'] = utc()
+        row['cleanupPassed'] = database_cleanup_passed(row)
         write(out / 'result.json', row)
         show_log(out / 'actual-parameters.log')
         show_log(out / 'original-run-case.log')
@@ -377,6 +387,7 @@ def run_url_probe(args, source, native):
         row['probeUnchanged'] = probe.is_file() and digest(probe) == URL_PROBE_SHA256
         row['binaryUnchanged'] = digest(args.binary) == row['binarySha256']
         row['finishedUtc'] = utc()
+        row['cleanupPassed'] = database_cleanup_passed(row)
         write(out / 'result.json', row)
         show_log(out / 'actual-parameters.log')
         show_log(out / 'probe.log')
@@ -398,7 +409,7 @@ def main():
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
     args.source = args.source.resolve(strict=True)
-    args.out = args.out.absolute()
+    args.out = args.out.resolve(strict=False)
     plan = {'scope': SCOPE, 'commit': args.expected_sha, 'originalReference': args.reference_sha,
             'source': str(args.source), 'out': str(args.out), 'cases': CASES,
             'parameters': PARAMETERS, 'caseRetries': 0, 'parallelDatabases': 1,
@@ -477,8 +488,11 @@ def main():
     nodes = xml.findall('.//testcase')
     unit_result.update(tests=len(nodes), failures=len(xml.findall('.//failure')),
                        skipped=len(xml.findall('.//skipped')),
+                       notRun=sum(node.get('status') != 'run' for node in nodes),
                        passed=unit_result['exitCode'] == 0 and len(nodes) == 9 and
-                              not xml.findall('.//failure') and not xml.findall('.//skipped'))
+                              all(node.get('status') == 'run' for node in nodes) and
+                              not xml.findall('.//error') and not xml.findall('.//failure') and
+                              not xml.findall('.//skipped'))
     report['contracts'] = unit_result
     write(args.out / 'report.json', report)
     emit('ORIGINAL_NINE_CONTRACTS', unit_result)
@@ -489,8 +503,11 @@ def main():
     url_nodes = url_xml.findall('.//testcase')
     url_result.update(tests=len(url_nodes), failures=len(url_xml.findall('.//failure')),
                       skipped=len(url_xml.findall('.//skipped')),
+                      notRun=sum(node.get('status') != 'run' for node in url_nodes),
                       passed=url_result['exitCode'] == 0 and len(url_nodes) == 5 and
-                             not url_xml.findall('.//failure') and not url_xml.findall('.//skipped'))
+                             all(node.get('status') == 'run' for node in url_nodes) and
+                             not url_xml.findall('.//error') and not url_xml.findall('.//failure') and
+                             not url_xml.findall('.//skipped'))
     report['urlContracts'] = url_result
     write(args.out / 'report.json', report)
     emit('FIVE_URL_HTTP_CONTRACTS', url_result)
@@ -504,9 +521,9 @@ def main():
     emit('SOURCE_IDENTITY_AFTER', report['sourceIdentityAfter'])
     url_probe = report['developerUrlSharedCap']
     passed = (unit_result['passed'] and url_result['passed'] and
-              url_probe['status'] == 'passed' and url_probe['ownDatabaseDestroyed'] and
+              url_probe['status'] == 'passed' and database_cleanup_passed(url_probe) and
               url_probe['probeUnchanged'] and url_probe['binaryUnchanged']) and all(
-        row['status'] == 'passed' and row['ownDatabaseDestroyed'] and row['mockCleanup']['passed']
+        row['status'] == 'passed' and database_cleanup_passed(row) and row['mockCleanup']['passed']
         and row['testUnchanged'] and row['expectedUnchanged'] for row in report['cases'])
     report.update(status='selected_cases_passed_coverage_blocked' if passed else 'selected_cases_failed',
                   selectedCasesPassed=passed, fullCoveragePassed=False, finishedUtc=utc())
