@@ -20,6 +20,10 @@
 
 namespace oceanbase
 {
+namespace sql
+{
+class ObExecContext;
+}
 namespace share
 {
 
@@ -27,11 +31,29 @@ class AiColumnContext
 {
 public:
   static bool is_worker_sql() { return worker_sql_; }
+  static const sql::ObExecContext *get_nested_sql_parent() { return nested_sql_parent_; }
   static bool is_retry_sql() { return retry_sql_; }
   static bool is_retry_column(uint64_t table_id, uint64_t column_id)
   {
     return retry_sql_ && retry_table_id_ == table_id && retry_column_id_ == column_id;
   }
+
+  // Only SQL directly issued by this execution context is AI-owned nested SQL.
+  // This changes transaction nesting classification, not AI publication access.
+  class NestedSqlScope
+  {
+  public:
+    explicit NestedSqlScope(const sql::ObExecContext &parent)
+        : previous_(nested_sql_parent_)
+    {
+      nested_sql_parent_ = &parent;
+    }
+    ~NestedSqlScope() { nested_sql_parent_ = previous_; }
+    NestedSqlScope(const NestedSqlScope &) = delete;
+    NestedSqlScope &operator=(const NestedSqlScope &) = delete;
+  private:
+    const sql::ObExecContext *previous_;
+  };
 
   // This process-local scope is entered only by the background task service.
   // It is not a session variable and cannot be enabled by user SQL.
@@ -73,6 +95,7 @@ public:
   };
 
 private:
+  inline static thread_local const sql::ObExecContext *nested_sql_parent_ = nullptr;
   inline static thread_local bool worker_sql_ = false;
   inline static thread_local bool retry_sql_ = false;
   inline static thread_local uint64_t retry_table_id_ = 0;

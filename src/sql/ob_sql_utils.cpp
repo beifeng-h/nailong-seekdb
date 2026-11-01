@@ -19,6 +19,7 @@
 #include "ob_sql_utils.h"
 #include "sql/executor/ob_maintain_dependency_info_task.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/ai_service/ai_column_context.h"
 #include "sql/ob_sql.h"
 #include "sql/engine/expr/ob_expr_func_part_hash.h"
 #include "sql/printer/ob_select_stmt_printer.h"
@@ -3373,7 +3374,11 @@ bool ObSQLUtils::is_iter_uncommitted_row(ObExecContext *cur_ctx)
 
 bool ObSQLUtils::is_nested_sql(ObExecContext *cur_ctx)
 {
-  return is_pl_nested_sql(cur_ctx) || is_fk_nested_sql(cur_ctx) || is_online_stat_gathering_nested_sql(cur_ctx);
+  const bool is_ai_nested_sql = cur_ctx != nullptr
+      && cur_ctx->get_parent_ctx() != nullptr
+      && cur_ctx->get_parent_ctx() == oceanbase::share::AiColumnContext::get_nested_sql_parent();
+  return is_pl_nested_sql(cur_ctx) || is_fk_nested_sql(cur_ctx)
+      || is_online_stat_gathering_nested_sql(cur_ctx) || is_ai_nested_sql;
 }
 
 //bind current execute context to my session,

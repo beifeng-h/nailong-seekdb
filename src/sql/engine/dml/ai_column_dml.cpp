@@ -250,7 +250,10 @@ int execute(ObTableModifyOp &op, const ObSqlString &sql)
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(op.begin_nested_session(false))) {
   } else {
-    ret = op.execute_write(sql.ptr());
+    {
+      share::AiColumnContext::NestedSqlScope nested_sql(op.get_exec_ctx());
+      ret = op.execute_write(sql.ptr());
+    }
     int end_ret = op.end_nested_session();
     if (OB_SUCC(ret)) {
       ret = end_ret;

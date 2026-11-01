@@ -116,7 +116,10 @@ int has_unready_ai_rows(ObExecContext &ctx, const char *sql, bool &unready)
       } else {
         checking_ai_column_state = true;
         AiColumnReadExecutor executor(ObString::make_string(sql), ctx.get_das_ctx().get_snapshot(), unready);
-        ret = connection->execute(executor);
+        {
+          oceanbase::share::AiColumnContext::NestedSqlScope nested_sql(ctx);
+          ret = connection->execute(executor);
+        }
         const int restore_ret = connection->end_nested_session(saved_session, saved_connection);
         checking_ai_column_state = false;
         if (OB_SUCC(ret)) {
