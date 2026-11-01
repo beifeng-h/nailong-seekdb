@@ -541,13 +541,13 @@ int AiColumnTaskService::process_one_group(const ObString &owner, bool &found)
         } else if (OB_FAIL(renew.append(" AND lease_until > NOW(6) AND lease_owner = "))) {
         } else if (OB_FAIL(sql_append_hex_escape_str(owner, renew))) {
         } else if (OB_FAIL(GCTX.sql_proxy_->write(renew.ptr(), affected_rows))) {
-        } else if (affected_rows == 0) {
-          ret = OB_EAGAIN;
         } else if (task.attempt_count_ > task.max_retries_) {
           // An interrupted attempt may have reached the model. Its durable
           // budget cannot be silently reset by process recovery.
           ret = save_task_result(task, owner, OB_TIMEOUT);
         } else {
+          // A renewal may match without changing its timestamp. The following
+          // fenced update must still change one row before any model request.
           renew.reuse();
           if (OB_FAIL(renew.append_fmt("UPDATE %s SET attempt_count = attempt_count + 1 WHERE ",
                                       TASK_TABLE))) {
@@ -745,10 +745,10 @@ int AiColumnTaskService::publish_group(ObIAllocator &allocator, const ObArray<Ta
       } else if (OB_FAIL(sql.append(" = "))) {
       } else if (task.state_ == 4 || task.result_null_) {
         ret = sql.append("NULL");
-      } else if (OB_FAIL(sql.append("CAST("))) {
+      } else if (OB_FAIL(sql.append("CAST(CONVERT("))) {
       } else if (OB_FAIL(sql_append_hex_escape_str(task.result_value_, sql))) {
       } else {
-        ret = sql.append_fmt(" AS %.*s)", task.target_type_.length(), task.target_type_.ptr());
+        ret = sql.append_fmt(" USING utf8mb4) AS %.*s)", task.target_type_.length(), task.target_type_.ptr());
       }
       if (OB_FAIL(ret)) {
       } else if (OB_FAIL(sql.append(","))) {
