@@ -1982,7 +1982,8 @@ int ObDelUpdResolver::build_column_conv_function_with_value_desc(ObInsertTableIn
                                                              tbl_col->get_collation_type())))) {
     }
     if (OB_SUCC(ret)) {
-      if (trigger_exist &&
+      // AI preparation overwrites these values per row, like a BEFORE ROW trigger.
+      if ((trigger_exist || ai_control_column(*table_schema, column_id)) &&
           OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, column_ref, column_ref))) {
       } else {
         table_info.column_conv_exprs_.at(idx) = column_ref;
@@ -2062,7 +2063,8 @@ int ObDelUpdResolver::build_column_conv_function_with_default_expr(ObInsertTable
                                                                   *params_.allocator_,
                                                                   *column_item->get_expr(),
                                                                   expr, session_info_))) {
-        } else if (trigger_exist &&
+        // Keep AI control defaults writable and restorable for each batched row.
+        } else if ((trigger_exist || ai_control_column(*table_schema, tbl_col->get_column_id())) &&
                   OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(*params_.expr_factory_, *session_info_, expr, expr))) {
         } else {
           function_expr = expr;
