@@ -893,6 +893,12 @@ int ObParser::parse_sql(const ObString &stmt,
                      error_length,
                      stmt.empty() ? NULL : stmt.ptr() + error_offset,
                      parse_result.line_ + 1);
+    } else if (OB_NOT_SUPPORTED == ret
+               && OB_PARSER_ERR_UNSUPPORTED == parse_result.extra_errno_
+               && nullptr != parse_result.error_msg_
+               && 0 == STRCMP(parse_result.error_msg_,
+                              "combining AI COLUMN RETRY with another ALTER action")) {
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, parse_result.error_msg_);
     } else {
       // other errors handle outer side.
     }

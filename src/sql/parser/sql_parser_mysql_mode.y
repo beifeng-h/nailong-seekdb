@@ -14761,7 +14761,7 @@ alter_table_action
 | alter_table_actions ',' alter_table_action
 {
   if (IS_AI_COLUMN_RETRY_ACTION($1) || IS_AI_COLUMN_RETRY_ACTION($3)) {
-    yyerror(&@2, result, "AI column retry cannot be combined with another ALTER action");
+    yyerror(&@2, result, "combining AI COLUMN RETRY with another ALTER action");
     YYABORT_WITH_ERROR(OB_PARSER_ERR_UNSUPPORTED);
   }
   if ($3 != NULL) {
@@ -14775,7 +14775,7 @@ alter_table_action
   $$ = NULL;
   (void)$3;
   if (IS_AI_COLUMN_RETRY_ACTION($1)) {
-    yyerror(&@2, result, "AI column retry cannot be combined with another ALTER action");
+    yyerror(&@2, result, "combining AI COLUMN RETRY with another ALTER action");
     YYABORT_WITH_ERROR(OB_PARSER_ERR_UNSUPPORTED);
   } else {
     yyerror(&@2, result, "standalone ALTER action cannot follow another action");
