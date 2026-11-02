@@ -14721,7 +14721,7 @@ alter_with_opt_hint TABLE relation_factor alter_table_actions
     malloc_non_terminal_node(assignments, result->malloc_pool_, T_ASSIGN_LIST, 1, assignment);
     malloc_non_terminal_node($$, result->malloc_pool_, T_UPDATE, 11,
         NULL, tables, assignments, $4->children_[1], NULL, NULL, NULL, $1, NULL, NULL, NULL);
-    $$->value_ = 1; /* Native retry target is persisted in the resolved DML plan. */
+    $$->is_ai_column_retry_ = 1; /* Native retry target is persisted in the resolved DML plan. */
   } else {
     ParseNode *table_actions = NULL;
     merge_nodes(table_actions, result, T_ALTER_TABLE_ACTION_LIST, $4);

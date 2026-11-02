@@ -81,7 +81,7 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
-  if (OB_SUCC(ret) && parse_tree.value_ == 1) {
+  if (OB_SUCC(ret) && parse_tree.is_ai_column_retry_) {
     if (OB_FAIL(resolve_ai_retry_target(parse_tree))) {
     } else if (OB_FAIL(rewrite_ai_retry_status(parse_tree.children_[WHERE]))) {
     } else {
