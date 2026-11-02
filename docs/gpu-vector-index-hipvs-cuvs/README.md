@@ -1,9 +1,9 @@
 # hipVS/cuVS GPU vector backend
 
-Status: **Phase 1 implemented and review-gated** on AMD `gfx1100` with ROCm
-7.2.4. This directory documents the current integration and its reproducible
-validation assets. Historical feasibility experiments remain available in Git
-history rather than in the product-facing tree.
+Status: **V5 source integration with a query-workspace reuse candidate** for AMD
+`gfx1100` with ROCm 7.2.4. Candidate GPU compilation, persistence/reload acceptance
+and paired performance measurements remain pending. This directory documents
+the integration and its validation assets.
 
 ## Scope
 
@@ -21,8 +21,9 @@ vector adaptor. It does not replace VSAG globally.
 The product integration lives in:
 
 - [`ob_vsag_adaptor.cpp`](../../src/oblib/lib/vector/ob_vsag_adaptor.cpp):
-  per-index marking, buffered vectors, lazy CAGRA build/search, freshness and
-  safety fallback, trace points, and batch entry points.
+  per-index marking, buffered vectors, CAGRA build/search, graph/ID/vector
+  snapshot serialization and reload, freshness fallback, trace points, and
+  batch entry points.
 - [`ob_plugin_vector_index_adaptor.cpp`](../../src/observer/vector_index/ob_plugin_vector_index_adaptor.cpp):
   maps declarative `lib=cuvs` indexes to the adaptor handle.
 - [`ob_vector_index_util.cpp`](../../src/observer/vector_index/ob_vector_index_util.cpp):
@@ -34,10 +35,25 @@ The product integration lives in:
 
 seekdb links a small C ABI bridge instead of importing hipVS/cuVS C++ types into
 the server. The maintained bridge source and build entry point are under
-[`tools/hipvs_bridge`](../../tools/hipvs_bridge/):
+[`tools/hipvs_bridge`](../../tools/hipvs_bridge/).
+
+The contest uses the fixed offline build below. `/work/bridge` replaces the
+protocol's output-directory placeholder; keep the CMake options unchanged.
+The frozen environment is ROCm 7.2.4, GCC 13.3 and CMake 3.31; the V5 source pins
+Rust 1.97.1 and uses the organizer's frozen dependencies and offline vendor.
 
 ```bash
-tools/hipvs_bridge/build.sh /work/bridge/libseekdb_cuvs_bridge.so
+HIPVS_ROOT=/opt/hipvs ROCM_ROOT=/opt/rocm \
+  tools/hipvs_bridge/build.sh /work/bridge/libseekdb_cuvs_bridge.so
+
+cmake -S . -B build_release -G "Unix Makefiles" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DOB_ENABLE_UNITY=ON \
+  -DOB_USE_LLD=ON \
+  -DOB_BUILD_CUVS=ON \
+  -DOB_BUILD_CUVS_TRACE=OFF \
+  -DCUVS_BRIDGE_LIB=/work/bridge/libseekdb_cuvs_bridge.so
+cmake --build build_release --target seekdb
 ```
 
 The bridge exports:
@@ -46,20 +62,12 @@ The bridge exports:
 seekdb_cuvs_build
 seekdb_cuvs_search
 seekdb_cuvs_free
+seekdb_cuvs_serialize
+seekdb_cuvs_deserialize
 seekdb_cuvs_cagra_knn
 ```
 
-Build seekdb with the resulting library:
-
-```bash
-./build.sh release \
-  -DOB_BUILD_CUVS=ON \
-  -DOB_BUILD_CUVS_TRACE=OFF \
-  -DCUVS_BRIDGE_LIB=/work/bridge/libseekdb_cuvs_bridge.so \
-  --make -j64
-```
-
-For a CPU-only build, leave the defaults or pass:
+For a CPU-only development build, leave the defaults or pass:
 
 ```bash
 ./build.sh release \
@@ -96,8 +104,9 @@ See [`examples/batch_knn.sql`](examples/batch_knn.sql) for the table contract.
 
 ## Validation
 
-The self-contained GPU smoke runner generates deterministic vectors and ground
-truth; it does not use private `/work/datasets` or `/work/bench` assets:
+The self-contained development GPU smoke runner generates deterministic vectors
+and ground truth; it does not use private `/work/datasets` or `/work/bench`
+assets. It requires a trace build, unlike the formal `TRACE=OFF` build above:
 
 ```bash
 LD_LIBRARY_PATH=/work/bridge:/opt/hipvs/lib:/opt/rocm/lib \
@@ -121,6 +130,11 @@ The runner validates:
 - bounded observer cleanup and closed ports.
 
 The runner writes a machine-readable `summary.json` into its evidence directory.
+Its smoke recall threshold and batched queries do not implement the formal
+Top-10/Top-100 recall, single-query SQL, resource or paired timing protocol.
+The separate [DDL persistence runner](validation/run_ddl_persistence_smoke.sh)
+and [bridge persistence test](../../tools/hipvs_bridge/test_persistence.cpp)
+exercise snapshot paths; their presence is not a passing candidate GPU result.
 Results for a specific candidate belong in that pull request's description or a
 validation comment rather than in the source tree.
 The no-GPU DDL contract remains covered by
@@ -128,10 +142,13 @@ The no-GPU DDL contract remains covered by
 
 ## Current limitations
 
-- Phase 1 supports dense float32 L2 indexes only.
-- GPU indexes are process-local and rebuilt lazily; persistence and cache reuse
-  are follow-up work.
+- Dense float32 L2 indexes are supported.
+- V5 implements graph, ID and vector snapshots and GPU graph reload; candidate
+  persistence/reload acceptance still needs the actual fixed GPU environment.
+- Query workspaces are retained per handle under a mutex. This candidate does
+  not optimize the first allocation or graph construction, and has no measured
+  GPU speedup yet.
 - The explicit batch API rebuilds its CAGRA index per call.
 - GPU validation is manual because upstream CI has no compatible GPU runner.
-- Multi-GPU, long-duration, and snapshot-reload coverage are out of scope for
-  this phase.
+- Multi-GPU and long-duration coverage remain pending. Host test doubles do not
+  establish real snapshot-file, GPU stream or Linux ABI behavior.
