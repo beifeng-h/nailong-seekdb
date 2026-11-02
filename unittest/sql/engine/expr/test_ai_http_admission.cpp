@@ -350,7 +350,8 @@ private:
 int make_body(ObArenaAllocator &allocator, int id, ObJsonObject *&body)
 {
   const std::string json = "{\"id\":" + std::to_string(id) + "}";
-  return ObAIFuncJsonUtils::get_json_object_form_str(allocator, ObString(json.c_str()), body);
+  ObString json_text(json.c_str());
+  return ObAIFuncJsonUtils::get_json_object_form_str(allocator, json_text, body);
 }
 
 int read_id(ObJsonObject *response, std::vector<int64_t> &ids)
