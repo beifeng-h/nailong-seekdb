@@ -740,13 +740,17 @@ int AiColumnTaskService::publish_group(ObIAllocator &allocator, const ObArray<Ta
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < tasks.count(); ++i) {
       const Task &task = tasks.at(i);
+      const bool vector_target = task.target_type_.prefix_match_ci("vector(");
       if (i > 0 && OB_FAIL(sql.append(","))) {
       } else if (OB_FAIL(append_identifier(sql, task.column_name_))) {
       } else if (OB_FAIL(sql.append(" = "))) {
       } else if (task.state_ == 4 || task.result_null_) {
         ret = sql.append("NULL");
-      } else if (OB_FAIL(sql.append("CAST(CONVERT("))) {
+      } else if (OB_FAIL(sql.append(vector_target ? "CONVERT(" : "CAST(CONVERT("))) {
       } else if (OB_FAIL(sql_append_hex_escape_str(task.result_value_, sql))) {
+      } else if (vector_target) {
+        // VECTOR is a column type, not a CAST target; its column conversion checks the dimension.
+        ret = sql.append(" USING utf8mb4)");
       } else {
         ret = sql.append_fmt(" USING utf8mb4) AS %.*s)", task.target_type_.length(), task.target_type_.ptr());
       }
