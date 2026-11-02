@@ -2,7 +2,7 @@ name: Seekdb free Linux validation
 
 on:
   push:
-    branches: [codex/seekdb-verify-20261101]
+    branches: [seekdb-verify-20261101]
 
 permissions:
   contents: read
