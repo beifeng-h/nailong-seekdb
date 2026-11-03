@@ -147,7 +147,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
     if (cudaMemcpy(out_ids, nd, neighbor_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
-    if (out_dist) cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault);
+    if (out_dist && cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=18; goto done; }
   }
 done:
   if (sp) cuvsCagraSearchParamsDestroy(sp);

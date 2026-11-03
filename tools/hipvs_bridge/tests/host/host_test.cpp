@@ -24,6 +24,7 @@ struct State {
  int alloc_calls=0, fail_at=0, searches=0, resources=0, indexes=0, index_params=0, search_params=0, mutexes=0;
  bool gate=false, entered=false, release=false, second_blocked=false;
  int attempts=0, cross_thread_api=0;
+ bool fail_distance_copy=false; int d2h_copy_count=0;
  std::thread::id owner;
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
@@ -41,6 +42,7 @@ static void clean_state() {
  CHECK(live_blocks()==0); CHECK(S.resources==0); CHECK(S.indexes==0); CHECK(S.index_params==0); CHECK(S.search_params==0); CHECK(S.mutexes==0);
  S.blocks.clear(); S.alloc_calls=S.fail_at=S.searches=0;
  S.gate=S.entered=S.release=S.second_blocked=false; S.attempts=S.cross_thread_api=0;
+ S.fail_distance_copy=false; S.d2h_copy_count=0;
 }
 int cuvsResourcesCreate(cuvsResources_t* p) { *p=new FakeResource; ++S.resources; return 0; }
 int cuvsResourcesDestroy(cuvsResources_t p) { delete p; --S.resources; return 0; }
@@ -67,6 +69,7 @@ int cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
  std::unique_lock<std::mutex> lk(S.mu); api_entry(); CHECK(kind==cudaMemcpyDefault);
  const bool src_device=device_range(src,n), dst_device=device_range(dst,n);
  CHECK(src_device!=dst_device);
+ if(S.fail_distance_copy && src_device && ++S.d2h_copy_count==2) return 1;
  if(S.gate && src_device && !S.entered) {
   S.entered=true; S.owner=std::this_thread::get_id(); S.cv.notify_all();
   CHECK(S.cv.wait_for(lk,std::chrono::seconds(8),[]{return S.release;}));
@@ -137,6 +140,14 @@ static void invalid_sizes_no_allocation() {
  for(const auto& c:cases) { const int alloc=S.alloc_calls, calls=S.searches; CHECK(seekdb_cuvs_search(h,q,c[0],c[1],ids,nullptr)!=0); CHECK(S.alloc_calls==alloc); CHECK(S.searches==calls); }
  search(h,1,1); seekdb_cuvs_free(h); clean_state(); std::cout<<"PASS invalid sizes before allocation / handle remains usable\n";
 }
+static void distance_copy_failure_recovery() {
+ clean_state(); void* h=build(); const float q[2]={2,0}; unsigned ids[1]={0}; float dist[1]={-999};
+ S.fail_distance_copy=true; S.d2h_copy_count=0;
+ const int rc=seekdb_cuvs_search(h,q,1,1,ids,dist);
+ CHECK(S.d2h_copy_count==2); CHECK(ids[0]==20); CHECK(dist[0]==-999); CHECK(rc!=0);
+ S.fail_distance_copy=false; search(h,1,1,7); seekdb_cuvs_free(h); clean_state();
+ std::cout<<"PASS distance copy failure reported / handle remains usable\n";
+}
 static void serialized_copyback() {
  clean_state(); void* h=build(); search(h,1,1); {std::lock_guard<std::mutex> lk(S.mu); S.gate=true;}
  std::exception_ptr e1,e2;
@@ -152,6 +163,6 @@ static void serialized_copyback() {
 int main(int argc,char** argv) {
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
  if(argc>1 && !strict) {std::cerr<<"usage: host_test [--require-reuse]\n"; return 2;}
- try {reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict); if(strict) {invalid_sizes_no_allocation(); serialized_copyback();} std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;}
+ try {reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict); if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback();} std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;}
  catch(const std::exception& e) {std::cerr<<"FAIL "<<e.what()<<"\n"; return 1;}
 }

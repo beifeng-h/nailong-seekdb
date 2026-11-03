@@ -19,6 +19,7 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 - Repeated requests that fit an existing workspace perform zero further RMM allocations; growth and shrink preserve query/ID/distance copying, including null distance output.
 - Graph and search parameter values remain those of the frozen source in this model.
 - Allocation failures at each of the three growth positions return failure, leave the handle usable and balance all model allocations at teardown.
+- An injected distance-copy failure returns an error after the ID copy, and the handle remains usable for a later successful search.
 - Deserialize begins with empty workspace, and rejected snapshot dimensions clean up model resources.
 - Invalid nonpositive shapes return before allocating or searching.
 - A deterministic IDs-copyback gate proves a second same-handle search blocks on the mutex. Both output arrays are checked. The separate distance-copy tail is not independently gated.
