@@ -355,6 +355,7 @@ struct ColumnContent
     is_nullable_(false),
     is_implicit_(false),
     is_predicate_column_(false),
+    is_ai_maintenance_vid_(false),
     srs_id_(UINT64_MAX),
     column_name_()
   {}
@@ -364,6 +365,7 @@ struct ColumnContent
                N_NULLABLE, is_nullable_,
                "implicit", is_implicit_,
                K_(is_predicate_column),
+               K_(is_ai_maintenance_vid),
                K_(srs_id),
                N_COLUMN_NAME, column_name_);
 
@@ -372,6 +374,7 @@ struct ColumnContent
   bool is_nullable_;
   bool is_implicit_;
   bool is_predicate_column_;
+  bool is_ai_maintenance_vid_;
   union { // only for gis
     struct {
       uint32_t geo_type_ : 5;

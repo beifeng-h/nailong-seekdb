@@ -2514,6 +2514,7 @@ int ObDmlCgService::convert_upd_assign_infos(bool is_heap_table,
     column_content.is_predicate_column_ = assigns.at(i).is_predicate_column_;
     column_content.srs_id_ = col->get_srs_id();
     column_content.is_implicit_ = assigns.at(i).is_implicit_;
+    column_content.is_ai_maintenance_vid_ = assigns.at(i).is_ai_maintenance_vid_;
     if (is_heap_table &&
         assigns.at(i).expr_->get_expr_type() == T_TABLET_AUTOINC_NEXTVAL) {
       // skip it

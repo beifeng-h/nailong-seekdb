@@ -643,6 +643,28 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
         }
       }  // end for
     }
+    // AI targets are added implicitly above, after the original vector-update check.
+    // Recheck the effective assignments, including generated columns, before adding
+    // the VID needed by those related-index writes. Keep ordinary vector semantics.
+    if (OB_SUCC(ret) && T_UPDATE_SCOPE == scope && !update_with_vector_index
+        && !share::AiColumnContext::is_worker_sql()) {
+      bool has_ai_column = false;
+      for (auto iter = table_schema->column_begin();
+           !has_ai_column && iter != table_schema->column_end(); ++iter) {
+        has_ai_column = OB_NOT_NULL(*iter) && (*iter)->is_ai_column();
+      }
+      if (has_ai_column) {
+        bool effective_vector_update = false;
+        if (OB_FAIL(check_update_vector_col_with_vector_index(table_schema,
+                                                             schema_guard,
+                                                             assigns.at(i).assignments_,
+                                                             effective_vector_update))) {
+        } else if (effective_vector_update) {
+          ret = complete_ai_vector_vid_assignments(assigns, i, table_item,
+                                                   table_schema, trigger_exist);
+        }
+      }
+    }
     // For INSERT ON DUPLICATE KEY UPDATE, if table has vector index column and is heap table,
     // call build_hidden_pk_assignment regardless of whether UPDATE clause contains vector index column
     if (OB_SUCC(ret) && T_INSERT_SCOPE == scope) {
@@ -659,6 +681,73 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
     } else if (OB_SUCC(ret)) {
       // for UPDATE
       if (OB_FAIL(check_heap_table_update(assigns.at(i)))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDelUpdResolver::complete_ai_vector_vid_assignments(
+    ObIArray<ObTableAssignment> &assigns,
+    int64_t table_index,
+    const TableItem *table_item,
+    const ObTableSchema *table_schema,
+    bool trigger_exist)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(table_item) || OB_ISNULL(table_schema)
+      || table_index < 0 || table_index >= assigns.count()) {
+    ret = OB_INVALID_ARGUMENT;
+    return ret;
+  }
+  for (auto iter = table_schema->column_begin();
+       OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (column->is_vec_hnsw_vid_column() || column->is_vec_ivf_center_id_column()) {
+      bool assigned = false;
+      if (OB_FAIL(ObResolverUtils::check_whether_assigned(get_stmt(),
+                                                         assigns.at(table_index).assignments_,
+                                                         table_item->table_id_,
+                                                         column->get_column_id(), assigned))) {
+      } else if (!assigned) {
+        ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+        ColumnItem *col_item = NULL;
+        ObAssignment assignment;
+        if (!column->is_generated_column()) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(add_column_to_stmt(*table_item, *column, col_exprs))) {
+        } else if (col_exprs.empty()) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_ISNULL(col_item = get_stmt()->get_column_item_by_id(
+            table_item->table_id_, col_exprs.at(0)->get_column_id()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          assignment.column_expr_ = col_item->expr_;
+          assignment.is_implicit_ = true;
+          assignment.is_ai_maintenance_vid_ = true;
+          if (OB_FAIL(copy_schema_expr(*params_.expr_factory_,
+                                      col_item->expr_->get_dependant_expr(), assignment.expr_))) {
+          } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                                   *params_.allocator_,
+                                                                   *col_item->get_expr(),
+                                                                   assignment.expr_, session_info_))) {
+          } else if (trigger_exist && OB_FAIL(ObRawExprUtils::build_wrapper_inner_expr(
+              *params_.expr_factory_, *session_info_, assignment.expr_, assignment.expr_))) {
+          } else {
+            ret = add_assignment(assigns, table_item, col_item, assignment);
+          }
+        }
+      }
+      // A generated-column rule may already have supplied the VID in the first pass.
+      // Mark that implicit assignment too; never reclassify an explicit assignment.
+      for (int64_t j = 0; OB_SUCC(ret) && j < assigns.at(table_index).assignments_.count(); ++j) {
+        ObAssignment &assignment = assigns.at(table_index).assignments_.at(j);
+        if (OB_NOT_NULL(assignment.column_expr_) && assignment.is_implicit_
+            && assignment.column_expr_->get_column_id() == column->get_column_id()) {
+          assignment.is_ai_maintenance_vid_ = true;
+        }
       }
     }
   }

@@ -210,6 +210,11 @@ protected:
   int add_select_items(ObSelectStmt &select_stmt, const ObIArray<SelectItem>& select_items);
   int add_select_list_for_set_stmt(ObSelectStmt &select_stmt);
   int add_all_lob_columns_to_stmt(const TableItem &table_item, ObIArray<ObColumnRefRawExpr*> &column_exprs);
+  int complete_ai_vector_vid_assignments(common::ObIArray<ObTableAssignment> &assigns,
+                                         int64_t table_index,
+                                         const TableItem *table_item,
+                                         const ObTableSchema *table_schema,
+                                         bool trigger_exist);
   int check_update_vector_col_with_vector_index(const ObTableSchema *table_schema,
                                                 ObSchemaGetterGuard *schema_guard,
                                                 const common::ObIArray<ObAssignment> &assigns,

@@ -30,6 +30,7 @@ int ObAssignment::deep_copy(ObIRawExprCopier &expr_copier,
   is_duplicated_ = other.is_duplicated_;
   is_implicit_ = other.is_implicit_;
   is_predicate_column_ = other.is_predicate_column_;
+  is_ai_maintenance_vid_ = other.is_ai_maintenance_vid_;
   if (OB_FAIL(expr_copier.copy(other.column_expr_, new_col))) {
   } else if (OB_ISNULL(new_col) || OB_UNLIKELY(!new_col->is_column_ref_expr())) {
     ret = OB_ERR_UNEXPECTED;
@@ -48,6 +49,7 @@ int ObAssignment::assign(const ObAssignment &other)
   is_duplicated_ = other.is_duplicated_;
   is_implicit_ = other.is_implicit_;
   is_predicate_column_ = other.is_predicate_column_;
+  is_ai_maintenance_vid_ = other.is_ai_maintenance_vid_;
   return ret;
 }
 

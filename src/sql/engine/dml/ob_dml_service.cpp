@@ -459,6 +459,9 @@ int ObDMLService::check_row_whether_changed(const ObUpdCtDef &upd_ctdef,
       const ObExprPtrIArray &old_row = upd_ctdef.old_row_;
       const ObExprPtrIArray &new_row = upd_ctdef.new_row_;
       FOREACH_CNT_X(info, upd_ctdef.assign_columns_, OB_SUCC(ret) && !upd_rtdef.is_row_changed_) {
+        if (info->is_ai_maintenance_vid_) {
+          continue;
+        }
         const uint64_t idx = info->projector_index_;
         ObDatum *old_datum = NULL;
         ObDatum *new_datum = NULL;
@@ -484,6 +487,11 @@ int ObDMLService::check_row_whether_changed(const ObUpdCtDef &upd_ctdef,
     const ObExprPtrIArray &old_row = upd_ctdef.old_row_;
     const ObExprPtrIArray &new_row = upd_ctdef.new_row_;
     FOREACH_CNT_X(info, upd_ctdef.assign_columns_, OB_SUCC(ret) && !upd_rtdef.is_row_changed_) {
+      // A VID added only for implicit AI index maintenance must not make a
+      // logical no-op enter AI preparation (for example via ON UPDATE columns).
+      if (info->is_ai_maintenance_vid_) {
+        continue;
+      }
       const uint64_t idx = info->projector_index_;
       if (OB_LIKELY(!info->auto_filled_timestamp_)) {
         ObDatum *old_datum = NULL;

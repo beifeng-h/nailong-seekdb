@@ -33,6 +33,7 @@ struct ObAssignment
   bool is_duplicated_; //for judging whether or not the column is updated repeatedly
   bool is_implicit_; // not in update set clause, but add for inner implement,
   bool is_predicate_column_; //mark whether update the predicate column
+  bool is_ai_maintenance_vid_; // auxiliary VID maintenance is not a logical row change
                      // see ObDMLResolver::resolve_additional_assignments().
   ObAssignment()
   {
@@ -41,6 +42,7 @@ struct ObAssignment
     is_duplicated_ = false;
     is_implicit_ = false;
     is_predicate_column_ = false;
+    is_ai_maintenance_vid_ = false;
   }
 
   int deep_copy(ObIRawExprCopier &expr_factory,
@@ -55,6 +57,7 @@ struct ObAssignment
       seed = do_hash(*expr_, seed);
     }
     seed = do_hash(is_duplicated_, seed);
+    seed = do_hash(is_ai_maintenance_vid_, seed);
 
     return seed;
   }
@@ -67,7 +70,8 @@ struct ObAssignment
 
   TO_STRING_KV(N_COLUMN, column_expr_,
                N_EXPR, expr_,
-               K_(is_predicate_column));
+               K_(is_predicate_column),
+               K_(is_ai_maintenance_vid));
 };
 typedef common::ObSEArray<ObAssignment, 16, common::ModulePageAllocator, true> ObAssignments;
 

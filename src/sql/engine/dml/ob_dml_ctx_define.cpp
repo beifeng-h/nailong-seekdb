@@ -183,7 +183,8 @@ OB_SERIALIZE_MEMBER(ColumnContent,
                     is_nullable_,
                     is_implicit_,
                     is_predicate_column_,
-                    srs_id_);
+                    srs_id_,
+                    is_ai_maintenance_vid_);
 
 
 
