@@ -1,0 +1,43 @@
+# Regression: binary input must not be folded; supported UTF-8 inputs must be.
+# Assert membership/counts rather than the implementation's hash iteration order.
+--disable_query_log
+SET NAMES utf8mb4;
+SET @tokens = TOKENIZE(_binary 'ABC abc', 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) = 2 AND JSON_CONTAINS(@tokens, JSON_QUOTE('ABC')) AND JSON_CONTAINS(@tokens, JSON_QUOTE('abc')) AS ok, ok, 1);
+if ($ok != 1)
+{
+  --die Binary TOKENIZE must retain both ABC and abc
+}
+SET @tokens = TOKENIZE(_utf8mb4 'ABC abc' COLLATE utf8mb4_bin, 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) = 1 AND JSON_CONTAINS(@tokens, JSON_QUOTE('abc')) AS ok, ok, 1);
+if ($ok != 1)
+{
+  --die utf8mb4_bin TOKENIZE must fold ASCII to abc
+}
+SET @tokens = TOKENIZE(_utf8mb4 'ABC abc' COLLATE utf8mb4_general_ci, 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) = 1 AND JSON_CONTAINS(@tokens, JSON_QUOTE('abc')) AS ok, ok, 1);
+if ($ok != 1)
+{
+  --die utf8mb4_general_ci TOKENIZE must fold ASCII to abc
+}
+SET @tokens = TOKENIZE(_utf8mb4 'ABC abc' COLLATE utf8mb4_unicode_ci, 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) = 1 AND JSON_CONTAINS(@tokens, JSON_QUOTE('abc')) AS ok, ok, 1);
+if ($ok != 1)
+{
+  --die utf8mb4_unicode_ci TOKENIZE must fold ASCII to abc
+}
+SET @tokens = TOKENIZE(CONVERT(0xC384424320C3A46263 USING utf8mb4) COLLATE utf8mb4_bin, 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) = 1 AND JSON_CONTAINS(@tokens, JSON_QUOTE(CONVERT(0xC3A46263 USING utf8mb4))) AS ok, ok, 1);
+if ($ok != 1)
+{
+  --die utf8mb4_bin TOKENIZE must retain Unicode case folding
+}
+SET @tokens = TOKENIZE(_binary '', 'space');
+let $ok = query_get_value(SELECT JSON_LENGTH(@tokens) AS ok, ok, 1);
+if ($ok != 0)
+{
+  --die Empty binary TOKENIZE must return an empty token array
+}
+SET @tokens = NULL;
+--enable_query_log
+--echo tokenize_casefold_contract_passed

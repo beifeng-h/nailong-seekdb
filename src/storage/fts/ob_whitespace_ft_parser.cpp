@@ -18,6 +18,7 @@
 
 #include "lib/oblog/ob_log_module.h"
 #include "lib/string/ob_string.h"
+#include "lib/charset/ob_charset.h"
 #include "data_plane/fts/ob_fts_struct.h"
 #include "storage/fts/ob_whitespace_ft_parser.h"
 #include "storage/fts/utils/ob_ft_char_utils.h"
@@ -94,10 +95,19 @@ int ObSpaceFTParser::get_next_token(const char *&word,
     const char *next = next_;
     const char *end = end_;
     const ObCharsetInfo *cs = cs_;
+    const bool ascii_compatible = cs->number == CS_TYPE_BINARY
+        || CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(static_cast<ObCollationType>(cs->number));
     do {
       while (next < end) {
         int ctype;
-        mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+        if (OB_LIKELY(ascii_compatible && static_cast<uchar>(*next) < 0x80)) {
+          // Fast path: the character type of an ASCII byte is known without
+          // decoding it, so the charset handler does not have to be called.
+          ctype = fts_ascii_ctype(static_cast<uchar>(*next));
+          mbl = 1;
+        } else {
+          mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+        }
         if (true_word_char(ctype, *next)) {
           break;
         }
@@ -110,7 +120,12 @@ int ObSpaceFTParser::get_next_token(const char *&word,
         start = next;
         while (next < end) {
           int ctype;
-          mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+          if (OB_LIKELY(ascii_compatible && static_cast<uchar>(*next) < 0x80)) {
+            ctype = fts_ascii_ctype(static_cast<uchar>(*next));
+            mbl = 1;
+          } else {
+            mbl = cs->cset->ctype(cs, &ctype, (uchar *)next, (uchar *)end);
+          }
           if (!true_word_char(ctype, *next)) {
             break;
           }

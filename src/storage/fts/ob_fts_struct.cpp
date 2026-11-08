@@ -19,6 +19,7 @@
 #include "lib/charset/ob_charset.h"
 #include "share/datum/ob_datum_funcs.h"
 #include "storage/ob_storage_util.h"
+#include "storage/fts/utils/ob_ft_char_utils.h"
 
 namespace oceanbase
 {
@@ -43,6 +44,33 @@ bool ObFTWord::operator==(const ObFTWord &other) const
   bool is_equal = false;
   int ret = OB_SUCCESS;
   int cmp_ret = 0;
+  const ObCollationType lhs_collation = meta_.get_collation_type();
+  const ObCollationType rhs_collation = other.meta_.get_collation_type();
+  // Fast path for pure ASCII tokens.  The utf8mb4 general_ci comparison of two
+  // ASCII strings is the case insensitive byte comparison and the utf8mb4_bin
+  // comparison is the plain byte comparison; both are exactly what the
+  // collation functions compute, only without the Unicode table lookups.
+  // A token holding a non ASCII byte keeps using the collation functions, so
+  // the accent folding of general_ci (e.g. U+00E9 equals 'e') is preserved.
+  if (OB_LIKELY(lhs_collation == rhs_collation)
+      && (CS_TYPE_UTF8MB4_GENERAL_CI == lhs_collation || CS_TYPE_UTF8MB4_BIN == lhs_collation)) {
+    const ObString &lhs = word_.get_string();
+    const ObString &rhs = other.word_.get_string();
+    // Datum string equality ignores trailing PAD SPACE bytes. Keep that
+    // corner case on the original collation path.
+    if (OB_LIKELY((lhs.length() == 0 || lhs.ptr()[lhs.length() - 1] != ' ')
+                  && (rhs.length() == 0 || rhs.ptr()[rhs.length() - 1] != ' ')
+                  && fts_is_ascii_only(lhs.ptr(), lhs.length())
+                  && fts_is_ascii_only(rhs.ptr(), rhs.length()))) {
+      if (CS_TYPE_UTF8MB4_GENERAL_CI == lhs_collation) {
+        is_equal = fts_ascii_general_ci_equal(lhs.ptr(), lhs.length(), rhs.ptr(), rhs.length());
+      } else {
+        is_equal = (lhs.length() == rhs.length())
+                   && (0 == MEMCMP(lhs.ptr(), rhs.ptr(), lhs.length()));
+      }
+      return is_equal;
+    }
+  }
   ObDatumCmpFuncType func = get_datum_cmp_func(meta_, other.meta_);
   if (func == nullptr) {
     ob_abort();
