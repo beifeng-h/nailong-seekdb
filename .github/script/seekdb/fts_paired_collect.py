@@ -24,7 +24,7 @@ LOG_FILE_CAP = 8 * MIB
 MAX_ENTRIES = 4000
 MANIFEST_CAP = 4 * MIB
 BASELINE = '5bce9e06d1281347ad61344e4b01fab9158c58a2'
-KERNEL = '9647105cef007c57938a3139d58e39e6ca0d1b92'
+KERNEL = 'f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65'
 EXTENSIONS = {'.json', '.log', '.txt', '.sha256', '.sql', '.reject', '.result'}
 FORBIDDEN = re.compile(r'(^|[._-])(env|config|configuration|credential|credentials|secret|secrets|token|password|core|database|datafile)([._-]|$)', re.I)
 
