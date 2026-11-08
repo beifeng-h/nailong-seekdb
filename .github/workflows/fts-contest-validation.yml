@@ -21,12 +21,12 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       GIT_TERMINAL_PROMPT: '0'
       PYTHONDONTWRITEBYTECODE: '1'
-      PAIRED_ROOT: ${{ runner.temp }}/seekdb-paired
     steps:
       - name: Checkout exact driver and official source objects without saved credentials
         shell: bash
         run: |
           set -euo pipefail
+          printf 'PAIRED_ROOT=%s/seekdb-paired\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           git init "$GITHUB_WORKSPACE"
           git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 8db524bb0a3a847b4eb384232bd576761e4075b3; do

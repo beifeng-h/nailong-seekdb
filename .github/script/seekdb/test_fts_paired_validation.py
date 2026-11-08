@@ -25,6 +25,24 @@ SCORER = p.load_module('test_original_scorer', REPO / (p.BENCH + '_score.py'))
 
 
 class Contracts(unittest.TestCase):
+    def assert_workflow_expression_scope(self, text):
+        before_steps, steps = text.split('    steps:', 1)
+        self.assertNotRegex(before_steps, r'\$\{\{\s*runner(?:\.|\[)')
+        self.assertNotIn('      PAIRED_ROOT:', before_steps)
+        first_step = steps.split('      - name:')[1]
+        self.assertIn('printf \'PAIRED_ROOT=%s/seekdb-paired\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"', first_step)
+        self.assertIn('path: ${{ runner.temp }}/seekdb-paired-artifact/', steps)
+
+    def test_workflow_runner_context_is_step_scoped_and_root_exported_early(self):
+        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        self.assert_workflow_expression_scope(text)
+
+    def test_workflow_rejects_runner_temp_in_job_env_regression(self):
+        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        broken = text.replace('    steps:', '      PAIRED_ROOT: ${{ runner.temp }}/seekdb-paired\n    steps:', 1)
+        with self.assertRaises(AssertionError):
+            self.assert_workflow_expression_scope(broken)
+
     def setUp(self):
         signals = patch.object(p.signal, 'signal')
         signals.start()
