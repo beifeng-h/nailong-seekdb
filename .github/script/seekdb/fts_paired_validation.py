@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import statistics
+import stat
 import subprocess
 import sys
 import time
@@ -23,13 +24,20 @@ import traceback
 
 sys.dont_write_bytecode = True
 BASELINE = '5bce9e06d1281347ad61344e4b01fab9158c58a2'
+CANDIDATE = 'bc4dde62eee39acb630ffe54741aecebe4ab0a2a'
+SOURCE_TREES = {'baseline': '7397f01a796c5ab1cae81c90303b22b63945d11d',
+                'candidate': '1ea510152c6274df5915ec9423fa76cda0ed4a2a'}
+REUSE_MODE = 'verified_elf_continuation'
 KERNEL = 'f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65'
 PREFIX = '.github/script/seekdb/'
 ALLOWED_DRIVER_PATHS = frozenset((
     '.github/workflows/fts-contest-validation.yml',
     PREFIX + 'fts_paired_validation.py', PREFIX + 'fts_paired_collect.py',
-    PREFIX + 'test_fts_paired_validation.py', PREFIX + 'test_fts_paired_collect.py'))
-DRIVER_FILES = ('fts_paired_validation.py', 'fts_paired_collect.py', 'fts_contest_validation.py')
+    PREFIX + 'test_fts_paired_validation.py', PREFIX + 'test_fts_paired_collect.py',
+    PREFIX + 'fts_plan_compatibility.py', PREFIX + 'test_fts_plan_compatibility.py',
+    PREFIX + 'fts_verified_elf_reuse.py', PREFIX + 'test_fts_verified_elf_reuse.py'))
+DRIVER_FILES = ('fts_paired_validation.py', 'fts_paired_collect.py', 'fts_contest_validation.py',
+                'fts_plan_compatibility.py', 'fts_verified_elf_reuse.py')
 CASES = ('fts_index.tokenize_function', 'fts_index.cn_word',
          'fts_index.parser_properties', 'fts_index.basic_dml', 'fts_index.simple_query')
 REGRESSIONS = ('fts_index.tokenize_casefold_contract', 'fts_index.match_filter_only_contract')
@@ -94,6 +102,157 @@ def verify_driver(source, driver_sha):
         raise RuntimeError('Official build/benchmark/native inputs differ from A')
     return dict(kernelOrigin=KERNEL, driverCommit=driver_sha,
                 allowedDriverChanges=sorted(changed))
+
+
+def verify_reuse_driver(source, driver_sha):
+    source_identity(source, driver_sha)
+    result = verify_driver(source, driver_sha)
+    changed = set(git(source, 'diff', '--name-only', CANDIDATE, driver_sha, '--').decode().splitlines())
+    if not changed <= ALLOWED_DRIVER_PATHS:
+        raise RuntimeError('Reuse driver changes actual B outside explicit diagnostic allowlist: '
+                           + ', '.join(sorted(changed - ALLOWED_DRIVER_PATHS)))
+    return dict(result, actualCandidateBuildCommit=CANDIDATE,
+                validationDriverCommit=driver_sha, continuationChanges=sorted(changed))
+
+
+def validate_relocated_identity(identity, role, root, provenance):
+    """Bind untouched historical metadata to the new owned path, without edits."""
+    commit = BASELINE if role == 'baseline' else CANDIDATE
+    directory = root / 'runtime' / role
+    original, relocation = directory / 'identity.original.json', directory / 'relocation.json'
+    for path in (original, relocation):
+        no_symlinks(path)
+        if not path.is_file() or path.stat().st_nlink != 1 or path.stat().st_size > 8 * 1024 ** 2:
+            raise RuntimeError('Invalid original identity/relocation file')
+    if (json.loads(original.read_text(encoding='utf-8')) != identity
+            or json.loads(relocation.read_text(encoding='utf-8')) != provenance
+            or provenance.get('originalIdentitySha256') != digest(original)
+            or provenance.get('originalBinaryPath') != identity.get('binary')
+            or provenance.get('runtimeBinaryPath') != str(directory / 'seekdb')
+            or provenance.get('staticIdentityVerified') is not True
+            or provenance.get('previousValidationAccepted') is not False
+            or provenance.get('actualValidationDriver') != 'UNASSIGNED'
+            or provenance.get('artifactId') != 13621468966
+            or provenance.get('runId') != 42486120779 or provenance.get('runAttempt') != 1
+            or provenance.get('artifactZipSha256') != '23f8b2f8f6322edcd5dd0ed2b485c0d3271b3992d24417866de9eb90f77d8f75'
+            or identity.get('sourceTree') != SOURCE_TREES[role]
+            or identity.get('driverCommit') != CANDIDATE
+            or provenance.get('buildDriverCommit') != CANDIDATE):
+        raise RuntimeError('Original identity or explicit relocation integrity mismatch')
+    for key in ('sourceCommit', 'sourceTree', 'kernelOrigin', 'bytes', 'sha256', 'buildId', 'generatedVersionSha256'):
+        if provenance.get(key) != identity.get(key):
+            raise RuntimeError('Relocation changes original identity: ' + key)
+    # A local validation view is not an identity file or a build-source relabel.
+    local = dict(identity, binary=provenance['runtimeBinaryPath'])
+    return validate_identity(local, role, commit, root)
+
+
+def verified_runtime_record(args, plan):
+    path = args.root / 'runtime/verification.json'
+    no_symlinks(path)
+    if digest(path) != plan.get('runtimeVerificationSha256'):
+        raise RuntimeError('Runtime verification changed')
+    record = json.loads(path.read_text(encoding='utf-8'))
+    if (record.get('status') != 'verified_runtime_prepared'
+            or record.get('runtimeRoot') != str(args.root / 'runtime')
+            or record.get('verificationPath') != str(path)
+            or record.get('oldValidationAccepted') is not False
+            or record.get('currentValidationPerformed') is not False
+            or record.get('artifact') != plan.get('artifact')
+            or set(record.get('roles', {})) != {'baseline', 'candidate'}):
+        raise RuntimeError('Runtime verification record mismatch')
+    for role in ('baseline', 'candidate'):
+        data = record['roles'][role]
+        directory = args.root / 'runtime' / role
+        if (data.get('binary') != str(directory / 'seekdb')
+                or data.get('identityOriginalPath') != str(directory / 'identity.original.json')
+                or data.get('relocationPath') != str(directory / 'relocation.json')):
+            raise RuntimeError('Runtime verification role path mismatch')
+    return record
+
+
+def accepted_compatibility(proof, row, validation_driver=None):
+    """Consume complete role-bound byte proof, never an accepted flag alone."""
+    from fts_plan_compatibility import SCHEME, CASE, SPECS, TEST_SHA256, GOLDEN_SHA256, GOLDEN, TEST
+    if not isinstance(proof, dict) or not isinstance(row, dict):
+        return False
+    context = row.get('validationContext')
+    if (not isinstance(context, dict) or proof.get('validationContext') != context
+            or context.get('sourceCommit') != CANDIDATE
+            or not re.fullmatch('[0-9a-f]{40}', str(context.get('validationDriverCommit', '')))
+            or (validation_driver is not None and context['validationDriverCommit'] != validation_driver)
+            or not isinstance(context.get('source'), str) or not Path(context['source']).is_absolute()
+            or not isinstance(context.get('out'), str) or not Path(context['out']).is_absolute()):
+        return False
+    source, out = Path(context['source']), Path(context['out'])
+    result = context.get('nativeResult')
+    if (not isinstance(result, dict) or result.get('path') != str(out / 'result.json')
+            or not re.fullmatch('[0-9a-f]{64}', str(result.get('sha256', '')))
+            or type(result.get('bytes')) is not int or not 0 < result['bytes'] <= 2 * 1024 ** 2):
+        return False
+    evidence_paths = dict(originalGolden=source / GOLDEN, originalTest=source / TEST,
+        actualReject=out / 'mysqltest-log/simple_query.reject',
+        nativeOutput=out / 'mysqltest-output.log', nativeWrapper=out / 'original-run-case.log')
+    if any(not isinstance(proof.get(key), dict) or proof[key].get('path') != str(path)
+           for key, path in evidence_paths.items()):
+        return False
+    work = row.get('work') if isinstance(row.get('work'), dict) else {}
+    if (row.get('role') != 'candidate' or row.get('name') != CASE
+            or row.get('status') != 'failed' or row.get('cleanupPassed') is not True
+            or work.get('passed') is not False or type(work.get('exitCode')) is not int
+            or work['exitCode'] != 1 or type(work.get('invocations')) is not int
+            or work['invocations'] != 1 or work.get('inputsUnchanged') is not True
+            or work.get('testSha256') != TEST_SHA256 or work.get('expectedSha256') != GOLDEN_SHA256):
+        return False
+    for record in (row, work):
+        if any(record.get(key) for key in ('error', 'traceback', 'timedOut', 'signal', 'cleanupError', 'failureKind', 'failureReason')):
+            return False
+    if (proof.get('scheme') != SCHEME or proof.get('role') != 'candidate'
+            or proof.get('caseName') != CASE or proof.get('rawNativeStatus') != 'failed'
+            or proof.get('nativePassed') is not False or proof.get('formalContestPass') is not False
+            or type(proof.get('approvedDifferenceCount')) is not int or proof['approvedDifferenceCount'] != 4
+            or any(proof.get(key) is not True for key in ('accepted', 'completeBytesCompared', 'eofCompared', 'inputsUnchanged', 'ownedCleanupPassed'))
+            or proof.get('adjacentScoredControl') != dict(annotationLine=1603, calcRelevance=True)):
+        return False
+    changes = [dict(sqlStartLine=start, annotationLine=line, scanId=scan,
+                    statement=sql.decode('utf-8').rstrip('\n'), purpose=purpose,
+                    expectedCalcRelevance=True, actualCalcRelevance=False)
+               for start, line, scan, purpose, sql in SPECS]
+    if proof.get('changes') != changes:
+        return False
+    for name, sha, count, lines in (('originalGolden', GOLDEN_SHA256, 184285, 2833),
+            ('actualReject', '737c4257fabf57dbd5365fdd04cfe2573206129d19991a8a1616e7e3db1e4896', 184289, 2833),
+            ('originalTest', TEST_SHA256, None, None), ('nativeOutput', None, None, None), ('nativeWrapper', None, None, None)):
+        info = proof.get(name)
+        if (not isinstance(info, dict) or not isinstance(info.get('path'), str)
+                or not Path(info['path']).is_absolute()
+                or not re.fullmatch('[0-9a-f]{64}', str(info.get('sha256', '')))
+                or type(info.get('bytes')) is not int or not 0 < info['bytes'] <= 1024 ** 2
+                or type(info.get('lines')) is not int or info['lines'] <= 0
+                or info.get('endsWithNewline') is not True
+                or (sha is not None and info['sha256'] != sha)
+                or (count is not None and info['bytes'] != count)
+                or (lines is not None and info['lines'] != lines)):
+            return False
+    return bool(re.fullmatch(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', str(proof.get('nativeMismatchTimestamp', ''))))
+
+
+def case_evidence_complete(rows, proofs=None, validation_driver=None):
+    expected = {(role, name) for role in ('baseline', 'candidate') for name in selected_cases(role)}
+    if (not isinstance(rows, list) or len(rows) != len(expected)
+            or any(not isinstance(row, dict) for row in rows)
+            or {(row.get('role'), row.get('name')) for row in rows} != expected):
+        return False
+    proofs = proofs if isinstance(proofs, dict) else {}
+    if set(proofs) - {'candidate/' + CASES[-1]}:
+        return False
+    for row in rows:
+        if row.get('status') == 'passed' and row.get('cleanupPassed') is True:
+            if row['role'] + '/' + row['name'] in proofs:
+                return False
+        elif not accepted_compatibility(proofs.get(row['role'] + '/' + row['name']), row, validation_driver):
+            return False
+    return True
 
 
 def switch_source(source, expected_before, target):
@@ -425,6 +584,46 @@ def prepare(args):
     return plan
 
 
+def prepare_reuse(args):
+    root, source = args.root, args.source
+    no_symlinks(root)
+    if root.exists() or root == source or source in root.parents or root in source.parents:
+        raise RuntimeError('Reuse preparation needs a fresh root disjoint from driver')
+    identity = source_identity(source, args.driver_sha)
+    equivalence = verify_reuse_driver(source, args.driver_sha)
+    if args.artifact_zip is None:
+        raise RuntimeError('Reuse preparation requires original artifact ZIP')
+    root.mkdir(parents=True)
+    plan = plan_for(source, root, args.driver_sha)
+    plan.update(mode=REUSE_MODE, validationDriverCommit=args.driver_sha,
+                candidateBuildCommit=CANDIDATE, candidateSource=str(root / 'sources/candidate'),
+                driverTree=identity['tree'], equivalence=equivalence, driverFiles={})
+    (root / 'driver').mkdir()
+    for name in DRIVER_FILES:
+        path = source / PREFIX / name
+        expected = hashlib.sha256(git(source, 'show', args.driver_sha + ':' + PREFIX + name)).hexdigest()
+        if digest(path) != expected:
+            raise RuntimeError('Driver script hash mismatch: ' + name)
+        shutil.copyfile(path, root / 'driver' / name)
+        plan['driverFiles'][name] = expected
+    for relative in ('sources', 'evidence/baseline', 'evidence/candidate',
+                     'validation/cases/baseline', 'validation/cases/candidate', 'validation/rounds'):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    for role, commit in (('baseline', BASELINE), ('candidate', CANDIDATE)):
+        path = root / 'sources' / role
+        git(source, 'worktree', 'add', '--detach', str(path), commit)
+        if source_identity(path, commit)['tree'] != SOURCE_TREES[role]:
+            raise RuntimeError('Actual build source tree mismatch')
+    write_json(root / 'plan.json', plan)
+    loader = load_module('paired_verified_loader', root / 'driver/fts_verified_elf_reuse.py')
+    verified = loader.prepare_verified_runtime(args.artifact_zip, root / 'runtime')
+    plan['runtimeVerificationSha256'] = digest(root / 'runtime/verification.json')
+    plan['artifact'] = verified['artifact']
+    source_identity(source, args.driver_sha)
+    write_json(root / 'plan.json', plan)
+    return plan
+
+
 def load_plan(args):
     no_symlinks(args.root)
     plan = json.loads((args.root / 'plan.json').read_text(encoding='utf-8'))
@@ -437,6 +636,12 @@ def load_plan(args):
             raise RuntimeError('Saved driver script changed')
     if set(plan['driverFiles']) != set(DRIVER_FILES):
         raise RuntimeError('Incomplete saved driver identity')
+    if plan.get('mode') == REUSE_MODE:
+        if (plan.get('validationDriverCommit') != args.driver_sha or plan.get('candidateBuildCommit') != CANDIDATE
+                or plan.get('baselineSource') != str(args.root / 'sources/baseline')
+                or plan.get('candidateSource') != str(args.root / 'sources/candidate')
+                or plan.get('runtimeVerificationSha256') != digest(args.root / 'runtime/verification.json')):
+            raise RuntimeError('Reuse source/verification plan mismatch')
     return plan
 
 
@@ -598,7 +803,8 @@ def benchmark_work(args, baseline, scorer, final_role_round):
 def small_report(report):
     return {key: report[key] for key in ('scope', 'status', 'driverCommit', 'kernelOrigin',
         'baselineCommit', 'builds', 'caseVerdicts', 'roundVerdicts', 'sameHostPerformance',
-        'failure', 'formalContestRun', 'allOfficialInputsUnchanged', 'planAssertions') if key in report}
+        'failure', 'formalContestRun', 'allOfficialInputsUnchanged', 'planAssertions',
+        'mode', 'validationDriverCommit', 'candidateBuildCommit', 'supplementalCompatibility', 'artifactReuse') if key in report}
 
 
 def presentation_lines(report):
@@ -660,9 +866,11 @@ def presentation_lines(report):
              and report.get('allOfficialInputsUnchanged') is True
              and report.get('baselineCommit') == BASELINE and report.get('kernelOrigin') == KERNEL
              and mapping(builds.get('baseline')).get('sourceCommit') == BASELINE
-             and mapping(builds.get('candidate')).get('sourceCommit') == report.get('driverCommit')
+             and mapping(builds.get('candidate')).get('sourceCommit') == (CANDIDATE if report.get('mode') == REUSE_MODE else report.get('driverCommit'))
+             and (report.get('mode') != REUSE_MODE or (report.get('validationDriverCommit') == report.get('driverCommit')
+                  and report.get('candidateBuildCommit') == CANDIDATE))
              and bool(re.fullmatch('[0-9a-f]{40}', str(report.get('driverCommit', ''))))
-             and complete(cases, expected_cases) and complete(rounds, expected_rounds) and plans_valid
+             and case_evidence_complete(cases, report.get('supplementalCompatibility'), report.get('driverCommit')) and complete(rounds, expected_rounds) and plans_valid
              and perf.get('classification') in ('improvement_established', 'regression', 'inconclusive')
              and [(mapping(row).get('baseline'), mapping(row).get('candidate')) for row in pairs] == list(PAIRS))
     interval = sequence(perf.get('descriptive95PercentInterval'))
@@ -700,8 +908,16 @@ def presentation_lines(report):
     for role in ('baseline', 'candidate'):
         total = len(selected_cases(role))
         selected = [mapping(row) for row in cases if mapping(row).get('role') == role]
-        add('Correctness %s: %d/%d selected cases passed; %d recorded. No full-suite claim.' % (
-            role, sum(row.get('status') == 'passed' for row in selected), total, len(selected)))
+        if role == 'candidate' and report.get('mode') == REUSE_MODE:
+            originals = [row for row in selected if row.get('name') in CASES]
+            extras = [row for row in selected if row.get('name') in REGRESSIONS]
+            compatible = sum(accepted_compatibility(mapping(report.get('supplementalCompatibility')).get('candidate/' + row.get('name', '')), row, report.get('driverCommit')) for row in originals)
+            add('Correctness candidate originals raw: %d/5 native passes; plan-compatible: %d/1; extra regressions: %d/2 native passes (61 new assertions). No native 5/5 or 7/7 claim.' % (sum(row.get('status') == 'passed' for row in originals), compatible, sum(row.get('status') == 'passed' for row in extras)))
+            simple = [row for row in originals if row.get('name') == CASES[-1]]
+            add('Candidate simple_query raw native status: ' + str(simple[0].get('status') if len(simple) == 1 else 'unavailable') + '; supplemental compatibility never changes a native FAIL.')
+        else:
+            add('Correctness %s: %d/%d selected cases passed; %d recorded. No full-suite claim.' % (
+                role, sum(row.get('status') == 'passed' for row in selected), total, len(selected)))
     verdicts = [mapping(row) for row in cases + rounds]
     add('Timed rounds: %d/%d passed; %d recorded. Owned DB cleanup: %d/%d recorded instances passed (%d expected).' % (
         sum(mapping(row).get('status') == 'passed' for row in rounds), len(SCHEDULE), len(rounds),
@@ -773,17 +989,29 @@ def validate(args, plan, report):
     harness = load_module('paired_original_harness', args.root / 'driver/fts_contest_validation.py')
     scorer = load_module('paired_official_scorer', args.source / (BENCH + '_score.py'))
     baseline = scorer.load_baseline(args.source / (BENCH + '_baseline.json'))
-    verify_driver(args.source, args.driver_sha)
+    reuse = plan.get('mode') == REUSE_MODE
+    if reuse:
+        verify_reuse_driver(args.source, args.driver_sha)
+        verified = verified_runtime_record(args, plan)
+        report.update(mode=REUSE_MODE, validationDriverCommit=args.driver_sha, candidateBuildCommit=CANDIDATE,
+                      artifactReuse=dict(artifact=plan['artifact'], verificationSha256=plan['runtimeVerificationSha256'],
+                          oldValidationAccepted=False, historicalCollectorPassed=False))
+    else:
+        verify_driver(args.source, args.driver_sha)
     roles = {}
     pinned = {}
     for role in ('baseline', 'candidate'):
         source = Path(plan[role + 'Source'])
-        commit = BASELINE if role == 'baseline' else args.driver_sha
-        identity = json.loads((args.root / 'runtime' / role / 'identity.json').read_text(encoding='utf-8'))
+        commit = BASELINE if role == 'baseline' else CANDIDATE if reuse else args.driver_sha
+        identity = json.loads((args.root / 'runtime' / role / ('identity.original.json' if reuse else 'identity.json')).read_text(encoding='utf-8'))
+        provenance = json.loads((args.root / 'runtime' / role / 'relocation.json').read_text(encoding='utf-8')) if reuse else None
+        if reuse and (verified['roles'][role].get('identity') != identity
+                      or verified['roles'][role].get('provenance') != provenance):
+            raise RuntimeError('Original identity/relocation differs from verified runtime record')
         source_id = source_identity(source, commit)
         if source_id['tree'] != identity['sourceTree']:
             raise RuntimeError('Saved source tree differs from exact role snapshot')
-        binary = validate_identity(identity, role, commit, args.root)
+        binary = validate_relocated_identity(identity, role, args.root, provenance) if reuse else validate_identity(identity, role, commit, args.root)
         role_args = argparse.Namespace(role=role, source=source, expected_sha=commit, binary=binary,
             workspace=args.source, obclient=args.source / 'deps/3rd/u01/obclient/bin/obclient',
             mysqltest=args.source / 'deps/3rd/u01/obclient/bin/mysqltest')
@@ -793,23 +1021,33 @@ def validate(args, plan, report):
             path = getattr(role_args, client)
             if digest(path) != expected:
                 raise RuntimeError('Official native client changed')
+            verify_loader(path, args.root / 'evidence' / role / (client + '-runtime-ldd.log'), source, env)
         pinned[role] = harness.original_inputs(source)
         if pinned[role] != identity['officialInputHashes']:
             raise RuntimeError('Official input hashes differ from build-time identity')
-        roles[role] = (role_args, harness.load_native(source), identity)
+        roles[role] = (role_args, harness.load_native(source), identity, provenance)
         report['builds'][role] = {key: identity[key] for key in ('sourceCommit', 'sourceTree', 'kernelOrigin', 'driverCommit', 'sha256', 'bytes', 'buildId')}
     persist_report(args.root, report)
 
     def guard(role):
-        call_args, _, identity = roles[role]
+        call_args, _, identity, provenance = roles[role]
         source_identity(call_args.source, call_args.expected_sha)
-        validate_identity(identity, role, call_args.expected_sha, args.root)
+        if reuse:
+            source_identity(args.source, args.driver_sha)
+            if digest(args.root / 'runtime/verification.json') != plan['runtimeVerificationSha256']:
+                raise RuntimeError('Runtime verification changed')
+            validate_relocated_identity(identity, role, args.root, provenance)
+        else:
+            validate_identity(identity, role, call_args.expected_sha, args.root)
+        for client, expected in CLIENTS.items():
+            if digest(getattr(call_args, client)) != expected:
+                raise RuntimeError('Official native client changed during validation')
         if harness.original_inputs(call_args.source) != pinned[role]:
             raise RuntimeError('Official inputs changed during validation')
 
     def run(role, name, work, cases=False):
         guard(role)
-        call_args, native, _ = roles[role]
+        call_args, native, _, _ = roles[role]
         call_args.out = args.root / 'validation' / ('cases/' + role if cases else 'rounds')
         env = runtime_env(args.source, call_args.binary)
         old_library, old_path = os.environ.get('LD_LIBRARY_PATH'), os.environ.get('PATH')
@@ -843,24 +1081,52 @@ def validate(args, plan, report):
                     os.environ[key] = old
         report['instances'].append(dict(role=role, **row))
         verdict = dict(name=name, role=role, status=row.get('status'), cleanupPassed=row.get('cleanupPassed'))
+        if cases:
+            verdict['work'] = row.get('work', {})
+            for key in ('error', 'traceback', 'cleanupError', 'timedOut', 'signal', 'failureKind', 'failureReason'):
+                if key in row:
+                    verdict[key] = row[key]
         report['caseVerdicts' if cases else 'roundVerdicts'].append(verdict)
+        proof = None
+        if reuse and cases and role == 'candidate' and name == CASES[-1] and row.get('status') == 'failed':
+            from fts_plan_compatibility import classify_plan_metadata_compatibility
+            proof = classify_plan_metadata_compatibility(source=call_args.source, out=call_args.out / name,
+                role=role, case_name=name, row=row)
+            out = call_args.out / name
+            native_result = out / 'result.json'
+            no_symlinks(native_result)
+            if (not native_result.is_file() or native_result.stat().st_nlink != 1
+                    or native_result.stat().st_size > 2 * 1024 ** 2
+                    or json.loads(native_result.read_text(encoding='utf-8'))
+                        != json.loads(json.dumps(row, ensure_ascii=False, allow_nan=False))):
+                raise RuntimeError('Raw native result differs from returned unmodified row')
+            context = dict(sourceCommit=call_args.expected_sha, validationDriverCommit=args.driver_sha,
+                source=str(call_args.source), out=str(out), nativeResult=dict(path=str(native_result),
+                    bytes=native_result.stat().st_size, sha256=digest(native_result)))
+            proof = dict(proof, validationContext=context)
+            verdict['validationContext'] = context
+            write_json(out / 'supplemental-plan-compatibility.json', proof)
+            report.setdefault('supplementalCompatibility', {})[role + '/' + name] = proof
         if not cases and 'metrics' in row.get('work', {}):
             report['roundMetrics'][name] = row['work']['metrics']
         if not cases and 'explain' in row.get('work', {}):
             report.setdefault('planAssertions', {})[name] = dict(role=role, queries=row['work']['explain'])
         persist_report(args.root, report)
-        require_instance(row)
+        if not (reuse and proof is not None and accepted_compatibility(proof, verdict, args.driver_sha)):
+            require_instance(row)
         guard(role)
         return row
 
     for role in ('baseline', 'candidate'):
-        call_args, native, _ = roles[role]
+        call_args, native, _, _ = roles[role]
         available = {case.name: case for case in native.discover_cases(call_args.source)}
         selected = selected_cases(role)
         if any(name not in available for name in selected):
             raise RuntimeError('Required native case unavailable/excluded')
         for name in selected:
             run(role, name, harness.original_case(call_args, native, available[name]), cases=True)
+    if not case_evidence_complete(report['caseVerdicts'], report.get('supplementalCompatibility'), args.driver_sha):
+        raise RuntimeError('Complete native cases and strict supplemental proof required')
     time.sleep(30)
     for name, role in SCHEDULE:
         call_args = roles[role][0]
@@ -876,19 +1142,105 @@ def validate(args, plan, report):
     persist_report(args.root, report)
 
 
+def collect_continuation_evidence(root, out):
+    """Copy only new bounded evidence. Never include ELF, DB, core or env files."""
+    root = Path(root)
+    if out is None:
+        raise RuntimeError('Evidence collection requires a fresh output directory')
+    out = Path(out)
+    no_symlinks(root)
+    no_symlinks(out)
+    if not root.is_dir() or out.exists() or root == out or root in out.parents or out in root.parents:
+        raise RuntimeError('Evidence output must be fresh and disjoint')
+    selected = []
+    def select(path, cap=2 * 1024 ** 2):
+        if path.is_symlink():
+            raise RuntimeError('Evidence symlink rejected: ' + str(path))
+        if not path.exists():
+            return
+        no_symlinks(path)
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > cap:
+            raise RuntimeError('Evidence file type/link/size violation: ' + str(path))
+        if len(selected) >= 512:
+            raise RuntimeError('Evidence entry cap exceeded')
+        selected.append((path, info, digest(path)))
+    for name in ('plan.json', 'report.json'):
+        select(root / name, 8 * 1024 ** 2)
+    for name in ('manifest.original.json', 'plan.original.json', 'verification.json', 'verification.failed.json'):
+        select(root / 'runtime' / name, 8 * 1024 ** 2)
+    for role in ('baseline', 'candidate'):
+        for name in ('identity.original.json', 'relocation.json', 'readelf-notes.log'):
+            select(root / 'runtime' / role / name, 8 * 1024 ** 2)
+        for name in ('runtime-ldd.log', 'runtime-ldd.log.json', 'obclient-runtime-ldd.log',
+                     'obclient-runtime-ldd.log.json', 'mysqltest-runtime-ldd.log',
+                     'mysqltest-runtime-ldd.log.json', 'resources-before.txt', 'resources-after.txt'):
+            select(root / 'evidence' / role / name)
+    instances = [root / 'validation/cases' / role / name for role in ('baseline', 'candidate')
+                 for name in selected_cases(role)] + [root / 'validation/rounds' / name for name, _ in SCHEDULE]
+    names = {'result.json', 'owned-process.json', 'start.log', 'ready.log', 'original-init.log',
+             'actual-parameters.log', 'own-stop.log', 'own-destroy.log', 'mysqltest-output.log',
+             'original-run-case.log', 'original-result-diff.log', 'supplemental-plan-compatibility.json',
+             'benchmark.log', 'benchmark.log.json', 'report.txt', 'frozen-score.json',
+             'frozen-score.json.json', 'explain-result.json'}
+    names.update(name + suffix for name in QUERY_NAMES + PLAN_CONTROLS
+                 for suffix in ('-explain.sql', '-explain.log', '-explain.log.json'))
+    for directory in instances:
+        no_symlinks(directory)
+        for name in sorted(names):
+            select(directory / name)
+        logs = directory / 'mysqltest-log'
+        no_symlinks(logs)
+        if logs.exists():
+            entries = list(logs.iterdir())
+            if len(entries) > 16:
+                raise RuntimeError('Native log directory entry cap exceeded')
+            for path in sorted(entries):
+                if path.name != 'timer' and not re.fullmatch(r'[A-Za-z0-9_.-]+\.(?:reject|log)', path.name):
+                    raise RuntimeError('Unexpected native evidence filename: ' + path.name)
+                select(path)
+    total = sum(info.st_size for _, info, _ in selected)
+    if total > 64 * 1024 ** 2:
+        raise RuntimeError('Evidence total cap exceeded')
+    out.mkdir(parents=True)
+    records = []
+    for path, before, expected in selected:
+        destination = out / path.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, destination)
+        after = path.stat()
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or digest(path) != expected or digest(destination) != expected):
+            raise RuntimeError('Evidence changed while copying: ' + str(path))
+        records.append(dict(path=str(path.relative_to(root)), bytes=before.st_size, sha256=expected))
+    manifest = dict(schema=1, kind='new-continuation-evidence-only', files=records, bytes=total,
+        unchangedElfsReuploaded=False, excludes=['database', 'core', 'environment', 'db-log-tails'],
+        historicalCollectorPassed=False,
+        historicalCollectorFailure='Original collector independently failed on baseline/cn_word non-text DB log; no old collector pass is claimed.',
+        maxFileBytes=8 * 1024 ** 2, maxTotalBytes=64 * 1024 ** 2, maxEntries=512)
+    write_json(out / 'continuation-evidence-manifest.json', manifest)
+    return manifest
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--phase', choices=('plan', 'prepare', 'snapshot', 'switch-candidate', 'validate', 'finalize', 'present'), default='plan')
+    parser.add_argument('--phase', choices=('plan', 'prepare', 'snapshot', 'switch-candidate', 'validate', 'finalize', 'present', 'prepare-reuse', 'collect-evidence'), default='plan')
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--driver-sha', required=True)
     parser.add_argument('--role', choices=('baseline', 'candidate'))
     parser.add_argument('--summary', type=Path)
+    parser.add_argument('--artifact-zip', type=Path)
+    parser.add_argument('--out', type=Path)
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args(argv)
     args.source = args.source.resolve(strict=True)
     no_symlinks(args.root)
     args.root = args.root.resolve(strict=False)
+    if args.phase == 'collect-evidence':
+        collect_continuation_evidence(args.root, args.out)
+        return 0
     if args.phase == 'present':
         try:
             report = json.loads((args.root / 'report.json').read_text(encoding='utf-8'))
@@ -907,7 +1259,9 @@ def main(argv=None):
         phase=args.phase, formalContestRun=False, builds={}, instances=[], caseVerdicts=[],
         roundVerdicts=[], roundMetrics={})
     try:
-        if args.phase == 'prepare':
+        if args.phase == 'prepare-reuse':
+            prepare_reuse(args)
+        elif args.phase == 'prepare':
             prepare(args)
         else:
             plan = load_plan(args)

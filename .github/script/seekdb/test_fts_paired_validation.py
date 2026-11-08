@@ -1262,5 +1262,377 @@ except InterruptedError:
             if wrapper.stderr:
                 wrapper.stderr.close()
 
+    @staticmethod
+    def compatibility_record():
+        import fts_plan_compatibility as c
+        row = dict(role='candidate', name=c.CASE, status='failed', cleanupPassed=True,
+            work=dict(passed=False, exitCode=1, invocations=1, inputsUnchanged=True,
+                      testSha256=c.TEST_SHA256, expectedSha256=c.GOLDEN_SHA256))
+        def info(name, sha='c' * 64, count=99, lines=3):
+            return dict(path='/synthetic/' + name, sha256=sha, bytes=count,
+                        lines=lines, endsWithNewline=True)
+        proof = dict(scheme=c.SCHEME, accepted=True, role='candidate', caseName=c.CASE,
+            rawNativeStatus='failed', nativePassed=False, formalContestPass=False,
+            approvedDifferenceCount=4, completeBytesCompared=True, eofCompared=True,
+            inputsUnchanged=True, ownedCleanupPassed=True,
+            originalGolden=info('golden', c.GOLDEN_SHA256, 184285, 2833),
+            actualReject=info('reject', '737c4257fabf57dbd5365fdd04cfe2573206129d19991a8a1616e7e3db1e4896', 184289, 2833),
+            originalTest=info('test', c.TEST_SHA256), nativeOutput=info('output'), nativeWrapper=info('wrapper'),
+            nativeMismatchTimestamp='2026-11-08 12:34:56',
+            adjacentScoredControl=dict(annotationLine=1603, calcRelevance=True),
+            changes=[dict(sqlStartLine=start, annotationLine=line, scanId=scan,
+                          statement=sql.decode().rstrip('\n'), purpose=purpose,
+                          expectedCalcRelevance=True, actualCalcRelevance=False)
+                     for start, line, scan, purpose, sql in c.SPECS])
+        context = dict(sourceCommit=p.CANDIDATE, validationDriverCommit=DRIVER,
+            source='/synthetic/source', out='/synthetic/out',
+            nativeResult=dict(path='/synthetic/out/result.json', sha256='e' * 64, bytes=555))
+        for key, path in dict(originalGolden=Path(context['source']) / c.GOLDEN,
+                originalTest=Path(context['source']) / c.TEST,
+                actualReject=Path(context['out']) / 'mysqltest-log/simple_query.reject',
+                nativeOutput=Path(context['out']) / 'mysqltest-output.log',
+                nativeWrapper=Path(context['out']) / 'original-run-case.log').items():
+            proof[key]['path'] = str(path)
+        proof['validationContext'] = context
+        row['validationContext'] = context
+        return proof, row
+
+    def test_continuation_strong_proof_never_accepts_boolean_only_or_malformed_fields(self):
+        proof, row = self.compatibility_record()
+        self.assertTrue(p.accepted_compatibility(proof, row))
+        for key, bad in [('scheme', 'other'), ('approvedDifferenceCount', True),
+                ('completeBytesCompared', False), ('eofCompared', False), ('nativePassed', True),
+                ('formalContestPass', True), ('ownedCleanupPassed', False), ('rawNativeStatus', 'passed'),
+                ('changes', proof['changes'][:-1]), ('adjacentScoredControl', {}), ('originalGolden', {}),
+                ('actualReject', dict(proof['actualReject'], sha256='d' * 64)),
+                ('nativeOutput', dict(proof['nativeOutput'], bytes=2 ** 20 + 1)),
+                ('nativeWrapper', dict(proof['nativeWrapper'], path='relative'))]:
+            with self.subTest(key=key):
+                self.assertFalse(p.accepted_compatibility(dict(proof, **{key: bad}), row))
+        self.assertFalse(p.accepted_compatibility({'accepted': True}, row))
+        for key, bad in [('role', 'baseline'), ('name', p.CASES[0]), ('status', 'passed'),
+                         ('cleanupPassed', False), ('timedOut', True), ('error', 'failure')]:
+            with self.subTest(raw=key):
+                self.assertFalse(p.accepted_compatibility(proof, dict(row, **{key: bad})))
+        for key, bad in [('passed', True), ('exitCode', False), ('exitCode', 2),
+                         ('invocations', 2), ('inputsUnchanged', False), ('failureKind', 'timeout')]:
+            with self.subTest(work=key):
+                self.assertFalse(p.accepted_compatibility(proof, dict(row, work=dict(row['work'], **{key: bad}))))
+
+    def continuation_presentation(self):
+        report = self.presentation_report()
+        proof, raw = self.compatibility_record()
+        report.update(mode=p.REUSE_MODE, validationDriverCommit=DRIVER, candidateBuildCommit=p.CANDIDATE,
+                      supplementalCompatibility={'candidate/' + p.CASES[-1]: proof})
+        report['builds']['candidate']['sourceCommit'] = p.CANDIDATE
+        report['caseVerdicts'] = [raw if row['role'] == 'candidate' and row['name'] == p.CASES[-1] else row
+                                 for row in report['caseVerdicts']]
+        return report
+
+    def test_continuation_presentation_keeps_actual_source_and_native_failure_visible(self):
+        report = self.continuation_presentation()
+        before = copy.deepcopy(report)
+        text = '\n'.join(p.presentation_lines(report))
+        self.assertIn('classification: improvement_established', text)
+        self.assertIn('B actual build source: ' + p.CANDIDATE, text)
+        self.assertIn('driver source: ' + DRIVER, text)
+        self.assertIn('originals raw: 4/5 native passes; plan-compatible: 1/1; extra regressions: 2/2', text)
+        self.assertIn('61 new assertions', text)
+        self.assertIn('raw native status: failed', text)
+        self.assertIn('candidate/fts_index.simple_query status=failed cleanup=True', text)
+        self.assertNotIn('Correctness candidate: 7/7', text)
+        self.assertEqual(report, before)
+        compact = p.small_report(report)
+        for key in ('mode', 'validationDriverCommit', 'candidateBuildCommit', 'supplementalCompatibility'):
+            self.assertEqual(compact[key], report[key])
+
+    def test_continuation_presentation_and_cases_require_full_proof_not_accepted_flag(self):
+        report = self.continuation_presentation()
+        self.assertTrue(p.case_evidence_complete(report['caseVerdicts'], report['supplementalCompatibility']))
+        for bad in ({}, {'candidate/' + p.CASES[-1]: {'accepted': True}},
+                    {'candidate/' + p.CASES[0]: next(iter(report['supplementalCompatibility'].values()))}):
+            text = '\n'.join(p.presentation_lines(dict(report, supplementalCompatibility=bad)))
+            self.assertIn('classification: unavailable', text)
+            self.assertIn('No improvement claim.', text)
+        for key, value in (('candidateBuildCommit', DRIVER), ('validationDriverCommit', p.CANDIDATE)):
+            self.assertIn('classification: unavailable', '\n'.join(p.presentation_lines(dict(report, **{key: value}))))
+        report['builds']['candidate']['sourceCommit'] = DRIVER
+        self.assertIn('classification: unavailable', '\n'.join(p.presentation_lines(report)))
+
+    def test_reuse_driver_checks_actual_B_to_driver_diff_as_well_as_original_protection(self):
+        with patch.object(p, 'source_identity'), patch.object(p, 'verify_driver', return_value={'kernelOrigin': p.KERNEL}), \
+                patch.object(p, 'git', return_value=(p.PREFIX + 'fts_plan_compatibility.py\n').encode()) as git:
+            proof = p.verify_reuse_driver(self.source, DRIVER)
+        self.assertEqual(proof['actualCandidateBuildCommit'], p.CANDIDATE)
+        self.assertEqual(git.call_args.args[3:5], (p.CANDIDATE, DRIVER))
+        for path in ('src/sql/optimizer/a.cpp', 'build.sh', 'rust/a.rs', 'deps/a',
+                     'tools/benchmark/fts_large_bench_score.py',
+                     'tools/deploy/mysql_test/test_suite/fts_index/r/mysql/simple_query.result',
+                     p.PREFIX + 'fts_contest_validation.py'):
+            with self.subTest(path=path), patch.object(p, 'source_identity'), \
+                    patch.object(p, 'verify_driver', return_value={}), patch.object(p, 'git', return_value=path.encode()):
+                with self.assertRaisesRegex(RuntimeError, 'outside explicit diagnostic allowlist'):
+                    p.verify_reuse_driver(self.source, DRIVER)
+
+    def relocated_fixture(self, role='candidate'):
+        commit = p.BASELINE if role == 'baseline' else p.CANDIDATE
+        binary = self.root / 'runtime' / role / 'seekdb'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b'\x7fELFsynthetic-' + commit.encode())
+        identity = dict(role=role, sourceCommit=commit, sourceTree=p.SOURCE_TREES[role],
+                        kernelOrigin=p.BASELINE if role == 'baseline' else p.KERNEL,
+                        driverCommit=p.CANDIDATE, binary='/historical/runtime/' + role + '/seekdb',
+                        bytes=binary.stat().st_size, sha256=p.digest(binary), buildId='abcd',
+                        generatedVersionSha256='a' * 64)
+        original = binary.parent / 'identity.original.json'
+        original.write_bytes((json.dumps(identity, separators=(', ', ': ')) + '\n\n').encode())
+        provenance = dict(identity, originalBinaryPath=identity['binary'], originalIdentitySha256=p.digest(original),
+                          runtimeBinaryPath=str(binary), staticIdentityVerified=True, previousValidationAccepted=False,
+                          actualValidationDriver='UNASSIGNED', buildDriverCommit=p.CANDIDATE,
+                          artifactId=13621468966, runId=42486120779, runAttempt=1,
+                          artifactZipSha256='23f8b2f8f6322edcd5dd0ed2b485c0d3271b3992d24417866de9eb90f77d8f75')
+        provenance.pop('binary')
+        provenance.pop('driverCommit')
+        p.write_json(binary.parent / 'relocation.json', provenance)
+        return identity, provenance, original
+
+    def test_relocated_identity_preserves_original_JSON_bytes_and_actual_B_commit(self):
+        for role in ('baseline', 'candidate'):
+            identity, provenance, original = self.relocated_fixture(role)
+            before = original.read_bytes()
+            self.assertEqual(p.validate_relocated_identity(identity, role, self.root, provenance), original.parent / 'seekdb')
+            self.assertEqual(original.read_bytes(), before)
+            self.assertTrue(identity['binary'].startswith('/historical/'))
+            self.assertEqual(identity['driverCommit'], p.CANDIDATE)
+
+    def test_relocated_identity_rejects_relabel_or_metadata_byte_drift(self):
+        identity, provenance, original = self.relocated_fixture()
+        for key, value in [('sourceCommit', DRIVER), ('sourceTree', TREE), ('kernelOrigin', p.CANDIDATE),
+                           ('buildDriverCommit', DRIVER), ('runtimeBinaryPath', '/wrong/seekdb'),
+                           ('originalIdentitySha256', 'd' * 64), ('sha256', 'd' * 64), ('staticIdentityVerified', False)]:
+            changed = dict(provenance, **{key: value})
+            p.write_json(original.parent / 'relocation.json', changed)
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                p.validate_relocated_identity(identity, 'candidate', self.root, changed)
+        p.write_json(original.parent / 'relocation.json', provenance)
+        original.write_bytes(original.read_bytes() + b' ')
+        with self.assertRaisesRegex(RuntimeError, 'integrity mismatch'):
+            p.validate_relocated_identity(identity, 'candidate', self.root, provenance)
+
+    def test_prepare_reuse_keeps_driver_checkout_and_creates_two_real_source_worktrees(self):
+        self.root.rmdir()
+        self.args.artifact_zip = self.source / 'original.zip'
+        for name in p.DRIVER_FILES:
+            path = self.source / p.PREFIX / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('synthetic ' + name)
+        def git(source, *args):
+            if args[0] == 'show':
+                return (self.source / args[1].split(':', 1)[1]).read_bytes()
+            return b''
+        def identity(source, commit):
+            role = 'baseline' if commit == p.BASELINE else 'candidate'
+            return dict(commit=commit, tree=p.SOURCE_TREES[role] if source != self.source else TREE)
+        loader = Mock()
+        def verified(archive, root):
+            self.assertEqual(archive, self.args.artifact_zip)
+            self.assertFalse(root.exists())
+            p.write_json(root / 'verification.json', {'synthetic': True})
+            return {'artifact': {'artifactId': 13621468966}}
+        loader.prepare_verified_runtime.side_effect = verified
+        with patch.object(p, 'git', side_effect=git) as commands, patch.object(p, 'source_identity', side_effect=identity), \
+                patch.object(p, 'verify_reuse_driver', return_value={}), patch.object(p, 'load_module', return_value=loader), \
+                patch.object(p, 'switch_source') as switch:
+            plan = p.prepare_reuse(self.args)
+        switch.assert_not_called()
+        self.assertEqual(plan['validationDriverCommit'], DRIVER)
+        self.assertEqual(plan['candidateBuildCommit'], p.CANDIDATE)
+        self.assertEqual(plan['candidateSource'], str(self.root / 'sources/candidate'))
+        worktrees = [c.args[1:] for c in commands.call_args_list if c.args[1] == 'worktree']
+        self.assertEqual(worktrees, [('worktree', 'add', '--detach', str(self.root / 'sources' / role), commit)
+                                     for role, commit in (('baseline', p.BASELINE), ('candidate', p.CANDIDATE))])
+        self.assertEqual(p.load_plan(self.args), plan)
+        (self.root / 'runtime/verification.json').write_text('changed')
+        with self.assertRaisesRegex(RuntimeError, 'verification plan mismatch'):
+            p.load_plan(self.args)
+
+    def fake_reuse_validation(self, accepted=True, cleanup=True):
+        import fts_plan_compatibility as c
+        plan, report, calls = self.fake_validation()
+        p.write_json(self.root / 'runtime/verification.json', {'synthetic': True})
+        plan.update(mode=p.REUSE_MODE, candidateBuildCommit=p.CANDIDATE,
+                    artifact={'artifactId': 13621468966},
+                    runtimeVerificationSha256=p.digest(self.root / 'runtime/verification.json'))
+        for role in ('baseline', 'candidate'):
+            identity = json.loads((self.root / 'runtime' / role / 'identity.json').read_text())
+            identity['sourceCommit'] = p.BASELINE if role == 'baseline' else p.CANDIDATE
+            p.write_json(self.root / 'runtime' / role / 'identity.original.json', identity)
+            p.write_json(self.root / 'runtime' / role / 'relocation.json', {'synthetic': True})
+        verification = dict(status='verified_runtime_prepared', runtimeRoot=str(self.root / 'runtime'),
+            verificationPath=str(self.root / 'runtime/verification.json'), oldValidationAccepted=False,
+            currentValidationPerformed=False, artifact=plan['artifact'], roles={})
+        for role in ('baseline', 'candidate'):
+            directory = self.root / 'runtime' / role
+            verification['roles'][role] = dict(binary=str(directory / 'seekdb'),
+                identityOriginalPath=str(directory / 'identity.original.json'),
+                relocationPath=str(directory / 'relocation.json'),
+                identity=json.loads((directory / 'identity.original.json').read_text()), provenance={'synthetic': True})
+        p.write_json(self.root / 'runtime/verification.json', verification)
+        plan['runtimeVerificationSha256'] = p.digest(self.root / 'runtime/verification.json')
+        proof, raw = self.compatibility_record()
+        if not accepted:
+            proof = {'accepted': True}
+        original = self._fake_harness.run_instance.side_effect
+        def run(*args, **kwargs):
+            row = original(*args, **kwargs)
+            if args[0].role == 'candidate' and args[2] == p.CASES[-1]:
+                row = copy.deepcopy(raw)
+                row.pop('role')
+                row.pop('validationContext')
+                row['cleanupPassed'] = cleanup
+                row['parameters'] = ('memory_budget=4G', 'vector_memory_limit=1G')
+                out = args[0].out / args[2]
+                p.write_json(out / 'result.json', row)
+                (out / 'original-run-case.log').write_bytes(b'UNCHANGED NATIVE FAIL\n')
+            return row
+        self._fake_harness.run_instance.side_effect = run
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(p, 'verify_reuse_driver', return_value={}))
+        stack.enter_context(patch.object(p, 'validate_relocated_identity', side_effect=lambda identity, role, root, provenance: root / 'runtime' / role / 'seekdb'))
+        def classify(**kwargs):
+            current = copy.deepcopy(proof)
+            for key, path in dict(originalGolden=kwargs['source'] / c.GOLDEN,
+                    originalTest=kwargs['source'] / c.TEST,
+                    actualReject=kwargs['out'] / 'mysqltest-log/simple_query.reject',
+                    nativeOutput=kwargs['out'] / 'mysqltest-output.log',
+                    nativeWrapper=kwargs['out'] / 'original-run-case.log').items():
+                if key in current:
+                    current[key]['path'] = str(path)
+            return current
+        classifier = stack.enter_context(patch.object(c, 'classify_plan_metadata_compatibility', side_effect=classify))
+        return plan, report, calls, classifier
+
+    def test_continuation_bypasses_only_verified_failure_after_cleanup_preserves_raw_and_schedule(self):
+        plan, report, calls, classifier = self.fake_reuse_validation()
+        p.validate(self.args, plan, report)
+        self.assertEqual(len(calls), 20)
+        self.assertEqual(calls[12:], [(name, role, False) for name, role in p.SCHEDULE])
+        raw_path = self.root / 'validation/cases/candidate' / p.CASES[-1] / 'result.json'
+        raw_bytes = raw_path.read_bytes()
+        raw = json.loads(raw_bytes)
+        self.assertEqual(raw['status'], 'failed')
+        self.assertIs(raw['work']['passed'], False)
+        self.assertEqual(raw['work']['exitCode'], 1)
+        self.assertEqual(json.loads(json.dumps(classifier.call_args.kwargs['row'])), raw)
+        self.assertEqual(classifier.call_args.kwargs['row']['cleanupPassed'], True)
+        self.assertEqual((raw_path.parent / 'original-run-case.log').read_bytes(), b'UNCHANGED NATIVE FAIL\n')
+        self.assertEqual(report['caseVerdicts'][9]['status'], 'failed')
+        self.assertEqual(report['instances'][9]['status'], 'failed')
+        self.assertTrue((raw_path.parent / 'supplemental-plan-compatibility.json').is_file())
+        self.assertEqual(report['builds']['candidate']['sourceCommit'], p.CANDIDATE)
+        self.assertEqual(report['validationDriverCommit'], DRIVER)
+        self.assertTrue(p.case_evidence_complete(report['caseVerdicts'], report['supplementalCompatibility']))
+
+    def test_continuation_fails_closed_before_regressions_or_timing_on_weak_proof_or_bad_cleanup(self):
+        for accepted, cleanup in ((False, True), (True, False)):
+            with self.subTest(accepted=accepted, cleanup=cleanup):
+                plan, report, calls, classifier = self.fake_reuse_validation(accepted, cleanup)
+                with self.assertRaisesRegex(RuntimeError, 'Owned instance failed'):
+                    p.validate(self.args, plan, report)
+                self.assertEqual(len(calls), 10)
+                self.assertEqual(report['roundVerdicts'], [])
+                self.assertEqual(report['caseVerdicts'][-1]['status'], 'failed')
+
+    def test_continuation_evidence_preserves_raw_files_excludes_ELFs_DB_env_and_logtails(self):
+        evidence = self.root / 'validation/cases/candidate' / p.CASES[-1]
+        p.write_json(evidence / 'result.json', {'status': 'failed'})
+        (evidence / 'mysqltest-log').mkdir()
+        (evidence / 'mysqltest-log/simple_query.reject').write_bytes(b'raw reject\x00\n')
+        (evidence / 'mysqltest-log/timer').write_bytes(b'123\n')
+        (evidence / 'mysqltest-log/simple_query.log').write_bytes(b'raw native log\n')
+        for relative in ('runtime/candidate/seekdb', 'validation/cases/candidate/' + p.CASES[-1] + '/database/private',
+                         'validation/cases/candidate/' + p.CASES[-1] + '/db-log-tails/seekdb.log', 'environment.txt', 'core'):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'NEVER UPLOAD')
+        out = self.root.parent / 'new-evidence'
+        manifest = p.collect_continuation_evidence(self.root, out)
+        self.assertEqual((out / 'validation/cases/candidate' / p.CASES[-1] / 'mysqltest-log/simple_query.reject').read_bytes(), b'raw reject\x00\n')
+        self.assertFalse(manifest['unchangedElfsReuploaded'])
+        self.assertFalse(manifest['historicalCollectorPassed'])
+        paths = [entry['path'] for entry in manifest['files']]
+        self.assertEqual(len(paths), 4)
+        self.assertIn('validation/cases/candidate/' + p.CASES[-1] + '/mysqltest-log/timer', paths)
+        self.assertNotIn('runtime/candidate/seekdb', paths)
+        self.assertTrue((out / 'continuation-evidence-manifest.json').is_file())
+
+    def test_continuation_evidence_rejects_oversize_or_linked_or_nested_outputs(self):
+        report = self.root / 'report.json'
+        report.write_bytes(b'x' * (8 * 1024 ** 2 + 1))
+        with self.assertRaisesRegex(RuntimeError, 'size violation'):
+            p.collect_continuation_evidence(self.root, self.root.parent / 'oversize')
+        report.write_bytes(b'{}')
+        os.link(report, self.root / 'alias')
+        with self.assertRaisesRegex(RuntimeError, 'type/link/size'):
+            p.collect_continuation_evidence(self.root, self.root.parent / 'linked')
+        with self.assertRaisesRegex(RuntimeError, 'fresh and disjoint'):
+            p.collect_continuation_evidence(self.root, self.root / 'nested')
+
+    def test_continuation_workflow_is_single_pinned_readonly_download_no_compile_no_ELF_upload(self):
+        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text()
+        self.assertEqual(text.count('    runs-on:'), 1)
+        self.assertIn('actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333', text)
+        for snippet in ("artifact-ids: '13621468966'", "run-id: '42486120779'", 'repository: beifeng-h/nailong-seekdb',
+                        'github-token: ${{ github.token }}', 'skip-decompress: true', 'digest-mismatch: error',
+                        'actions: read', '--phase prepare-reuse', '--phase collect-evidence', './build.sh release --init',
+                        'test ! -e "$RUNNER_TEMP/seekdb-original-artifact"'):
+            self.assertIn(snippet, text)
+        for forbidden in ('--build ', '--target ', '--make ', 'fts_paired_collect.py', 'secrets.', 'printenv',
+                          'actions/download-artifact@v4', '13608812363', 'persist-credentials', 'set -x', 'actions: write'):
+            self.assertNotIn(forbidden, text)
+        self.assertLess(text.index('admit download'), text.index('actions/download-artifact@'))
+        self.assertIn("-mindepth 1 -maxdepth 1 -print0", text)
+        self.assertIn('test -f "${archives[0]}" && test ! -L "${archives[0]}"', text)
+        self.assertNotIn("-name '*.zip'", text)
+        self.assertIn('https://mirrors.oceanbase.com/', text)
+        self.assertIn('exec /usr/bin/wget --https-only --timeout=30 --tries=1', text)
+
+
+    def test_continuation_proof_rejects_stale_driver_paths_or_raw_result_binding(self):
+        proof, row = self.compatibility_record()
+        for key, bad in (('sourceCommit', DRIVER), ('validationDriverCommit', p.CANDIDATE),
+                         ('source', '/stale/source'), ('out', '/stale/out')):
+            changed = copy.deepcopy(row)
+            changed['validationContext'][key] = bad
+            with self.subTest(key=key):
+                self.assertFalse(p.accepted_compatibility(proof, changed, DRIVER))
+        changed = copy.deepcopy(proof)
+        changed['nativeOutput']['path'] = '/stale/out/mysqltest-output.log'
+        self.assertFalse(p.accepted_compatibility(changed, row, DRIVER))
+        changed = copy.deepcopy(proof)
+        changed['validationContext']['nativeResult']['sha256'] = 'f' * 64
+        self.assertFalse(p.accepted_compatibility(changed, row, DRIVER))
+        self.assertFalse(p.accepted_compatibility(proof, row, p.CANDIDATE))
+
+    def test_continuation_rejects_initial_identity_drift_from_verified_runtime_record(self):
+        plan, report, calls, _ = self.fake_reuse_validation()
+        path = self.root / 'runtime/candidate/identity.original.json'
+        identity = json.loads(path.read_text())
+        identity['sha256'] = 'd' * 64
+        p.write_json(path, identity)
+        with self.assertRaisesRegex(RuntimeError, 'differs from verified runtime record'):
+            p.validate(self.args, plan, report)
+        self.assertEqual(calls, [])
+
+    def test_continuation_evidence_keeps_exact_timer_but_rejects_unrelated_native_filename(self):
+        logs = self.root / 'validation/cases/candidate' / p.CASES[-1] / 'mysqltest-log'
+        logs.mkdir(parents=True)
+        (logs / 'timer').write_text('123\n')
+        (logs / 'environment.txt').write_text('unexpected')
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected native evidence filename'):
+            p.collect_continuation_evidence(self.root, self.root.parent / 'unexpected-native')
+
+
 if __name__ == '__main__':
     unittest.main()

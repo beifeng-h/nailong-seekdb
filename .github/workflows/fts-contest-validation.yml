@@ -1,4 +1,4 @@
-name: Seekdb FTS same-host source calibration
+name: Seekdb FTS verified ELF continuation
 
 on:
   push:
@@ -16,20 +16,21 @@ jobs:
     if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
     env:
-      CARGO_BUILD_JOBS: '2'
-      CMAKE_BUILD_PARALLEL_LEVEL: '2'
       GIT_TERMINAL_PROMPT: '0'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - name: Checkout exact driver and official source objects without saved credentials
+      - name: Checkout exact validation driver and separate actual A and B source objects
         shell: bash
         run: |
           set -euo pipefail
           printf 'PAIRED_ROOT=%s/seekdb-paired\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           git init "$GITHUB_WORKSPACE"
           git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65; do
+          for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 bc4dde62eee39acb630ffe54741aecebe4ab0a2a f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65; do
             git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin "$sha"
             git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
           done
@@ -37,13 +38,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
-      - name: Run synthetic paired contracts before any long build
+      - name: Run all offline FTS contracts before download or execution
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s .github/script/seekdb -p 'test_fts_paired*.py' -v
+          python3 -B -m unittest discover -s .github/script/seekdb -p 'test_fts*.py' -v
 
-      - name: Reclaim only disposable image tools and measure admission resources
+      - name: Reclaim only disposable image tools and admit download and extraction resources
         shell: bash
         run: |
           set -euo pipefail
@@ -62,16 +63,45 @@ jobs:
           nproc
           free -b
           df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
-          free_bytes=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')
-          # Conservative admission only; subsequent actual disk measurements remain required.
-          test "$free_bytes" -ge 48318382080
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 48318382080
+          test ! -e "$RUNNER_TEMP/seekdb-original-artifact"
+          mkdir -m 0700 "$RUNNER_TEMP/seekdb-original-artifact"
 
-      - name: Install original documented host prerequisites
+      - name: Install original documented host prerequisites for unchanged runtime setup
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git wget curl rpm rpm2cpio cpio make build-essential binutils m4 file python3 libtool-bin libaio1t64
+
+      - name: Download only immutable original ZIP through official same-repository Actions route
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node24
+        with:
+          artifact-ids: '13621468966'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42486120779'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/seekdb-original-artifact
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Verify full original ZIP and relocate independent A and B ELFs without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/seekdb-original-artifact"
+          test -d "$artifact_dir" && test ! -L "$artifact_dir"
+          # The official fallback basename is 'artifact'; trust bytes, never a suffix.
+          mapfile -d '' -t archives < <(find "$artifact_dir" -mindepth 1 -maxdepth 1 -print0)
+          test "${#archives[@]}" -eq 1
+          test -f "${archives[0]}" && test ! -L "${archives[0]}"
+          test "$(stat -c '%h' -- "${archives[0]}")" -eq 1
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 17179869184
+          python3 -B .github/script/seekdb/fts_paired_validation.py --phase prepare-reuse \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --artifact-zip "${archives[0]}" --execute
+          { uname -srmo; nproc; free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; } \
+            > "$PAIRED_ROOT/evidence/baseline/resources-before.txt"
 
       - name: Keep exact official dependency profile with HTTPS-only mirror transport
         shell: bash
@@ -102,142 +132,80 @@ jobs:
           cache: 'false'
           crates-mirror: 'false'
 
-      - name: Pin driver and role sources then switch the build path to official A
+      - name: Initialize unchanged original dependencies and runtime clients without a build target
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/script/seekdb/fts_paired_validation.py --phase prepare \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
-          { uname -srmo; nproc; free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; } \
-            > "$PAIRED_ROOT/evidence/baseline/resources-before.txt"
-
-      - name: Initialize original A Release Unity configuration and dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
+          # --init configures the original Release profile; no compilation target is invoked.
           timeout --signal=TERM --kill-after=30s 45m ./build.sh release --init 2>&1 \
-            | tee "$PAIRED_ROOT/evidence/baseline/initialize.log"
-          du -sx -B1 deps/3rd build_release | tee "$PAIRED_ROOT/evidence/baseline/sizes-after-init.txt"
-
-      - name: Verify exact official native clients and actual loader before compilation
-        shell: bash
-        run: |
-          set -euo pipefail
+            | tee "$PAIRED_ROOT/evidence/dependency-initialize.log"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
           printf '%s\n' \
             '798aa952d536563ee0291e69251a6d0cd0d85e0c470d5499768fa0731ff3c1be  deps/3rd/u01/obclient/bin/obclient' \
             '64e0323b385af2831c5b166a375e8320ec40e3ead0bd925295de1b8f5a2196c6  deps/3rd/u01/obclient/bin/mysqltest' \
-            | tee "$PAIRED_ROOT/evidence/baseline/expected-clients.sha256"
-          sha256sum -c "$PAIRED_ROOT/evidence/baseline/expected-clients.sha256"
-          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib:$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib64:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib64"
-          for client in obclient mysqltest; do
-            ldd "deps/3rd/u01/obclient/bin/$client" | tee "$PAIRED_ROOT/evidence/baseline/$client-prebuild-ldd.log"
-            if grep -F 'not found' "$PAIRED_ROOT/evidence/baseline/$client-prebuild-ldd.log"; then exit 2; fi
-            timeout 10s "deps/3rd/u01/obclient/bin/$client" --version
-          done
+            | sha256sum -c -
 
-      - name: Build original production A once with two jobs
+      - name: Run all original native cases then strict separate proof and eight fresh same-host rounds
         shell: bash
         run: |
           set -euo pipefail
-          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
-          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 120m "$cmake_bin" \
-            --build build_release --target seekdb -j2 2>&1 | tee "$PAIRED_ROOT/evidence/baseline/build.log"
-          find build_release -type f -name '*.o' -printf '%T@ %s %p\n' | sort \
-            > "$PAIRED_ROOT/evidence/baseline/object-times.txt"
-          { free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; du -sx -B1 deps/3rd build_release; } \
-            > "$PAIRED_ROOT/evidence/baseline/resources-after.txt"
-          python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase snapshot --role baseline \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
-
-      - name: Switch the same build path to actual B source and regenerate its version
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase switch-candidate \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
-          { free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; } \
-            > "$PAIRED_ROOT/evidence/candidate/resources-before.txt"
-          test "$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')" -ge 10737418240
-          timeout --signal=TERM --kill-after=30s 45m ./build.sh release 2>&1 \
-            | tee "$PAIRED_ROOT/evidence/candidate/reconfigure.log"
-
-      - name: Build B incrementally with original Unity Rust and CMake pipeline
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
-          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 90m "$cmake_bin" \
-            --build build_release --target seekdb -j2 2>&1 | tee "$PAIRED_ROOT/evidence/candidate/build.log"
-          find build_release -type f -name '*.o' -printf '%T@ %s %p\n' | sort \
-            > "$PAIRED_ROOT/evidence/candidate/object-times.txt"
-          { free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; du -sx -B1 deps/3rd build_release; } \
-            > "$PAIRED_ROOT/evidence/candidate/resources-after.txt"
-          python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase snapshot --role candidate \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
-
-      - name: Validate original cases then eight fresh paired rounds and untimed exact EXPLAINs
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')" -ge 8589934592
-          timeout --signal=TERM --kill-after=180s 45m python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" \
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 8589934592
+          timeout --signal=TERM --kill-after=180s 180m python3 -B "$PAIRED_ROOT/driver/fts_paired_validation.py" \
             --phase validate --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
             --driver-sha "$GITHUB_SHA" --execute
 
-      - name: Always print explicit final or partial calibration verdict
+      - name: Always print explicit final or partial continuation verdict
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           if test -f "$PAIRED_ROOT/driver/fts_paired_validation.py"; then
-            python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase finalize \
+            python3 -B "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase finalize \
               --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
           else
-            echo 'PAIRED_NOT_STARTED: prerequisites or preflight failed; no calibration claimed'
+            echo 'PAIRED_NOT_STARTED: prerequisites or verification failed; no calibration claimed'
             exit 1
           fi
 
-      - name: Collect complete A and B ELFs and bounded owned paired evidence
+      - name: Collect bounded new evidence only and preserve the historical collector failure
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=30s 15m python3 "$PAIRED_ROOT/driver/fts_paired_collect.py" \
-            --root "$PAIRED_ROOT" --out "$RUNNER_TEMP/seekdb-paired-artifact"
+          python3 -B .github/script/seekdb/fts_paired_validation.py --phase collect-evidence \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/seekdb-paired-artifact"
 
-      - name: Preserve complete paired binaries and evidence for three days
+      - name: Preserve new continuation proof without re-uploading unchanged giant ELFs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fts-paired-${{ github.sha }}
+          name: fts-continuation-${{ github.sha }}
           path: ${{ runner.temp }}/seekdb-paired-artifact/
           retention-days: 3
-          compression-level: 0
+          compression-level: 6
           if-no-files-found: error
           include-hidden-files: false
 
-      - name: Always publish readable result in job summary and bounded normal-log lines
+      - name: Always publish readable result and raw native failure in summary and bounded logs
         if: always()
         shell: bash
         run: |
           set -uo pipefail
           df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           free -b
-          if test -f "$PAIRED_ROOT/driver/fts_paired_validation.py"; then
-            python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase present \
-              --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
-              --summary "$GITHUB_STEP_SUMMARY"
-          else
-            printf '## FTS same-host result\n\nCalibration unavailable: prerequisites failed before the paired driver was preserved. No improvement or formal score claimed.\n' >> "$GITHUB_STEP_SUMMARY"
-            echo 'FTS_RESULT Calibration unavailable: prerequisites failed before the paired driver was preserved.'
-          fi
+          python3 -B .github/script/seekdb/fts_paired_validation.py --phase present \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --summary "$GITHUB_STEP_SUMMARY"
           if test -f "$PAIRED_ROOT/report.json"; then
-            python3 - "$PAIRED_ROOT/report.json" <<'PY'
+            python3 -B - "$PAIRED_ROOT/report.json" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1], encoding="utf-8"))
           print("PAIRED_VISIBLE_RESULT", json.dumps({k:r[k] for k in
-              ("status","driverCommit","kernelOrigin","baselineCommit","builds","caseVerdicts",
-               "roundVerdicts","sameHostPerformance","failure","formalContestRun",
+              ("status","driverCommit","validationDriverCommit","candidateBuildCommit","mode",
+               "kernelOrigin","baselineCommit","builds","caseVerdicts","supplementalCompatibility",
+               "artifactReuse","roundVerdicts","sameHostPerformance","failure","formalContestRun",
                "allOfficialInputsUnchanged","planAssertions") if k in r}, ensure_ascii=False))
           PY
           fi
