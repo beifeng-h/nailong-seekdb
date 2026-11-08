@@ -29,7 +29,7 @@ static void sk_cuvs_report_error(const char* operation)
 {
   const char* detail = cuvsGetLastErrorText();
   fprintf(stderr, "[seekdb_cuvs] %s failed: %s\n",
-          operation, detail ? detail : "cuVS error text unavailable");
+          operation, detail && detail[0] ? detail : "cuVS error text unavailable");
 }
 
 static void sk_cuvs_destroy_search_mutex(sk_cuvs_index* index)
@@ -98,6 +98,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   sk_cuvs_index* h = sk_cuvs_index_alloc();
   if (!h) return NULL;
   if (cuvsResourcesCreate(&h->res) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("build resources");
     sk_cuvs_destroy_search_mutex(h); free(h); return NULL;
   }
 
@@ -108,20 +109,25 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   dset.dl_tensor.dtype.code = kDLFloat; dset.dl_tensor.dtype.bits = 32; dset.dl_tensor.dtype.lanes = 1;
   dset.dl_tensor.shape = ds; dset.dl_tensor.strides = 0; dset.dl_tensor.byte_offset = 0;
 
-  if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
+  if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("build params"); goto fail_res;
+  }
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
   h->ip->nn_descent_niter = 100;
-  if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
-  if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
+  if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("build index"); goto fail_ip;
+  }
+  if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("CAGRA build"); goto fail_idx;
+  }
   h->n = n; h->dim = dim;
   return h;
 
 fail_idx: cuvsCagraIndexDestroy(h->idx);
 fail_ip:  cuvsCagraIndexParamsDestroy(h->ip);
 fail_res: cuvsResourcesDestroy(h->res); sk_cuvs_destroy_search_mutex(h); free(h);
-  fprintf(stderr, "[seekdb_cuvs] build failed: %s\n", cuvsGetLastErrorText());
   return NULL;
 }
 
@@ -207,16 +213,28 @@ void* seekdb_cuvs_deserialize(const char* filename, long n, long dim)
   if (!filename || n <= 0 || dim <= 0) return NULL;
   sk_cuvs_index* index = sk_cuvs_index_alloc();
   if (!index) return NULL;
-  if (cuvsResourcesCreate(&index->res) != CUVS_SUCCESS) goto fail;
-  if (cuvsCagraIndexParamsCreate(&index->ip) != CUVS_SUCCESS) goto fail_res;
-  if (cuvsCagraIndexCreate(&index->idx) != CUVS_SUCCESS) goto fail_ip;
-  if (cuvsCagraDeserialize(index->res, filename, index->idx) != CUVS_SUCCESS) goto fail_idx;
+  if (cuvsResourcesCreate(&index->res) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("deserialize resources"); goto fail;
+  }
+  if (cuvsCagraIndexParamsCreate(&index->ip) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("deserialize params"); goto fail_res;
+  }
+  if (cuvsCagraIndexCreate(&index->idx) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("deserialize index"); goto fail_ip;
+  }
+  if (cuvsCagraDeserialize(index->res, filename, index->idx) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("CAGRA deserialize"); goto fail_idx;
+  }
   {
     int64_t actual_n = 0;
     int64_t actual_dim = 0;
-    if (cuvsCagraIndexGetSize(index->idx, &actual_n) != CUVS_SUCCESS ||
-        cuvsCagraIndexGetDims(index->idx, &actual_dim) != CUVS_SUCCESS ||
-        actual_n != n || actual_dim != dim) {
+    if (cuvsCagraIndexGetSize(index->idx, &actual_n) != CUVS_SUCCESS) {
+      sk_cuvs_report_error("snapshot size"); goto fail_idx;
+    }
+    if (cuvsCagraIndexGetDims(index->idx, &actual_dim) != CUVS_SUCCESS) {
+      sk_cuvs_report_error("snapshot dimensions"); goto fail_idx;
+    }
+    if (actual_n != n || actual_dim != dim) {
       fprintf(stderr, "[seekdb_cuvs] snapshot shape mismatch: %ld x %ld, expected %ld x %ld\n",
               (long)actual_n, (long)actual_dim, n, dim);
       goto fail_idx;
@@ -232,7 +250,6 @@ fail_ip:
 fail_res:
   cuvsResourcesDestroy(index->res);
 fail:
-  fprintf(stderr, "[seekdb_cuvs] deserialize failed: %s\n", cuvsGetLastErrorText());
   sk_cuvs_destroy_search_mutex(index);
   free(index);
   return NULL;

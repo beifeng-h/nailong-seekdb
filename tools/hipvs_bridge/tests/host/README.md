@@ -24,12 +24,15 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 - Deserialize begins with empty workspace, and rejected snapshot dimensions clean up model resources.
 - Invalid nonpositive shapes return before allocating or searching.
 - A deterministic IDs-copyback gate proves a second same-handle search blocks on the mutex. Both output arrays are checked. The separate distance-copy tail is not independently gated.
+- Build/load lifecycle diagnostics model the fixed SDK behavior in which successful lifecycle calls and cleanup clear thread-local error text. Ten failure points are each injected with a marker, null text and empty text. Captured stderr must retain the first stage-specific diagnostic before cleanup; all cases check a null handle, exact cleanup order and balanced host resources. Snapshot size/dimension API failures must not be labelled shape mismatches. Two genuine mismatch controls retain the original rejection behavior. These are host doubles, not real snapshot/GPU tests.
 
 The fixture returns an explicitly synthetic protocol, not nearest neighbors. Windows LLP64 has 32-bit `long`; the model deliberately uses `long*` tensor shapes to match the bridge arrays on this host. It does not validate real Linux DLPack layout or the Linux 64-bit `long` overflow boundary. The pthread double uses `std::mutex`, so this is not POSIX ABI validation. Concurrent destruction is outside the API contract; tests join callers before freeing.
 
 Separate-handle concurrency, serialize/search concurrency, real snapshot files, actual GPU streams, real deallocator failure semantics and pthread initialization failures remain untested. The test does not establish Recall, peak VRAM, formal gates or a latency improvement.
 
 The isolated `--release-failure-before` and `--release-failure-after` modes run only the new release-failure cases. The full `--require-reuse` suite includes both. Build the fixture against the previous bridge and these isolated modes fail because a release error returns success; the full frozen-comparison mode without arguments still runs the common plumbing checks.
+
+`--lifecycle-diagnostics` runs only the 30 build/load diagnostic cases and two shape-mismatch controls; the full `--require-reuse` suite also includes them. The test uses an owned temporary file to capture stderr and restores the original stream before assertions. Empty or null SDK text requires the bridge's explicit unavailable-text message. This models diagnostic lifetime and cleanup behavior, not installed-SDK provenance or the formal worker.
 
 ## Frozen comparison
 
