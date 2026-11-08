@@ -25,6 +25,7 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 - Invalid nonpositive shapes return before allocating or searching.
 - A deterministic IDs-copyback gate proves a second same-handle search blocks on the mutex. Both output arrays are checked. The separate distance-copy tail is not independently gated.
 - Build/load lifecycle diagnostics model the fixed SDK behavior in which successful lifecycle calls and cleanup clear thread-local error text. Ten failure points are each injected with a marker, null text and empty text. Captured stderr must retain the first stage-specific diagnostic before cleanup; all cases check a null handle, exact cleanup order and balanced host resources. Snapshot size/dimension API failures must not be labelled shape mismatches. Two genuine mismatch controls retain the original rejection behavior. These are host doubles, not real snapshot/GPU tests.
+- Query H2D, IDs D2H and distances D2H copy errors retain their operation and actual injected runtime code/detail, including absent/empty detail. The bridge codes stay 13/16/18, completed-copy order stays unchanged, and later successful searches reuse the handle. The model injects failure before the failing copy writes; it does not guarantee real HIP failure leaves outputs untouched. Serialize likewise tests marker/null/empty SDK text, return 1, successful later use and normal teardown. Existing workspace-failure cases still reject a disabled handle.
 
 The fixture returns an explicitly synthetic protocol, not nearest neighbors. Windows LLP64 has 32-bit `long`; the model deliberately uses `long*` tensor shapes to match the bridge arrays on this host. It does not validate real Linux DLPack layout or the Linux 64-bit `long` overflow boundary. The pthread double uses `std::mutex`, so this is not POSIX ABI validation. Concurrent destruction is outside the API contract; tests join callers before freeing.
 
@@ -33,6 +34,8 @@ Separate-handle concurrency, serialize/search concurrency, real snapshot files, 
 The isolated `--release-failure-before` and `--release-failure-after` modes run only the new release-failure cases. The full `--require-reuse` suite includes both. Build the fixture against the previous bridge and these isolated modes fail because a release error returns success; the full frozen-comparison mode without arguments still runs the common plumbing checks.
 
 `--lifecycle-diagnostics` runs only the 30 build/load diagnostic cases and two shape-mismatch controls; the full `--require-reuse` suite also includes them. The test uses an owned temporary file to capture stderr and restores the original stream before assertions. Empty or null SDK text requires the bridge's explicit unavailable-text message. This models diagnostic lifetime and cleanup behavior, not installed-SDK provenance or the formal worker.
+
+`--copy-serialize-diagnostics` isolates nine runtime-copy diagnostic cases and three serialize cases. The full suite includes them. The production runtime helper uses `cudaError_t` and `cudaGetErrorString`, mapped by the fixed hipVS compatibility header to `hipError_t` and `hipGetErrorString`; the host declarations are test doubles only.
 
 ## Frozen comparison
 

@@ -32,6 +32,13 @@ static void sk_cuvs_report_error(const char* operation)
           operation, detail && detail[0] ? detail : "cuVS error text unavailable");
 }
 
+static void sk_cuvs_report_copy_error(const char* operation, cudaError_t error)
+{
+  const char* detail = cudaGetErrorString(error);
+  fprintf(stderr, "[seekdb_cuvs] %s failed: runtime code=%d: %s\n",
+          operation, (int)error, detail && detail[0] ? detail : "runtime error text unavailable");
+}
+
 static void sk_cuvs_destroy_search_mutex(sk_cuvs_index* index)
 {
   int rc = pthread_mutex_destroy(&index->search_mutex);
@@ -141,6 +148,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   int unlock_rc = 0;
   size_t query_bytes = 0, neighbor_bytes = 0, distance_bytes = 0;
   float* qd = 0; unsigned* nd = 0; float* dd = 0; cuvsCagraSearchParams_t sp = 0;
+  cudaError_t copy_error = cudaSuccess;
   if (h->workspace_failed) { rc=19; goto done; }
   if (sk_cuvs_tensor_bytes(nq, h->dim, sizeof(float), &query_bytes)) { rc=10; goto done; }
   if (sk_cuvs_tensor_bytes(nq, topk, sizeof(unsigned), &neighbor_bytes)) { rc=11; goto done; }
@@ -151,7 +159,8 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   qd = (float*)h->query_workspace;
   nd = (unsigned*)h->neighbor_workspace;
   dd = (float*)h->distance_workspace;
-  if (cudaMemcpy(qd, query, query_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=13; goto done; }
+  copy_error = cudaMemcpy(qd, query, query_bytes, cudaMemcpyDefault);
+  if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("query H2D", copy_error); rc=13; goto done; }
   {
     DLManagedTensor qt, nt, dt; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
     qt.dl_tensor.data=qd; qt.dl_tensor.device.device_type=kDLCUDA; qt.dl_tensor.device.device_id=0;
@@ -168,8 +177,12 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { sk_cuvs_report_error("CAGRA search"); rc=15; goto done; }
-    if (cudaMemcpy(out_ids, nd, neighbor_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
-    if (out_dist && cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=18; goto done; }
+    copy_error = cudaMemcpy(out_ids, nd, neighbor_bytes, cudaMemcpyDefault);
+    if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("IDs D2H", copy_error); rc=16; goto done; }
+    if (out_dist) {
+      copy_error = cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault);
+      if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("distances D2H", copy_error); rc=18; goto done; }
+    }
   }
 done:
   if (sp) cuvsCagraSearchParamsDestroy(sp);
@@ -202,7 +215,7 @@ int seekdb_cuvs_serialize(void* handle, const char* filename)
   if (!index || !filename) return 1;
   if (index->workspace_failed) return 1;
   if (cuvsCagraSerialize(index->res, filename, index->idx, true) != CUVS_SUCCESS) {
-    fprintf(stderr, "[seekdb_cuvs] serialize failed: %s\n", cuvsGetLastErrorText());
+    sk_cuvs_report_error("serialize");
     return 1;
   }
   return 0;

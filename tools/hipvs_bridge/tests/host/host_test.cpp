@@ -20,7 +20,7 @@ struct FakeResource {};
 struct FakeIndex { int64_t n=0, dim=0; };
 struct FakeMutex { std::mutex value; };
 struct Block { std::unique_ptr<unsigned char[]> bytes; size_t size; bool live=true; };
-enum class ApiFailure { None, Resource, Params, Index, Build, Deserialize, Size, Dims };
+enum class ApiFailure { None, Resource, Params, Index, Build, Deserialize, Size, Dims, Serialize };
 enum class Cleanup { Index, Params, Resource, Mutex };
 struct State {
  std::mutex mu; std::condition_variable cv;
@@ -37,6 +37,8 @@ struct State {
  ApiFailure api_failure=ApiFailure::None;
  int error_text_mode=0;
  std::vector<Cleanup> cleanup;
+ int copy_calls=0, copy_fail_at=0, copy_error=701, runtime_error_queries=0, last_runtime_code=0;
+ int runtime_text_mode=0;
  std::thread::id owner;
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
@@ -52,6 +54,7 @@ static const char* failure_text(ApiFailure failure) {
   case ApiFailure::Deserialize: return "FIRST_DESERIALIZE_ERROR";
   case ApiFailure::Size: return "FIRST_SIZE_ERROR";
   case ApiFailure::Dims: return "FIRST_DIMS_ERROR";
+  case ApiFailure::Serialize: return "FIRST_SERIALIZE_ERROR";
   default: return "UNEXPECTED_FAILURE";
  }
 }
@@ -78,6 +81,8 @@ static void clean_state() {
  S.free_calls=S.free_fail_at=S.serialize_calls=0; S.free_after_release=false;
  S.failed_free=nullptr; S.failed_free_bytes=0; S.free_attempts.clear();
  S.api_failure=ApiFailure::None; S.error_text_mode=0; S.cleanup.clear(); sdk_error=nullptr;
+ S.copy_calls=S.copy_fail_at=S.runtime_error_queries=S.last_runtime_code=0;
+ S.copy_error=701; S.runtime_text_mode=0;
 }
 int cuvsResourcesCreate(cuvsResources_t* p) { if(inject_failure(ApiFailure::Resource)) return CUVS_ERROR; *p=new FakeResource; ++S.resources; return api_ok(); }
 int cuvsResourcesDestroy(cuvsResources_t p) { S.cleanup.push_back(Cleanup::Resource); delete p; --S.resources; return api_ok(); }
@@ -108,16 +113,21 @@ int cuvsRMMFree(cuvsResources_t,void* p,size_t n) {
  }
  it->second.live=false; return 0;
 }
-int cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
+cudaError_t cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
  std::unique_lock<std::mutex> lk(S.mu); api_entry(); CHECK(kind==cudaMemcpyDefault);
  const bool src_device=device_range(src,n), dst_device=device_range(dst,n);
  CHECK(src_device!=dst_device);
+ if(++S.copy_calls==S.copy_fail_at) return S.copy_error;
  if(S.fail_distance_copy && src_device && ++S.d2h_copy_count==2) return 1;
  if(S.gate && src_device && !S.entered) {
   S.entered=true; S.owner=std::this_thread::get_id(); S.cv.notify_all();
   CHECK(S.cv.wait_for(lk,std::chrono::seconds(8),[]{return S.release;}));
  }
  std::memcpy(dst,src,n); return cudaSuccess;
+}
+const char* cudaGetErrorString(cudaError_t error) {
+ std::lock_guard<std::mutex> lk(S.mu); ++S.runtime_error_queries; S.last_runtime_code=error;
+ return S.runtime_text_mode==1?nullptr:S.runtime_text_mode==2?"":"HOST_RUNTIME_COPY_ERROR";
 }
 int cuvsCagraSearch(cuvsResources_t,cuvsCagraSearchParams_t p,cuvsCagraIndex_t idx,DLManagedTensor* q,DLManagedTensor* n,DLManagedTensor* d,cuvsFilter f) {
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); ++S.searches;
@@ -130,7 +140,7 @@ int cuvsCagraSearch(cuvsResources_t,cuvsCagraSearchParams_t p,cuvsCagraIndex_t i
  for(long a=0;a<nq;++a) for(long b=0;b<topk;++b) { ids[a*topk+b]=static_cast<unsigned>(queries[a*dim])*10+static_cast<unsigned>(b); dist[a*topk+b]=queries[a*dim]+0.25f*b; }
  return 0;
 }
-int cuvsCagraSerialize(cuvsResources_t,const char*,cuvsCagraIndex_t i,bool dataset) { ++S.serialize_calls; CHECK(dataset); snapshot_n=i->n; snapshot_dim=i->dim; return 0; }
+int cuvsCagraSerialize(cuvsResources_t,const char*,cuvsCagraIndex_t i,bool dataset) { ++S.serialize_calls; CHECK(dataset); if(inject_failure(ApiFailure::Serialize)) return CUVS_ERROR; snapshot_n=i->n; snapshot_dim=i->dim; return api_ok(); }
 int cuvsCagraDeserialize(cuvsResources_t,const char*,cuvsCagraIndex_t i) { if(inject_failure(ApiFailure::Deserialize)) return CUVS_ERROR; i->n=snapshot_n; i->dim=snapshot_dim; return api_ok(); }
 int cuvsCagraIndexGetSize(cuvsCagraIndex_t i,int64_t* n) { if(inject_failure(ApiFailure::Size)) return CUVS_ERROR; *n=i->n; return api_ok(); }
 int cuvsCagraIndexGetDims(cuvsCagraIndex_t i,int64_t* d) { if(inject_failure(ApiFailure::Dims)) return CUVS_ERROR; *d=i->dim; return api_ok(); }
@@ -289,17 +299,53 @@ static void lifecycle_diagnostics() {
  CHECK(missing==0);
  std::cout<<"PASS build/load first error / null and empty text / exact cleanup order (HOST ONLY)\n";
 }
+static void copy_serialize_diagnostics() {
+ const char* operations[]={"query H2D","IDs D2H","distances D2H"};
+ const int returns[]={13,16,18}; int missing=0;
+ for(int direction=0;direction<3;++direction) for(int mode=0;mode<3;++mode) {
+  clean_state(); void* h=build(); search(h,1,10);
+  const float query[2]={5,0}; std::vector<unsigned> ids(10,99999); std::vector<float> distances(10,-999);
+  S.copy_fail_at=S.copy_calls+direction+1; S.copy_error=701+direction; S.runtime_text_mode=mode;
+  const int calls=S.copy_calls, searches=S.searches; StderrCapture capture;
+  int rc=seekdb_cuvs_search(h,query,1,10,ids.data(),distances.data());
+  const std::string text=capture.finish();
+  CHECK(rc==returns[direction]); CHECK(S.copy_calls==calls+direction+1);
+  CHECK(S.searches==searches+(direction==0?0:1));
+  for(size_t j=0;j<ids.size();++j) {CHECK(ids[j]==(direction==2?50U+static_cast<unsigned>(j):99999U)); CHECK(distances[j]==-999);}
+  const std::string expected=std::string("[seekdb_cuvs] ")+operations[direction]+" failed: runtime code="+std::to_string(S.copy_error)+": "+(mode==0?"HOST_RUNTIME_COPY_ERROR":"runtime error text unavailable");
+  const bool kept=text.find(expected)!=std::string::npos && text.find("(null)")==std::string::npos && S.runtime_error_queries==1 && S.last_runtime_code==S.copy_error;
+  std::cout<<"copy diagnostic op="<<operations[direction]<<" mode="<<mode<<" rc="<<rc<<" runtime="<<S.copy_error<<" kept="<<kept<<"\n";
+  if(!kept) {++missing; std::cerr<<"MISSING "<<expected<<"\nACTUAL "<<text<<"\n";}
+  S.copy_fail_at=0; const int queries=S.runtime_error_queries; search(h,1,10,7); CHECK(S.runtime_error_queries==queries);
+  seekdb_cuvs_free(h); clean_state();
+ }
+ for(int mode=0;mode<3;++mode) {
+  clean_state(); void* h=build(); S.api_failure=ApiFailure::Serialize; S.error_text_mode=mode; StderrCapture capture;
+  int rc=seekdb_cuvs_serialize(h,"fake.snapshot"); const std::string text=capture.finish();
+  CHECK(rc==1); CHECK(S.serialize_calls==1); CHECK(S.cleanup.empty());
+  const std::string expected=std::string("[seekdb_cuvs] serialize failed: ")+(mode==0?failure_text(ApiFailure::Serialize):"cuVS error text unavailable");
+  const bool kept=text.find(expected)!=std::string::npos && text.find("(null)")==std::string::npos;
+  std::cout<<"serialize diagnostic mode="<<mode<<" rc="<<rc<<" kept="<<kept<<"\n";
+  if(!kept) {++missing; std::cerr<<"MISSING "<<expected<<"\nACTUAL "<<text<<"\n";}
+  S.api_failure=ApiFailure::None; search(h,1,10); CHECK(seekdb_cuvs_serialize(h,"fake.snapshot")==0);
+  seekdb_cuvs_free(h); clean_state();
+ }
+ std::cout<<"copy/serialize diagnostic missing="<<missing<<" / 12\n"; CHECK(missing==0);
+ std::cout<<"PASS copy/serialize diagnostics / return codes / output order / handle reuse (HOST ONLY)\n";
+}
 int main(int argc,char** argv) {
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
  const bool before_only=argc==2 && std::string(argv[1])=="--release-failure-before";
  const bool after_only=argc==2 && std::string(argv[1])=="--release-failure-after";
  const bool diagnostic_only=argc==2 && std::string(argv[1])=="--lifecycle-diagnostics";
- if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics]\n"; return 2;}
+ const bool copy_only=argc==2 && std::string(argv[1])=="--copy-serialize-diagnostics";
+ if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics]\n"; return 2;}
  try {
   if(before_only || after_only) {release_failure_disables_handle(after_only); return 0;}
   if(diagnostic_only) {lifecycle_diagnostics(); return 0;}
+  if(copy_only) {copy_serialize_diagnostics(); return 0;}
   reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict);
-  if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback(); release_failure_disables_handle(false); release_failure_disables_handle(true); lifecycle_diagnostics();}
+  if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback(); release_failure_disables_handle(false); release_failure_disables_handle(true); lifecycle_diagnostics(); copy_serialize_diagnostics();}
   std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;
  }
  catch(const std::exception& e) {std::cerr<<"FAIL "<<e.what()<<"\n"; return 1;}
