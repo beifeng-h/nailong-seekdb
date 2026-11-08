@@ -12804,10 +12804,63 @@ bool ObTransformUtils::is_full_group_by(ObSelectStmt& stmt, ObSQLMode mode)
   return !stmt.has_order_by() && is_only_full_group_by_on(mode);
 }
 
+int ObTransformUtils::check_need_calc_match_score(ObExecContext *exec_ctx,
+                                                 ObDMLStmt *stmt,
+                                                 ObMatchFunRawExpr *match_expr,
+                                                 bool &need_calc,
+                                                 ObIArray<ObExprConstraint> &constraints)
+{
+  int ret = OB_SUCCESS;
+  need_calc = true;
+  ObSEArray<ObRawExpr *, 16> other_exprs;
+  ObStmtExprGetter other_getter;
+  bool found_truth_use = false;
+  if (OB_ISNULL(stmt) || OB_ISNULL(match_expr) || OB_ISNULL(match_expr->get_search_key())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!stmt->is_select_stmt() || stmt->get_subquery_expr_size() > 0
+      || NATURAL_LANGUAGE_MODE != match_expr->get_mode_flag()
+      || match_expr->is_es_match() || !match_expr->get_columns_boosts().empty()
+      || nullptr != match_expr->get_param_text_expr()
+      || match_expr->get_search_key()->is_exec_param_expr()
+      || match_expr->get_search_key()->has_flag(CNT_DYNAMIC_PARAM)
+      || match_expr->get_search_key()->has_flag(CNT_SUB_QUERY)) {
+    // Boolean, expansion and ES/boost semantics retain their original scores.
+  } else {
+    // Do not allow truth-only uses in SELECT, ORDER BY, GROUP BY, HAVING or
+    // joins to make a MATCH eligible. In particular, shared expression roots
+    // must be checked in each scope rather than classified by pointer alone.
+    // ORDER BY also includes the relevance ordering inserted by pre-process
+    // for ordinary full-text queries; its ranking remains score-consuming.
+    other_getter.set_relation_scope();
+    other_getter.remove_scope(SCOPE_WHERE);
+    if (OB_FAIL(stmt->get_relation_exprs(other_exprs, other_getter))) {
+    } else {
+      need_calc = false;
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc && i < other_exprs.count(); ++i) {
+      if (OB_FAIL(inner_check_need_calc_match_score(exec_ctx, other_exprs.at(i),
+          match_expr, false, need_calc, found_truth_use, constraints))) {
+      }
+    }
+    const ObIArray<ObRawExpr *> &conditions = stmt->get_condition_exprs();
+    for (int64_t i = 0; OB_SUCC(ret) && !need_calc && i < conditions.count(); ++i) {
+      if (OB_FAIL(inner_check_need_calc_match_score(exec_ctx, conditions.at(i),
+          match_expr, true, need_calc, found_truth_use, constraints))) {
+      }
+    }
+    if (OB_SUCC(ret) && !found_truth_use) {
+      need_calc = true;
+    }
+  }
+  return ret;
+}
+
 int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
                                                         ObRawExpr* expr, 
                                                         ObRawExpr* match_expr, 
+                                                        bool positive_condition,
                                                         bool &need_calc,
+                                                        bool &found_truth_use,
                                                         ObIArray<ObExprConstraint> &constraints)
 {
   int ret = OB_SUCCESS;
@@ -12816,9 +12869,16 @@ int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
   if (OB_ISNULL(expr) || OB_ISNULL(match_expr)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (expr == match_expr) {
+    need_calc = !positive_condition;
+    found_truth_use |= positive_condition;
+    need_check_child = false;
+  } else if (expr->is_exec_param_expr()) {
+    // Correlated/onetime references can consume a score outside this scope.
+    // Keep the scored plan rather than infer their consumers here.
     need_calc = true;
     need_check_child = false;
-  } else if (expr->get_expr_type() == T_OP_GT || expr->get_expr_type() == T_OP_LT) {
+  } else if (positive_condition &&
+      (expr->get_expr_type() == T_OP_GT || expr->get_expr_type() == T_OP_LT)) {
     ObRawExpr *gt_param = NULL;
     ObRawExpr *lt_param = NULL;
     bool is_param_zero = false;
@@ -12831,14 +12891,19 @@ int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
                                                                          expr->get_param_expr(0))) {
     } else if (gt_param != match_expr) {
       /* do nothing */
+    } else if (!lt_param->is_immutable_const_expr()) {
+      // A bound/precalculated threshold may change with plan reuse. Only a
+      // literal zero is eligible; uncertain and parameterized uses stay scored.
     } else if (OB_FAIL(check_expr_eq_zero(exec_ctx, lt_param, is_param_zero, constraints))) {
     } else if (is_param_zero) {
       need_calc = false;
+      found_truth_use = true;
       need_check_child = false;
     }
-  } else if (expr->get_expr_type() == T_OP_BOOL) {
+  } else if (positive_condition && expr->get_expr_type() == T_OP_BOOL) {
     if (expr->get_param_count() == 1 && expr->get_param_expr(0) == match_expr) {
       need_calc = false;
+      found_truth_use = true;
       need_check_child = false;
     }
   }
@@ -12848,7 +12913,11 @@ int ObTransformUtils::inner_check_need_calc_match_score(ObExecContext *exec_ctx,
       if (OB_FAIL(SMART_CALL(inner_check_need_calc_match_score(exec_ctx,
                                                               expr->get_param_expr(i), 
                                                               match_expr, 
+                                                              positive_condition &&
+                                                                  (T_OP_AND == expr->get_expr_type() ||
+                                                                   T_OP_OR == expr->get_expr_type()),
                                                               tmp_need_calc,
+                                                              found_truth_use,
                                                               constraints)))) {
       } else if (tmp_need_calc) {
         need_calc = true;

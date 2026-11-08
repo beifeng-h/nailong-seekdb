@@ -110,6 +110,16 @@ int ObSRLookupIter::get_next_row()
       ObDatum &relevance_proj_datum = iter_param_->relevance_proj_expr_->locate_datum_for_write(*eval_ctx);
       set_datum_func_(id_proj_datum, cached_domain_ids_.at(0));
       relevance_proj_datum.set_double(0.0);
+      if (OB_ISNULL(iter_param_->relevance_expr_)) {
+        // The match-only lookup has produced an explicit false value for a
+        // missing posting. Do not try to evaluate MATCH as a scalar function.
+        if (eval_ctx->is_vectorized()) {
+          iter_param_->id_proj_expr_->get_evaluated_flags(*eval_ctx).set(0);
+          iter_param_->relevance_proj_expr_->get_evaluated_flags(*eval_ctx).set(0);
+        }
+        iter_param_->id_proj_expr_->set_evaluated_projected(*eval_ctx);
+        iter_param_->relevance_proj_expr_->set_evaluated_projected(*eval_ctx);
+      }
       ++output_row_cnt_;
       ret = OB_SUCCESS;
     }

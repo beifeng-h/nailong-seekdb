@@ -1,0 +1,301 @@
+# Regression: natural-language positive filters may omit unused relevance.
+# Scores are independently materialized by unfiltered, score-projecting SELECTs.
+# Compare complete ordered ID lists, including duplicates and empty result sets.
+# No score constants, EXPLAIN snapshots, timing, or mysqltest SQL parsing helpers.
+--disable_query_log
+--disable_warnings
+DROP TABLE IF EXISTS fts_match_only_docs, fts_match_only_scores, fts_match_only_batch, fts_match_only_probes;
+--enable_warnings
+
+SET @match_only_old_group_concat_max_len = @@session.group_concat_max_len;
+SET SESSION group_concat_max_len = 65535;
+
+CREATE TABLE fts_match_only_docs (
+  id INT PRIMARY KEY,
+  body TEXT,
+  FULLTEXT INDEX ft_body(body) WITH PARSER space
+) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+CREATE TABLE fts_match_only_scores (
+  query_id VARCHAR(32),
+  id INT,
+  score DOUBLE,
+  PRIMARY KEY (query_id, id)
+);
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '' AS empty_table_has_no_match_ids
+FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha');
+
+INSERT INTO fts_match_only_docs VALUES
+  (1, 'ubiquitous alpha raretoken bridge'),
+  (2, 'ubiquitous alpha alpha beta'),
+  (3, 'ubiquitous beta bridge'),
+  (4, 'ubiquitous gamma'),
+  (5, 'ubiquitous alpha beta'),
+  (6, 'ubiquitous delta'),
+  (7, ''),
+  (8, NULL),
+  (9, 'ubiquitous alpha alpha beta'),
+  (10, CONVERT(0x756269717569746F757320656E676C69736820E695B0E68DAEE5BA93 USING utf8mb4)),
+  (11, CONVERT(0x756269717569746F757320E695B0E68DAEE5BA93 USING utf8mb4)),
+  (12, 'is is'),
+  (13, '   ');
+
+# A physical table prevents projection pruning or derived-table merging from
+# turning the scored oracle itself into a filter-only query.
+INSERT INTO fts_match_only_scores SELECT 'alpha', id, MATCH(body) AGAINST('alpha') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'bridge', id, MATCH(body) AGAINST('bridge') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'union', id, MATCH(body) AGAINST('alpha beta') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'repeat', id, MATCH(body) AGAINST('alpha alpha beta beta') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'common', id, MATCH(body) AGAINST('ubiquitous') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'rare', id, MATCH(body) AGAINST('raretoken') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'mixed', id, MATCH(body) AGAINST(CONVERT(0xE695B0E68DAEE5BA9320656E676C697368 USING utf8mb4)) FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'empty', id, MATCH(body) AGAINST('') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'stop', id, MATCH(body) AGAINST('is is') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'missing', id, MATCH(body) AGAINST('absenttoken') FROM fts_match_only_docs;
+INSERT INTO fts_match_only_scores SELECT 'boolean', id, MATCH(body) AGAINST('+alpha -beta' IN BOOLEAN MODE) FROM fts_match_only_docs;
+
+SELECT ids = '1,2,5,9' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0) AS natural_truth_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha')) q;
+
+SELECT ids = '1,2,5,9' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0) AS natural_gt_zero_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha' IN NATURAL LANGUAGE MODE) > 0) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '1,2,5,9' AS natural_zero_lt_ids
+FROM fts_match_only_docs WHERE 0 < MATCH(body) AGAINST('alpha');
+
+SELECT COUNT(*) = 4 AND SUM(id) = 17 AND MIN(id) = 1 AND MAX(id) = 9 AS count_filter_id_aggregate_contract
+FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha');
+
+SELECT ids = '1' AND ids <=>
+  (SELECT COALESCE(GROUP_CONCAT(a.id ORDER BY a.id), '') FROM fts_match_only_scores a
+   JOIN fts_match_only_scores b ON a.id = b.id
+   WHERE a.query_id = 'alpha' AND b.query_id = 'bridge' AND a.score > 0 AND b.score > 0) AS distinct_match_filters_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs
+      WHERE MATCH(body) AGAINST('alpha') AND MATCH(body) AGAINST('bridge')) q;
+
+SELECT ids = '1,2,3,5,9' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'union' AND score > 0) AS overlapping_postings_deduplicated
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha beta')) q;
+
+SELECT ids = '1,2,3,5,9' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'repeat' AND score > 0) AS duplicate_query_terms_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha alpha beta beta')) q;
+
+SELECT ids = '1,2,3,4,5,6,9,10,11' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'common' AND score > 0) AS common_term_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('ubiquitous')) q;
+
+SELECT ids = '1' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'rare' AND score > 0) AS rare_term_single_row
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('raretoken')) q;
+
+SELECT ids = '10,11' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'mixed' AND score > 0) AS mixed_cjk_english_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST(CONVERT(0xE695B0E68DAEE5BA9320656E676C697368 USING utf8mb4))) q;
+
+SELECT ids = '' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'missing' AND score > 0) AS missing_query_has_no_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('absenttoken')) q;
+
+SELECT ids = '' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'empty' AND score > 0) AS empty_query_has_no_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('')) q;
+
+# This empty-token query is already covered by simple_query.test.
+SELECT ids = '' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'stop' AND score > 0) AS stopword_query_has_no_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST('is is')) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '2,9' AS duplicate_documents_keep_distinct_ids
+FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') AND id IN (2, 9);
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '' AS null_empty_documents_not_positive
+FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') > 0 AND id IN (7, 8, 12, 13);
+
+# LIMIT/OFFSET must use an explicit deterministic ordering.
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '2,5' AS ordered_limit_offset_ids
+FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY id LIMIT 2 OFFSET 1) q;
+
+SELECT COUNT(*) = 2 AND SUM(id) = 7 AND MIN(id) = 2 AND MAX(id) = 5 AS limited_count_filter_id_aggregate_contract
+FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY id LIMIT 2 OFFSET 1) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '9' AS ordered_limit_partial_tail
+FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') > 0 ORDER BY id LIMIT 3 OFFSET 3) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '' AS ordered_limit_exhausted
+FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY id LIMIT 3 OFFSET 4) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '1' AS ordered_limit_single_row
+FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY id LIMIT 1) q;
+
+# seekdb injects relevance DESC for this single-table MATCH query.
+# Both tied highest documents fit inside LIMIT 3; compare the complete ID set.
+SELECT ids = '2,5,9' AND ids <=> (SELECT GROUP_CONCAT(id ORDER BY id) FROM (SELECT id, score FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0 ORDER BY score DESC, id LIMIT 3) c) AS implicit_relevance_limit_ids_unchanged
+FROM (SELECT GROUP_CONCAT(id ORDER BY id) AS ids FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') LIMIT 3) q) actual;
+
+# Real score consumers must retain exact scores, not a positive sentinel.
+SELECT COUNT(*) = 13 AND SUM(NOT (q.score <=> c.score)) = 0 AS unfiltered_score_projection_unchanged
+FROM (SELECT id, MATCH(body) AGAINST('alpha') AS score FROM fts_match_only_docs ORDER BY id LIMIT 100) q
+JOIN fts_match_only_scores c ON c.query_id = 'alpha' AND c.id = q.id;
+
+SELECT COUNT(*) = 4 AND SUM(NOT (q.score <=> c.score)) = 0 AS shared_filter_projection_score_unchanged
+FROM (SELECT id, MATCH(body) AGAINST('alpha') AS score FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') > 0 ORDER BY id LIMIT 100) q
+JOIN fts_match_only_scores c ON c.query_id = 'alpha' AND c.id = q.id;
+
+# A scalar subquery captures an outer score through an execution parameter.
+SELECT COUNT(*) = 4 AND SUM(NOT (q.scalar_score <=> c.score)) = 0 AS correlated_score_consumer_unchanged
+FROM (SELECT d.id, (SELECT /*+ NO_UNNEST */ d.score) AS scalar_score
+      FROM (SELECT id, MATCH(body) AGAINST('alpha') AS score FROM fts_match_only_docs
+            WHERE MATCH(body) AGAINST('alpha') ORDER BY id LIMIT 100) d
+      ORDER BY d.id LIMIT 100) q
+JOIN fts_match_only_scores c ON c.query_id = 'alpha' AND c.id = q.id;
+
+SELECT (SELECT GROUP_CONCAT(id ORDER BY score DESC, id) FROM (SELECT id, MATCH(body) AGAINST('alpha') AS score FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY score DESC, id LIMIT 3) q)
+<=> (SELECT GROUP_CONCAT(id ORDER BY score DESC, id) FROM (SELECT id, score FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0 ORDER BY score DESC, id LIMIT 3) c) AS ranked_projection_ids_unchanged;
+
+SELECT (SELECT GROUP_CONCAT(id ORDER BY id) FROM (SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') ORDER BY MATCH(body) AGAINST('alpha') DESC, id LIMIT 3) q)
+<=> (SELECT GROUP_CONCAT(id ORDER BY id) FROM (SELECT id, score FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0 ORDER BY score DESC, id LIMIT 3) c) AS order_only_score_consumer_unchanged;
+
+SELECT COUNT(*) = 3 AND SUM(NOT (q.total_score <=> c.total_score)) = 0 AS grouped_scores_unchanged
+FROM (SELECT MOD(id, 3) AS grp, SUM(MATCH(body) AGAINST('alpha')) AS total_score
+      FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') GROUP BY MOD(id, 3)) q
+JOIN (SELECT MOD(id, 3) AS grp, SUM(score) AS total_score FROM fts_match_only_scores
+      WHERE query_id = 'alpha' AND score > 0 GROUP BY MOD(id, 3)) c ON q.grp = c.grp;
+
+SELECT MIN(score) > 0 AND MIN(score) < MAX(score) AS fixture_has_distinct_positive_scores
+FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0;
+SET @match_only_midpoint = (SELECT (MIN(score) + MAX(score)) / 2 FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0);
+SET @match_only_high = (SELECT MAX(score) + 1 FROM fts_match_only_scores WHERE query_id = 'alpha');
+SELECT COUNT(*) > 0 AND COUNT(*) < 4 AS midpoint_selects_proper_subset
+FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > @match_only_midpoint;
+
+SELECT (SELECT GROUP_CONCAT(grp ORDER BY grp) FROM
+        (SELECT MOD(id, 3) AS grp FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha')
+         GROUP BY MOD(id, 3) HAVING SUM(MATCH(body) AGAINST('alpha')) > @match_only_midpoint) q)
+<=> (SELECT GROUP_CONCAT(grp ORDER BY grp) FROM
+     (SELECT MOD(id, 3) AS grp FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 0
+      GROUP BY MOD(id, 3) HAVING SUM(score) > @match_only_midpoint) c) AS having_only_score_consumer_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') > @match_only_midpoint)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > @match_only_midpoint) AS positive_threshold_ids_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') > 1)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score > 1) AS positive_constant_threshold_ids_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') + 1 > @match_only_midpoint + 1)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score + 1 > @match_only_midpoint + 1) AS arithmetic_score_consumer_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') <> 0)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score <> 0) AS numeric_nonzero_ids_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') >= 0)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score >= 0) AS numeric_ge_zero_preserves_nonhits;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') = 0)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score = 0) AS numeric_eq_zero_preserves_nonhits;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE NOT MATCH(body) AGAINST('alpha'))
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND NOT score) AS negated_match_preserves_nonhits;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha') IS NULL)
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'alpha' AND score IS NULL) AS scalar_null_behavior_unchanged;
+
+SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_docs WHERE MATCH(body) AGAINST('+alpha -beta' IN BOOLEAN MODE))
+<=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'boolean' AND score > 0) AS boolean_filter_ids_unchanged;
+
+SELECT COUNT(*) = 13 AND SUM(NOT (q.score <=> c.score)) = 0 AS boolean_projection_scores_unchanged
+FROM (SELECT id, MATCH(body) AGAINST('+alpha -beta' IN BOOLEAN MODE) AS score FROM fts_match_only_docs ORDER BY id LIMIT 100) q
+JOIN fts_match_only_scores c ON c.query_id = 'boolean' AND c.id = q.id;
+
+# Changing query tokens must not leak a previous execution's posting iterators.
+SET @match_only_query_sql = 'SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '''') = ? AS prepared_query_rebound FROM fts_match_only_docs WHERE MATCH(body) AGAINST(?)';
+PREPARE match_only_query FROM @match_only_query_sql;
+SET @match_only_expected = '1,2,5,9', @match_only_query = 'alpha';
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+SET @match_only_expected = '', @match_only_query = 'absenttoken';
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+SET @match_only_expected = '1,2,5,9', @match_only_query = 'alpha alpha';
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+SET @match_only_expected = '10,11', @match_only_query = CONVERT(0xE695B0E68DAEE5BA9320656E676C697368 USING utf8mb4);
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+SET @match_only_expected = '', @match_only_query = '';
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+SET @match_only_expected = '1,2,5,9', @match_only_query = 'alpha';
+EXECUTE match_only_query USING @match_only_expected, @match_only_query;
+DEALLOCATE PREPARE match_only_query;
+
+# In particular, a zero-threshold cached plan must not become an unsafe
+# scoreless plan for a subsequent positive threshold. The midpoint produces
+# a proper subset, unlike a threshold above every score that could mask a bug.
+SET @match_only_threshold_sql = 'SELECT (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '''') FROM fts_match_only_docs WHERE MATCH(body) AGAINST(''alpha'') > ?) <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '''') FROM fts_match_only_scores WHERE query_id = ''alpha'' AND score > ?) AS prepared_threshold_rebound';
+PREPARE match_only_threshold FROM @match_only_threshold_sql;
+SET @match_only_threshold = 0;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = @match_only_midpoint;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = 0;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = @match_only_high;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = -1;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = NULL;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+SET @match_only_threshold = 0;
+EXECUTE match_only_threshold USING @match_only_threshold, @match_only_threshold;
+DEALLOCATE PREPARE match_only_threshold;
+
+# Correlated, non-unnested probes exercise reopening the same MATCH query.
+CREATE TABLE fts_match_only_probes (probe_id INT PRIMARY KEY, max_id INT);
+INSERT INTO fts_match_only_probes VALUES (1, 1), (2, 4), (3, 13);
+SELECT GROUP_CONCAT(CONCAT(probe_id, ':',
+  (SELECT /*+ NO_UNNEST */ COALESCE(GROUP_CONCAT(d.id ORDER BY d.id), '')
+   FROM fts_match_only_docs d WHERE d.id <= p.max_id AND MATCH(d.body) AGAINST('alpha')))
+  ORDER BY probe_id SEPARATOR ';') = '1:1;2:1,2;3:1,2,5,9' AS correlated_match_rescan_ids
+FROM fts_match_only_probes p;
+
+# 2053 hits cross normal 256/1024-row boundaries and end in a partial batch.
+# Every document contains the query term: BM25 must still be positive.
+CREATE TABLE fts_match_only_batch (
+  id INT PRIMARY KEY,
+  body TEXT,
+  FULLTEXT INDEX ft_body(body) WITH PARSER space
+) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin;
+INSERT INTO fts_match_only_batch VALUES (1, 'ubiquitous');
+INSERT INTO fts_match_only_batch SELECT id + 1, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 2, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 4, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 8, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 16, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 32, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 64, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 128, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 256, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 512, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 1024, body FROM fts_match_only_batch;
+INSERT INTO fts_match_only_batch SELECT id + 2048, body FROM fts_match_only_batch WHERE id <= 5;
+INSERT INTO fts_match_only_scores SELECT 'batch', id, MATCH(body) AGAINST('ubiquitous') FROM fts_match_only_batch;
+
+SELECT COUNT(*) = 2053 AND MIN(score) > 0 AS all_document_term_scores_positive
+FROM fts_match_only_scores WHERE query_id = 'batch';
+
+SELECT ids <=> (SELECT GROUP_CONCAT(id ORDER BY id) FROM fts_match_only_batch)
+AND ids <=> (SELECT GROUP_CONCAT(id ORDER BY id) FROM fts_match_only_scores WHERE query_id = 'batch' AND score > 0) AS all_document_term_complete_ids
+FROM (SELECT GROUP_CONCAT(id ORDER BY id) AS ids FROM fts_match_only_batch WHERE MATCH(body) AGAINST('ubiquitous')) q;
+
+SELECT ids <=> (SELECT GROUP_CONCAT(id ORDER BY id) FROM fts_match_only_scores WHERE query_id = 'batch' AND score > 0) AS all_document_gt_zero_complete_ids
+FROM (SELECT GROUP_CONCAT(id ORDER BY id) AS ids FROM fts_match_only_batch WHERE MATCH(body) AGAINST('ubiquitous') > 0) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '2049,2050,2051,2052,2053' AS partial_batch_tail_ids
+FROM (SELECT id FROM fts_match_only_batch WHERE MATCH(body) AGAINST('ubiquitous') ORDER BY id LIMIT 9 OFFSET 2048) q;
+
+SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') = '' AS batch_limit_exhausted
+FROM (SELECT id FROM fts_match_only_batch WHERE MATCH(body) AGAINST('ubiquitous') ORDER BY id LIMIT 9 OFFSET 2053) q;
+
+# More than 256 distinct tokens also covers the TAAT selection boundary.
+# Keep the scored oracle on the small fixture rather than scoring 2053 rows.
+SET @match_only_wide_query = (SELECT CONCAT('alpha beta ', GROUP_CONCAT(CONCAT('absent', id) ORDER BY id SEPARATOR ' ')) FROM fts_match_only_batch WHERE id <= 300);
+INSERT INTO fts_match_only_scores SELECT 'wide', id, MATCH(body) AGAINST(@match_only_wide_query) FROM fts_match_only_docs;
+SELECT ids = '1,2,3,5,9' AND ids <=> (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM fts_match_only_scores WHERE query_id = 'wide' AND score > 0) AS wide_natural_query_complete_ids
+FROM (SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') AS ids FROM fts_match_only_docs WHERE MATCH(body) AGAINST(@match_only_wide_query)) q;
+
+# Preserve the established unsupported query-expansion contract.
+--error ER_NOT_SUPPORTED_YET
+SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha' IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION);
+--error ER_NOT_SUPPORTED_YET
+SELECT id FROM fts_match_only_docs WHERE MATCH(body) AGAINST('alpha' WITH QUERY EXPANSION);
+
+DROP TABLE fts_match_only_docs, fts_match_only_scores, fts_match_only_batch, fts_match_only_probes;
+SET SESSION group_concat_max_len = @match_only_old_group_concat_max_len;
+--enable_query_log

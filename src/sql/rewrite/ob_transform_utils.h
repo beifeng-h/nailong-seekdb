@@ -2000,6 +2000,11 @@ private:
                             ObIArray<ObRawExpr*> &view_exprs);
 
 public:
+  static int check_need_calc_match_score(ObExecContext *exec_ctx,
+                                        ObDMLStmt *stmt,
+                                        ObMatchFunRawExpr *match_expr,
+                                        bool &need_calc,
+                                        ObIArray<ObExprConstraint> &constraints);
   static int extract_shared_exprs(ObDMLStmt *parent, 
                                   ObSelectStmt *view_stmt,
                                   ObIArray<ObRawExpr *> &common_exprs,
@@ -2043,7 +2048,9 @@ private:
   static int inner_check_need_calc_match_score(ObExecContext *exec_ctx,
                                               ObRawExpr* expr, 
                                               ObRawExpr* match_expr, 
+                                              bool positive_condition,
                                               bool &need_calc,
+                                              bool &found_truth_use,
                                               ObIArray<ObExprConstraint> &constraints);
   static int check_stmt_can_trans_as_exists(ObSelectStmt *stmt,
                                             ObTransformerCtx *ctx,

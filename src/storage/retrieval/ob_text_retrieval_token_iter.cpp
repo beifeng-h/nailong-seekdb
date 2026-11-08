@@ -96,7 +96,7 @@ void ObTextRetrievalTokenIter::reset()
 
 void ObTextRetrievalTokenIter::reuse()
 {
-  if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
+  if (need_calc_relevance() && inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
     token_doc_cnt_calculated_ = false;
@@ -203,7 +203,8 @@ int ObTextRetrievalTokenIter::get_next_row()
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_
+      && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_row(inv_idx_scan_iter_))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
@@ -242,7 +243,8 @@ int ObTextRetrievalTokenIter::get_next_batch(const int64_t capacity, int64_t &co
   count = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_
+      && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_rows(
                  inv_idx_scan_iter_, count, OB_MIN(max_batch_size_, capacity)))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
@@ -302,6 +304,36 @@ int ObTextRetrievalTokenIter::advance_to(const ObDatum &id_datum)
 int ObTextRetrievalTokenIter::update_scan_param(const ObString &token, common::ObArenaAllocator &allocator)
 {
   int ret = OB_SUCCESS;
+  if (!need_calc_relevance()) {
+    // TaaT changes the term in each scan range. A match-only scan has no
+    // aggregate parameter; function lookup can have several point ranges.
+    ObSEArray<ObNewRange, 4> scan_ranges;
+    if (OB_ISNULL(inv_idx_scan_param_) || OB_ISNULL(inv_idx_scan_iter_)
+        || OB_UNLIKELY(inv_idx_scan_param_->key_ranges_.empty())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(scan_ranges.assign(inv_idx_scan_param_->key_ranges_))) {
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < scan_ranges.count(); ++i) {
+      ObNewRange &range = scan_ranges.at(i);
+      ObObj token_obj;
+      token_obj.set_string(ObVarcharType, token);
+      token_obj.set_meta_type(range.start_key_.get_obj_ptr()[0].meta_);
+      if (OB_FAIL(ob_write_obj(allocator, token_obj, range.start_key_.get_obj_ptr()[0]))) {
+      } else if (range.start_key_.get_obj_ptr() != range.end_key_.get_obj_ptr()
+          && OB_FAIL(ob_write_obj(allocator, token_obj, range.end_key_.get_obj_ptr()[0]))) {
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(query::das_scan_reuse(inv_idx_scan_iter_))) {
+    } else if (OB_UNLIKELY(!inv_idx_scan_param_->key_ranges_.empty())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(inv_idx_scan_param_->key_ranges_.assign(scan_ranges))) {
+    } else if (OB_FAIL(query::das_scan_rescan(inv_idx_scan_iter_))) {
+    } else {
+      reuse();
+    }
+    return ret;
+  }
   if (OB_UNLIKELY(inv_idx_agg_param_->key_ranges_.count() != 1)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
@@ -522,11 +554,16 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
   int ret = OB_SUCCESS;
   if (OB_ISNULL(inv_scan_domain_id_col_)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (!eval_ctx_->is_vectorized()) {
+    cur_idx_ = 0;
+    if (OB_FAIL(doc_id_[0].from_datum(inv_scan_domain_id_col_->locate_expr_datum(*eval_ctx_)))) {
+    }
   } else {
     cur_idx_ = 0;
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
-      if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
+      // No-score scans do not allocate a relevance-evaluation skip vector.
+      if (nullptr == token_iter_->get_skip() || !token_iter_->get_skip()->at(i)) {
         if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
         };
       }
@@ -580,10 +617,14 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
 int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(cur_idx_ >= count_)) {
+  if (OB_UNLIKELY(cur_idx_ < 0 || cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else if (relevance_expr_) {
     score = relevance_[cur_idx_];
+  } else {
+    // A valid natural-language posting has strictly positive BM25 weight.
+    // The optimizer only omits BM25 when its magnitude is not consumed.
+    score = 1.0;
   }
   return ret;
 }
@@ -591,7 +632,7 @@ int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
 int ObTextRetrievalDaaTTokenIter::get_curr_id(const ObDatum *&id_datum) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(cur_idx_ >= count_)) {
+  if (OB_UNLIKELY(cur_idx_ < 0 || cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else {
     id_datum = &doc_id_[cur_idx_].get_datum();

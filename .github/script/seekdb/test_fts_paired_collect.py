@@ -211,6 +211,97 @@ class CollectorTests(unittest.TestCase):
         self.change_identity('sourceCommit', '0' * 40, 'candidate')
         self.assertFalse(self.run_collect()['ok'])
 
+    def db_log(self, data, name='seekdb.log'):
+        path = self.root / 'validation/cases/candidate/fts_index.cn_word/db-log-tails' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def archived(self, path, result):
+        name = path.relative_to(self.root).as_posix()
+        item = next(f for f in result['files'] if f['path'] == name)
+        with tarfile.open(self.out / 'evidence.tar.gz') as tar:
+            data = tar.extractfile(name).read()
+        self.assertEqual(item['bytes'], len(data))
+        self.assertEqual(item['sha256'], hashlib.sha256(data).hexdigest())
+        return item, data
+
+    def test_reported_interior_invalid_byte_is_escaped(self):
+        original = b'A' * 34455 + bytes([139]) + b' literal=' + bytes([92]) + b'x8b diagnostic end'
+        self.assertEqual(original[34455], 0x8b)
+        path = self.db_log(original)
+        result = self.run_collect()
+        self.assertTrue(result['ok'], result['errors'])
+        self.assertEqual(len(result['archives']), 3)
+        item, data = self.archived(path, result)
+        expected = original.decode('utf-8', 'surrogateescape').replace(chr(92), chr(92) * 2).replace(chr(0xdc8b), chr(92) + 'x8b').encode('utf-8')
+        self.assertEqual(data, expected)
+        self.assertTrue(item['converted'])
+        self.assertEqual(item['selectedRawSha256'], hashlib.sha256(original).hexdigest())
+        self.assertNotEqual(item['sha256'], item['selectedRawSha256'])
+        self.assertEqual(item['originalSha256'], hashlib.sha256(original).hexdigest())
+        self.assertEqual(item['inputTailBytes'], len(original))
+        self.assertEqual(item['selectedRawBytes'], len(original))
+        self.assertEqual(item['escapedInvalidByteCount'], 1)
+        self.assertEqual(item['tailOffset'], 0)
+        self.assertFalse(item['truncated'])
+
+    def test_converted_db_tail_respects_file_and_shared_caps(self):
+        original = (b'A' * 200 + bytes([139])) * 30
+        path = self.db_log(original)
+        with patch.object(c, 'LOG_FILE_CAP', 1024), patch.object(c, 'LOG_TOTAL_CAP', 2200):
+            result = self.run_collect()
+        self.assertTrue(result['ok'], result['errors'])
+        item, data = self.archived(path, result)
+        self.assertTrue(item['converted'])
+        self.assertTrue(item['truncated'])
+        self.assertLessEqual(len(data), 1024)
+        self.assertLessEqual(result['logPayloadBytes'], 2200)
+        self.assertEqual(item['selectedRawSha256'], hashlib.sha256(original[item['tailOffset']:]).hexdigest())
+        self.assertEqual(item['selectedRawBytes'], len(original) - item['tailOffset'])
+        data.decode('utf-8')
+
+    def test_invalid_non_db_evidence_stays_strict(self):
+        (self.root / 'evidence/candidate/build.log').write_bytes(b'A' * 34455 + bytes([139]))
+        self.assertFalse(self.run_collect()['ok'])
+
+    def test_unrecognized_db_log_name_stays_strict(self):
+        self.db_log(b'A' * 34455 + bytes([139]), 'unrelated.log')
+        self.assertFalse(self.run_collect()['ok'])
+
+    def test_invalid_and_malformed_json_stay_strict(self):
+        path = self.root / 'validation/cases/result.json'
+        for index, data in enumerate((b'{"value":"' + b'A' * 100 + bytes([139]) + b'"}', b'{"missing":')):
+            with self.subTest(index=index):
+                path.write_bytes(data)
+                self.out = Path(self.temp.name) / ('json-' + str(index))
+                self.assertFalse(self.run_collect()['ok'])
+
+    def test_db_binary_nul_controls_and_dense_damage_rejected(self):
+        samples = (b'A' * 34455 + bytes([0,139]), bytes([127]) + b'ELF' + b'A' * 34455 + bytes([139]),
+                   b'A' * 34455 + bytes([1,139]), bytes([139,255]) * 200,
+                   b'A' * 100 + bytes([139]) * 10)
+        for index, data in enumerate(samples):
+            with self.subTest(index=index):
+                self.db_log(data)
+                self.out = Path(self.temp.name) / ('binary-' + str(index))
+                self.assertFalse(self.run_collect()['ok'])
+
+    def test_converted_log_still_obeys_archive_cap(self):
+        self.db_log(b'A' * 34455 + bytes([139]))
+        with patch.object(c, 'LOG_ARCHIVE_CAP', 5):
+            self.assertFalse(self.run_collect()['ok'])
+        self.assertFalse((self.out / 'evidence.tar.gz').exists())
+
+    def test_valid_db_utf8_remains_exact(self):
+        original = b'valid ' + bytes([92]) + b'x8b ' + chr(0x4e2d).encode('utf-8') + bytes([10])
+        path = self.db_log(original)
+        result = self.run_collect()
+        self.assertTrue(result['ok'], result['errors'])
+        item, data = self.archived(path, result)
+        self.assertEqual(data, original)
+        self.assertNotIn('converted', item)
+
     def test_cli_failure_nonzero(self):
         (self.root / 'runtime/baseline/seekdb').unlink()
         with contextlib.redirect_stdout(io.StringIO()) as output:

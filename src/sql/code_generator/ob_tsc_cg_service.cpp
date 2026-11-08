@@ -1888,7 +1888,7 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
       ir_scan_ctdef->children_cnt_ = 1;
-      ir_scan_ctdef->children_[0] = &scan_ctdef;
+      ir_scan_ctdef->children_[0] = inv_idx_scan_ctdef;
     }
   }
 
@@ -3057,7 +3057,10 @@ int ObTscCgService::generate_text_ir_spec_exprs(const ObTextRetrievalInfo &tr_in
     }
   }
 
-  if (OB_SUCC(ret) && (tr_info.need_calc_relevance_ || nullptr != tr_info.pushdown_match_filter_)) {
+  // MATCH is self-produced above, including when only its truth value is used.
+  // Keep its result slot for residual predicates and function-lookup misses;
+  // match-only retrieval writes a positive representative instead of BM25.
+  if (OB_SUCC(ret)) {
     if (OB_FAIL(cg_.generate_rt_expr(*tr_info.match_expr_,
                                             text_ir_scan_ctdef.relevance_proj_col_))) {
     } else if (OB_ISNULL(text_ir_scan_ctdef.relevance_proj_col_)) {

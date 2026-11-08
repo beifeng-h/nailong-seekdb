@@ -23,7 +23,7 @@ from types import SimpleNamespace
 REFERENCE = '5bce9e06d1281347ad61344e4b01fab9158c58a2'
 CASES = ('fts_index.tokenize_function', 'fts_index.cn_word',
          'fts_index.parser_properties', 'fts_index.basic_dml', 'fts_index.simple_query',
-         'fts_index.tokenize_casefold_contract')
+         'fts_index.tokenize_casefold_contract', 'fts_index.match_filter_only_contract')
 NATIVE = '.github/script/seekdb/mysqltest_for_seekdb.py'
 SDB = '.github/script/seekdb/sdb.py'
 BENCH = 'tools/benchmark/fts_large_bench'
@@ -304,7 +304,8 @@ def main():
     report = dict(scope='DEVELOPMENT_CI_NOT_FORMAL_CONTEST_SUBMISSION', reference=REFERENCE,
         expectedCommit=args.expected_sha, cases=list(CASES), caseRetries=0,
         buildsByHarness=0, parameters=PARAMETERS, benchmarkConfig=BENCH_CONFIG,
-        addedRegression='fts_index.tokenize_casefold_contract', status='plan_only_not_executed')
+        addedRegressions=['fts_index.tokenize_casefold_contract', 'fts_index.match_filter_only_contract'],
+        status='plan_only_not_executed')
     if not args.execute:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0

@@ -216,27 +216,28 @@ jobs:
           if-no-files-found: error
           include-hidden-files: false
 
-      - name: Always summarize scope and expose small reports in normal logs
+      - name: Always publish readable result in job summary and bounded normal-log lines
         if: always()
         shell: bash
         run: |
           set -uo pipefail
           df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           free -b
+          if test -f "$PAIRED_ROOT/driver/fts_paired_validation.py"; then
+            python3 "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase present \
+              --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+              --summary "$GITHUB_STEP_SUMMARY"
+          else
+            printf '## FTS same-host result\n\nCalibration unavailable: prerequisites failed before the paired driver was preserved. No improvement or formal score claimed.\n' >> "$GITHUB_STEP_SUMMARY"
+            echo 'FTS_RESULT Calibration unavailable: prerequisites failed before the paired driver was preserved.'
+          fi
           if test -f "$PAIRED_ROOT/report.json"; then
             python3 - "$PAIRED_ROOT/report.json" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1], encoding="utf-8"))
           print("PAIRED_VISIBLE_RESULT", json.dumps({k:r[k] for k in
               ("status","driverCommit","kernelOrigin","baselineCommit","builds","caseVerdicts",
-               "roundVerdicts","sameHostPerformance","failure") if k in r}, ensure_ascii=False))
+               "roundVerdicts","sameHostPerformance","failure","formalContestRun",
+               "allOfficialInputsUnchanged","planAssertions") if k in r}, ensure_ascii=False))
           PY
           fi
-          {
-            printf '### Same-host FTS development calibration\n\n'
-            printf 'Actual B source and driver: %s. Kernel origin: 8db524bb0a3a847b4eb384232bd576761e4075b3.\n\n' "$GITHUB_SHA"
-            printf 'A: exact official 5bce9e06d1281347ad61344e4b01fab9158c58a2. One cold source build plus original-pipeline incremental B build.\n\n'
-            printf 'Five original cases on A, six selected cases on B; eight fresh default rounds ABBA BAAB; four untimed exact-query EXPLAINs per role. No profiler or ablation.\n\n'
-            printf 'Calibration performance is separate from correctness/infrastructure: valid negative or inconclusive calibration exits zero and is explicitly classified with a predeclared 2%% margin. No formal contest score is claimed.\n\n'
-            printf 'Small exact identities and paired metrics are printed in normal logs. Complete ELFs are independently preserved or collection explicitly fails; artifact access is not required to read the calibration result.\n'
-          } >> "$GITHUB_STEP_SUMMARY"

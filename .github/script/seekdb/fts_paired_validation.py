@@ -32,7 +32,9 @@ ALLOWED_DRIVER_PATHS = frozenset((
 DRIVER_FILES = ('fts_paired_validation.py', 'fts_paired_collect.py', 'fts_contest_validation.py')
 CASES = ('fts_index.tokenize_function', 'fts_index.cn_word',
          'fts_index.parser_properties', 'fts_index.basic_dml', 'fts_index.simple_query')
-REGRESSION = 'fts_index.tokenize_casefold_contract'
+REGRESSIONS = ('fts_index.tokenize_casefold_contract', 'fts_index.match_filter_only_contract')
+QUERY_NAMES = ('query_cn', 'query_beng', 'query_mixed', 'query_limit')
+PLAN_CONTROLS = ('control_score_projection', 'control_score_order', 'control_nonzero_threshold')
 SCHEDULE = (('A1', 'baseline'), ('B1', 'candidate'), ('B2', 'candidate'),
             ('A2', 'baseline'), ('B3', 'candidate'), ('A3', 'baseline'),
             ('A4', 'baseline'), ('B4', 'candidate'))
@@ -232,12 +234,101 @@ def strict_report(path, role, commit, baseline):
 def queries_from_benchmark(path):
     text = Path(path).read_text(encoding='utf-8')
     matches = re.findall(r'^run_query_bench "(query_(?:cn|beng|mixed|limit))" \\\n  "([^"\n]+)"\s*$', text, re.MULTILINE)
-    if len(matches) != 4 or [name for name, _ in matches] != ['query_cn', 'query_beng', 'query_mixed', 'query_limit']:
+    if len(matches) != len(QUERY_NAMES) or tuple(name for name, _ in matches) != QUERY_NAMES:
         raise RuntimeError('Cannot extract exactly four original benchmark SELECT literals')
     for _, sql in matches:
         if not sql.startswith('SELECT ') or not sql.endswith(';') or '$' in sql or '\\' in sql:
             raise RuntimeError('Benchmark query is not a literal SELECT')
     return dict(matches)
+
+
+def selected_cases(role):
+    if role not in ('baseline', 'candidate'):
+        raise RuntimeError('Native case role confusion')
+    return CASES + (REGRESSIONS if role == 'candidate' else ())
+
+
+def expected_plan_relevance(role, query):
+    if role not in ('baseline', 'candidate'):
+        raise RuntimeError('EXPLAIN role confusion')
+    if query not in QUERY_NAMES + PLAN_CONTROLS:
+        raise RuntimeError('Unknown EXPLAIN query expectation: ' + str(query))
+    # preserve_order_for_fulltext_search() in ob_transform_pre_process.cpp
+    # injects a real ORDER BY MATCH DESC into ordinary single-table MATCH
+    # statements, but skips aggregate COUNT statements. The original LIMIT
+    # query has that score-consuming order (also visible in its actual plan).
+    # Preserve its ranked TopK; this patch does not rewrite the outer COUNT
+    # consumer across a subquery. Only the three direct COUNTs become unscored.
+    return role == 'baseline' or query == 'query_limit' or query in PLAN_CONTROLS
+
+
+def plan_queries(queries):
+    """Untimed controls derive their schema, columns and text from official SQL."""
+    match = re.fullmatch(r"SELECT COUNT\(\*\) FROM (fts_large_bench\.docs) WHERE "
+                        r"(MATCH\([A-Za-z_, ]+\) AGAINST\('[^'\n]+'\));", queries['query_cn'])
+    if not match:
+        raise RuntimeError('Cannot derive scored controls from exact benchmark query_cn')
+    table, expression = match.groups()
+    return dict(queries, **dict(zip(PLAN_CONTROLS, (
+        'SELECT id, %s AS relevance FROM %s WHERE %s;' % (expression, table, expression),
+        'SELECT id FROM %s WHERE %s ORDER BY %s DESC, id LIMIT 20;' % (table, expression, expression),
+        'SELECT COUNT(*) FROM %s WHERE %s > 0.5;' % (table, expression)))))
+
+
+def plan_relevance(text):
+    """Read one actual text-retrieval operator annotation, never a flag echo."""
+    scans = re.findall(r'^\|\s*(\d+)\s*\|[^|\n]*\bTEXT RETRIEVAL SCAN\b[^|\n]*\|[^\n]*\|\s*$', text, re.MULTILINE)
+    if len(scans) != 1 or text.count('Outputs & filters:') != 1:
+        raise RuntimeError('Missing or ambiguous actual TEXT RETRIEVAL SCAN plan')
+    annotations = text.split('Outputs & filters:', 1)[1]
+    blocks = list(re.finditer(r'^\s*(\d+)\s+-\s+output\(', annotations, re.MULTILINE))
+    owned = [annotations[block.start():blocks[index + 1].start() if index + 1 < len(blocks) else len(annotations)]
+             for index, block in enumerate(blocks) if block[1] == scans[0]]
+    if len(owned) != 1 or text.count('calc_relevance') != 1:
+        raise RuntimeError('Missing, conflicting or ambiguous calc_relevance evidence')
+    values = re.findall(r'\bcalc_relevance\s*=\s*(true|false)\s*,\s*match_expr\(MATCH\(', owned[0])
+    if len(values) != 1:
+        raise RuntimeError('Malformed calc_relevance annotation for actual retrieval scan')
+    return dict(scanId=int(scans[0]), actualCalcRelevance=values[0] == 'true',
+                calcRelevanceEvidence=[line for line in owned[0].splitlines() if 'calc_relevance' in line])
+
+
+class PlanEvidenceError(RuntimeError):
+    def __init__(self, reason, results):
+        super().__init__(reason)
+        self.results = results
+
+
+def accepted_plan_assertions(assertions):
+    """Validate recorded proof shape and roles before accepting a calibration."""
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+    assertions = mapping(assertions)
+    if set(assertions) != {'A4', 'B4'}:
+        return False
+    for name, role in (('A4', 'baseline'), ('B4', 'candidate')):
+        record = mapping(assertions[name])
+        queries = mapping(record.get('queries'))
+        if record.get('role') != role or set(queries) != set(QUERY_NAMES + PLAN_CONTROLS):
+            return False
+        for query in QUERY_NAMES + PLAN_CONTROLS:
+            data = mapping(queries.get(query))
+            expected = expected_plan_relevance(role, query)
+            evidence = data.get('calcRelevanceEvidence')
+            if (data.get('role') != role
+                    or data.get('kind') != ('official' if query in QUERY_NAMES else 'scored_control')
+                    or data.get('passed') is not True or type(data.get('exitCode')) is not int or data['exitCode'] != 0
+                    or data.get('childrenCleaned') is not True
+                    or data.get('expectedCalcRelevance') is not expected or data.get('actualCalcRelevance') is not expected
+                    or type(data.get('scanId')) is not int or data['scanId'] < 0
+                    or not re.fullmatch('[0-9a-f]{64}', str(data.get('sqlSha256', '')))
+                    or not re.fullmatch('[0-9a-f]{64}', str(data.get('outputSha256', '')))
+                    or not isinstance(evidence, list) or len(evidence) != 1 or not isinstance(evidence[0], str)
+                    or evidence[0].count('calc_relevance') != 1
+                    or not re.search(r'\bcalc_relevance\s*=\s*' + ('true' if expected else 'false')
+                                     + r'\s*,\s*match_expr\(MATCH\(', evidence[0])):
+                return False
+    return True
 
 
 def performance(pairs, baseline, scorer):
@@ -422,25 +513,48 @@ def snapshot(args, plan):
 
 
 def explain_queries(args, call, out, env):
-    queries = queries_from_benchmark(args.source / (BENCH + '.sh'))
+    if args.role not in ('baseline', 'candidate'):
+        raise RuntimeError('EXPLAIN role confusion')
+    queries = plan_queries(queries_from_benchmark(args.source / (BENCH + '.sh')))
     results = {}
     for name, sql in queries.items():
         query = SESSION + 'EXPLAIN ' + sql + '\n'
         sql_path = out / (name + '-explain.sql')
         sql_path.write_text(query, encoding='utf-8')
-        result = capture_group([str(args.obclient), '-h127.0.0.1', '-P' + str(call.port),
-            '-uroot', '-A', '--default-character-set=utf8mb4'], out / (name + '-explain.log'),
-            args.source, 60, env=env, stdin=query.encode('utf-8'))
-        text = (out / (name + '-explain.log')).read_text(encoding='utf-8', errors='replace')
-        result.update(sqlSha256=digest(sql_path), calcRelevanceEvidence=[
-            line for line in text.splitlines() if 'calc_relevance' in line],
-            calcRelevanceInterpretation='visible plan text only; absent means unknown')
+        log_path = out / (name + '-explain.log')
+        failure = None
+        try:
+            result = capture_group([str(args.obclient), '-h127.0.0.1', '-P' + str(call.port),
+                '-uroot', '-A', '-N', '-B', '--raw', '--default-character-set=utf8mb4'], log_path,
+                args.source, 60, env=env, stdin=query.encode('utf-8'))
+        except (OSError, subprocess.SubprocessError) as error:
+            result = dict(exitCode=None, childrenCleaned=False)
+            failure = 'Untimed EXPLAIN process error: ' + str(error)
+        text = log_path.read_text(encoding='utf-8', errors='replace') if log_path.is_file() else ''
+        result.update(role=args.role, kind='official' if name in QUERY_NAMES else 'scored_control',
+            sqlSha256=digest(sql_path), output=str(log_path),
+            outputSha256=digest(log_path) if log_path.is_file() else None,
+            expectedCalcRelevance=expected_plan_relevance(args.role, name), passed=False,
+            calcRelevanceEvidence=[line for line in text.splitlines() if 'calc_relevance' in line])
+        if failure is None:
+            if type(result.get('exitCode')) is not int or result['exitCode'] != 0 or result.get('childrenCleaned') is not True:
+                failure = 'Untimed EXPLAIN process failed or cleanup incomplete'
+            else:
+                try:
+                    result.update(plan_relevance(text))
+                    if result['actualCalcRelevance'] != result['expectedCalcRelevance']:
+                        raise RuntimeError('Actual calc_relevance differs from required role/query behavior')
+                    result['passed'] = True
+                except RuntimeError as error:
+                    failure = str(error)
+        if failure is not None:
+            result['failureReason'] = failure
         results[name] = result
         write_json(out / 'explain-result.json', results)
-        print('PAIRED_EXPLAIN ' + json.dumps(dict(role=args.role, query=name, **result)), flush=True)
+        print('PAIRED_EXPLAIN ' + json.dumps(dict(query=name, **result)), flush=True)
         print(text[:24000], flush=True)
-        if result['exitCode'] or not result['childrenCleaned']:
-            raise RuntimeError('Untimed exact-query EXPLAIN failed: ' + name)
+        if failure is not None:
+            raise PlanEvidenceError('Untimed EXPLAIN assertion failed for %s/%s: %s' % (args.role, name, failure), results)
     return results
 
 
@@ -470,7 +584,13 @@ def benchmark_work(args, baseline, scorer, final_role_round):
             informativeFrozenBaselineScore=json.loads((out / 'frozen-score.json').read_text(encoding='utf-8')),
             frozenBaselineCaveat='Different-host reference only, not same-host speedup or formal contest score')
         if final_role_round:
-            result['explain'] = explain_queries(args, call, out, env)
+            try:
+                result['explain'] = explain_queries(args, call, out, env)
+            except PlanEvidenceError as error:
+                # Return evidence through run_instance so its normal cleanup and
+                # report persistence precede the enclosing validation exception.
+                result.update(passed=False, explain=error.results,
+                    failureKind='untimed_plan_assertion_failure', failureReason=str(error))
         return result
     return execute
 
@@ -478,7 +598,163 @@ def benchmark_work(args, baseline, scorer, final_role_round):
 def small_report(report):
     return {key: report[key] for key in ('scope', 'status', 'driverCommit', 'kernelOrigin',
         'baselineCommit', 'builds', 'caseVerdicts', 'roundVerdicts', 'sameHostPerformance',
-        'failure', 'formalContestRun', 'allOfficialInputsUnchanged') if key in report}
+        'failure', 'formalContestRun', 'allOfficialInputsUnchanged', 'planAssertions') if key in report}
+
+
+def presentation_lines(report):
+    """Read existing results only; never recalculate scores or change the report."""
+    report = report if isinstance(report, dict) else {}
+    lines = []
+
+    def add(text):
+        # Escape controls, retain the full text in bounded continuation lines.
+        text = json.dumps(str(text), ensure_ascii=True)[1:-1]
+        if len(text) <= 480:
+            lines.append(text)
+        else:
+            chunks = [text[i:i + 440] for i in range(0, len(text), 440)]
+            lines.extend('Continuation %d/%d: %s' % (i + 1, len(chunks), chunk)
+                         for i, chunk in enumerate(chunks))
+
+    def number(value, percent=False):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 'unavailable'
+        try:
+            value = float(value)
+        except OverflowError:
+            return 'unavailable'
+        if not math.isfinite(value):
+            return 'unavailable'
+        scaled = value * 100 if percent else value
+        if not math.isfinite(scaled):
+            return 'unavailable'
+        return format(scaled, '+.9g' if percent else '.12g') + ('%' if percent else '')
+
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    def sequence(value):
+        return value if isinstance(value, list) else []
+
+    perf = mapping(report.get('sameHostPerformance'))
+    pairs = sequence(perf.get('pairs'))
+    cases = sequence(report.get('caseVerdicts'))
+    rounds = sequence(report.get('roundVerdicts'))
+    builds = mapping(report.get('builds'))
+    expected_categories = {
+        'build': ('build_ik_all_sec', 'build_ik_content_sec', 'build_beng_en_sec'),
+        'tokenize': ('tokenize_ik_avg_ms', 'tokenize_beng_avg_ms'),
+        'query': ('query_cn_avg_ms', 'query_beng_avg_ms', 'query_mixed_avg_ms', 'query_limit_avg_ms')}
+    expected_cases = {(role, name) for role in ('baseline', 'candidate')
+                      for name in selected_cases(role)}
+    expected_rounds = {(role, name) for name, role in SCHEDULE}
+    assertions = mapping(report.get('planAssertions'))
+    plans_valid = accepted_plan_assertions(assertions)
+
+    def complete(rows, expected):
+        return (len(rows) == len(expected)
+                and {(mapping(row).get('role'), mapping(row).get('name')) for row in rows} == expected
+                and all(mapping(row).get('status') == 'passed' and mapping(row).get('cleanupPassed') is True for row in rows))
+
+    valid = (report.get('status') == 'valid_calibration_completed'
+             and report.get('allOfficialInputsUnchanged') is True
+             and report.get('baselineCommit') == BASELINE and report.get('kernelOrigin') == KERNEL
+             and mapping(builds.get('baseline')).get('sourceCommit') == BASELINE
+             and mapping(builds.get('candidate')).get('sourceCommit') == report.get('driverCommit')
+             and bool(re.fullmatch('[0-9a-f]{40}', str(report.get('driverCommit', ''))))
+             and complete(cases, expected_cases) and complete(rounds, expected_rounds) and plans_valid
+             and perf.get('classification') in ('improvement_established', 'regression', 'inconclusive')
+             and [(mapping(row).get('baseline'), mapping(row).get('candidate')) for row in pairs] == list(PAIRS))
+    interval = sequence(perf.get('descriptive95PercentInterval'))
+    required_numbers = [perf.get('meanUnboundedImprovement'), perf.get('margin'), *interval]
+    valid = valid and len(interval) == 2
+    for row in pairs:
+        row = mapping(row)
+        required_numbers.append(row.get('unboundedImprovement'))
+        categories = mapping(row.get('categories'))
+        valid = valid and set(categories) == set(expected_categories)
+        for category, names in expected_categories.items():
+            data = mapping(categories.get(category))
+            metrics = sequence(data.get('metrics'))
+            valid = valid and [mapping(item).get('metric') for item in metrics] == list(names)
+            required_numbers.append(data.get('improvement'))
+            for item in metrics:
+                item = mapping(item)
+                required_numbers.extend(item.get(key) for key in ('baseline', 'current', 'improvement'))
+    valid = valid and all(number(value) != 'unavailable' for value in required_numbers)
+    if valid:
+        lower, upper = interval
+        expected_classification = ('improvement_established' if lower > MARGIN else
+                                   'regression' if upper < -MARGIN else 'inconclusive')
+        valid = (perf['margin'] == MARGIN and lower <= perf['meanUnboundedImprovement'] <= upper
+                 and perf['classification'] == expected_classification)
+    add('Status: ' + str(report.get('status', 'report unavailable')))
+    add('Paired development classification: ' + (perf['classification'] if valid else 'unavailable; calibration invalid, incomplete, or malformed'))
+    add('Unbounded mean: %s; descriptive 95%% interval: [%s, %s]; predeclared margin: %s.' % (
+        number(perf.get('meanUnboundedImprovement'), True),
+        number(interval[0], True) if len(interval) > 0 else 'unavailable',
+        number(interval[1], True) if len(interval) > 1 else 'unavailable', number(perf.get('margin'), True)))
+    add('A actual source: ' + str(mapping(builds.get('baseline')).get('sourceCommit', report.get('baselineCommit', 'unavailable'))))
+    add('B actual build source: ' + str(mapping(builds.get('candidate')).get('sourceCommit', 'unavailable')))
+    add('B kernel origin: ' + str(report.get('kernelOrigin', 'unavailable')) + '; driver source: ' + str(report.get('driverCommit', 'unavailable')))
+    for role in ('baseline', 'candidate'):
+        total = len(selected_cases(role))
+        selected = [mapping(row) for row in cases if mapping(row).get('role') == role]
+        add('Correctness %s: %d/%d selected cases passed; %d recorded. No full-suite claim.' % (
+            role, sum(row.get('status') == 'passed' for row in selected), total, len(selected)))
+    verdicts = [mapping(row) for row in cases + rounds]
+    add('Timed rounds: %d/%d passed; %d recorded. Owned DB cleanup: %d/%d recorded instances passed (%d expected).' % (
+        sum(mapping(row).get('status') == 'passed' for row in rounds), len(SCHEDULE), len(rounds),
+        sum(row.get('cleanupPassed') is True for row in verdicts), len(verdicts), len(expected_cases) + len(SCHEDULE)))
+    add('Untimed actual-plan assertions: ' + ('passed for A4/B4; three candidate COUNT queries unscored; protected implicit-ranked LIMIT and three score-consuming controls scored.'
+        if plans_valid else 'unavailable or failed; no accepted no-score evidence.'))
+    for name, record in assertions.items():
+        record = mapping(record)
+        for query, data in mapping(record.get('queries')).items():
+            data = mapping(data)
+            if data.get('passed') is not True:
+                add('Untimed plan failure %s/%s/%s: %s' % (name, record.get('role'), query,
+                    data.get('failureReason', 'incomplete or malformed plan evidence')))
+    failure = mapping(report.get('failure'))
+    if failure:
+        add('Failure phase: ' + str(failure.get('phase', 'unavailable')))
+        add('Failure reason: ' + str(failure.get('reason', 'unavailable')))
+    for row in verdicts:
+        if row.get('status') != 'passed' or row.get('cleanupPassed') is not True:
+            add('Incomplete instance: %s/%s status=%s cleanup=%s' % (
+                row.get('role'), row.get('name'), row.get('status'), row.get('cleanupPassed')))
+    if not valid:
+        add('No improvement claim. Any available paired numbers below are retained diagnostics, not an accepted calibration.')
+    for index, row in enumerate(pairs, 1):
+        row = mapping(row)
+        pair = '%s/%s' % (row.get('baseline', '?'), row.get('candidate', '?'))
+        add('Pair %d %s: unbounded improvement=%s (every pair retained).' % (index, pair, number(row.get('unboundedImprovement'), True)))
+        for category, data in mapping(row.get('categories')).items():
+            data = mapping(data)
+            add('Pair %s category %s: improvement=%s.' % (pair, category, number(data.get('improvement'), True)))
+            for item in sequence(data.get('metrics')):
+                item = mapping(item)
+                add('Pair %s metric %s: A=%s B=%s improvement=%s.' % (pair, item.get('metric', '?'),
+                    number(item.get('baseline')), number(item.get('current')), number(item.get('improvement'), True)))
+    for row in sequence(report.get('instances')):
+        row = mapping(row)
+        frozen = mapping(mapping(row.get('work')).get('informativeFrozenBaselineScore'))
+        if frozen:
+            add('Frozen reference %s: score=%s/100; different-host reference only, separate from paired development.' % (
+                row.get('name', '?'), number(frozen.get('score'))))
+    add('No formal contest score is produced by this workflow. Frozen reference scores are not same-host improvements.')
+    add('Interval caveat: four adjacent pairs; independent/stationary effects assumed. Shared-VM noise can violate this; no population guarantee.')
+    return lines
+
+
+def present_report(report, summary=None):
+    lines = presentation_lines(report)
+    for line in lines:
+        print('FTS_RESULT ' + line, flush=True)
+    if summary is not None:
+        with Path(summary).open('a', encoding='utf-8') as stream:
+            stream.write('\n## FTS same-host result\n\n')
+            stream.writelines('- ' + line + '\n' for line in lines)
 
 
 def persist_report(root, report):
@@ -570,6 +846,8 @@ def validate(args, plan, report):
         report['caseVerdicts' if cases else 'roundVerdicts'].append(verdict)
         if not cases and 'metrics' in row.get('work', {}):
             report['roundMetrics'][name] = row['work']['metrics']
+        if not cases and 'explain' in row.get('work', {}):
+            report.setdefault('planAssertions', {})[name] = dict(role=role, queries=row['work']['explain'])
         persist_report(args.root, report)
         require_instance(row)
         guard(role)
@@ -578,7 +856,7 @@ def validate(args, plan, report):
     for role in ('baseline', 'candidate'):
         call_args, native, _ = roles[role]
         available = {case.name: case for case in native.discover_cases(call_args.source)}
-        selected = CASES + ((REGRESSION,) if role == 'candidate' else ())
+        selected = selected_cases(role)
         if any(name not in available for name in selected):
             raise RuntimeError('Required native case unavailable/excluded')
         for name in selected:
@@ -587,6 +865,8 @@ def validate(args, plan, report):
     for name, role in SCHEDULE:
         call_args = roles[role][0]
         run(role, name, benchmark_work(call_args, baseline, scorer, name in ('A4', 'B4')))
+    if not accepted_plan_assertions(report.get('planAssertions')):
+        raise RuntimeError('Complete role-bound A4/B4 actual-plan assertions are required')
     pairs = [dict(baseline=a, candidate=b, baselineMetrics=report['roundMetrics'][a],
                   candidateMetrics=report['roundMetrics'][b]) for a, b in PAIRS]
     report['sameHostPerformance'] = performance(pairs, baseline, scorer)
@@ -598,16 +878,24 @@ def validate(args, plan, report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--phase', choices=('plan', 'prepare', 'snapshot', 'switch-candidate', 'validate', 'finalize'), default='plan')
+    parser.add_argument('--phase', choices=('plan', 'prepare', 'snapshot', 'switch-candidate', 'validate', 'finalize', 'present'), default='plan')
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--driver-sha', required=True)
     parser.add_argument('--role', choices=('baseline', 'candidate'))
+    parser.add_argument('--summary', type=Path)
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args(argv)
     args.source = args.source.resolve(strict=True)
     no_symlinks(args.root)
     args.root = args.root.resolve(strict=False)
+    if args.phase == 'present':
+        try:
+            report = json.loads((args.root / 'report.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError) as error:
+            report = dict(status='invalid_calibration', failure=dict(phase='presentation', reason=str(error)))
+        present_report(report, args.summary)
+        return 0
     if not args.execute or args.phase == 'plan':
         print(json.dumps(plan_for(args.source, args.root, args.driver_sha), indent=2))
         return 0

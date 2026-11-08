@@ -1,5 +1,6 @@
 """Synthetic paired-contract tests. Never builds or starts SQL; one Linux test owns synthetic subprocesses."""
 import argparse
+import ast
 from contextlib import ExitStack, redirect_stdout
 import copy
 import hashlib
@@ -22,6 +23,20 @@ DRIVER = 'a' * 40
 TREE = 'b' * 40
 BASELINE = json.loads((REPO / (p.BENCH + '_baseline.json')).read_text(encoding='utf-8'))
 SCORER = p.load_module('test_original_scorer', REPO / (p.BENCH + '_score.py'))
+
+# Exact UTF-8 outputs recovered from the completed Actions job below. Both A4
+# and B4 had these identical outputs before the new match-only optimization.
+# Each hash is the corresponding original PAIRED_EXPLAIN.outputSha256, not a
+# hash invented from this fixture. JSON preserves original trailing spaces/LF.
+ACTUAL_ACTIONS_EXPLAINS = json.loads(r'''{
+  "sourceJobUrl": "https://github.com/beifeng-h/nailong-seekdb/actions/runs/42470225355/job/128699028769",
+  "fixtures": [
+    {"query":"query_cn","sha256":"aa89f88510c6213065504f9a9b29af4c0318b13b7b03945f44d54913fb20fa09","output":"Query Plan\n=================================================================\n|ID|OPERATOR             |NAME            |EST.ROWS|EST.TIME(us)|\n-----------------------------------------------------------------\n|0 |SCALAR GROUP BY      |                |1       |587536      |\n|1 |└─TEXT RETRIEVAL SCAN|docs(fti_all_ik)|12669   |587307      |\n=================================================================\nOutputs & filters:\n-------------------------------------\n  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=256\n      group(nil), agg_func([T_FUN_COUNT(*)])\n  1 - output(nil), filter(nil), rowset=256\n      access(nil), partitions(p0)\n      is_index_back=false, is_global_index=false, \n      calc_relevance=true, match_expr(MATCH(docs.title, docs.content) AGAINST('全文索引 分词器')), \n      pushdown_match_filter(MATCH(docs.title, docs.content) AGAINST('全文索引 分词器'))\n"},
+    {"query":"query_beng","sha256":"af942995681f75327feca190967715496461e9a3dbdb566c481f038c1324d933","output":"Query Plan\n==================================================================\n|ID|OPERATOR             |NAME             |EST.ROWS|EST.TIME(us)|\n------------------------------------------------------------------\n|0 |SCALAR GROUP BY      |                 |1       |834767      |\n|1 |└─TEXT RETRIEVAL SCAN|docs(fti_en_beng)|18000   |834441      |\n==================================================================\nOutputs & filters:\n-------------------------------------\n  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=256\n      group(nil), agg_func([T_FUN_COUNT(*)])\n  1 - output(nil), filter(nil), rowset=256\n      access(nil), partitions(p0)\n      is_index_back=false, is_global_index=false, \n      calc_relevance=true, match_expr(MATCH(docs.title_en, docs.content_en) AGAINST('database performance audit')), \n      pushdown_match_filter(MATCH(docs.title_en, docs.content_en) AGAINST('database performance audit'))\n"},
+    {"query":"query_mixed","sha256":"a48fb77c249e17ddb7ccf5e2f7162c471fca643c5e290b9abc865768a9646427","output":"Query Plan\n=================================================================\n|ID|OPERATOR             |NAME            |EST.ROWS|EST.TIME(us)|\n-----------------------------------------------------------------\n|0 |SCALAR GROUP BY      |                |1       |587359      |\n|1 |└─TEXT RETRIEVAL SCAN|docs(fti_all_ik)|12665   |587130      |\n=================================================================\nOutputs & filters:\n-------------------------------------\n  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=256\n      group(nil), agg_func([T_FUN_COUNT(*)])\n  1 - output(nil), filter(nil), rowset=256\n      access(nil), partitions(p0)\n      is_index_back=false, is_global_index=false, \n      calc_relevance=true, match_expr(MATCH(docs.title, docs.content) AGAINST('OceanBase 稳定 database')), \n      pushdown_match_filter(MATCH(docs.title, docs.content) AGAINST('OceanBase 稳定 database'))\n"},
+    {"query":"query_limit","sha256":"df556ca4105cd0eceebd49236aff90161852ca1d45d8cf9a81122a4c5bdafb90","output":"Query Plan\n=======================================================================\n|ID|OPERATOR               |NAME                |EST.ROWS|EST.TIME(us)|\n-----------------------------------------------------------------------\n|0 |SCALAR GROUP BY        |                    |1       |406515      |\n|1 |└─SUBPLAN SCAN         |t                   |14000   |406262      |\n|2 |  └─TEXT RETRIEVAL SCAN|docs(fti_content_ik)|14000   |406225      |\n=======================================================================\nOutputs & filters:\n-------------------------------------\n  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=256\n      group(nil), agg_func([T_FUN_COUNT(*)])\n  1 - output(nil), filter(nil), rowset=256\n      access(nil)\n  2 - output([docs.id]), filter(nil), rowset=256\n      access([docs.id]), partitions(p0)\n      is_index_back=true, is_global_index=false, \n      calc_relevance=true, match_expr(MATCH(docs.content) AGAINST('倒排索引 tokenizer')), \n      pushdown_match_filter(MATCH(docs.content) AGAINST('倒排索引 tokenizer')), \n      sort_keys([MATCH(docs.content) AGAINST('倒排索引 tokenizer'), DESC]), limit(20), offset(nil), with_ties(false)\n"}
+  ]
+}''')
 
 
 class Contracts(unittest.TestCase):
@@ -92,6 +107,244 @@ class Contracts(unittest.TestCase):
             plan['driverFiles'][name] = p.digest(path)
         p.write_json(self.root / 'plan.json', plan)
         return plan
+
+    def presentation_report(self, factors=(.9, .9, .9, .9)):
+        cases = [dict(role=role, name=name, status='passed', cleanupPassed=True)
+                 for role in ('baseline', 'candidate')
+                 for name in p.selected_cases(role)]
+        rounds = [dict(role=role, name=name, status='passed', cleanupPassed=True)
+                  for name, role in p.SCHEDULE]
+        return dict(status='valid_calibration_completed', driverCommit=DRIVER,
+            kernelOrigin=p.KERNEL, baselineCommit=p.BASELINE, allOfficialInputsUnchanged=True,
+            builds=dict(baseline=dict(sourceCommit=p.BASELINE), candidate=dict(sourceCommit=DRIVER)),
+            caseVerdicts=cases, roundVerdicts=rounds,
+            sameHostPerformance=p.performance(self.pairs(factors), BASELINE, SCORER),
+            planAssertions={name: dict(role=role, queries=self.plan_rows(role))
+                            for name, role in (('A4', 'baseline'), ('B4', 'candidate'))},
+            instances=[dict(name=name, work=dict(informativeFrozenBaselineScore=dict(score=100)))
+                       for name, _ in p.SCHEDULE])
+
+    @staticmethod
+    def plan_text(scored=False):
+        return ('Query Plan\n===================================================\n'
+                '|ID|OPERATOR             |NAME          |EST.ROWS|\n'
+                '|0 |SCALAR GROUP BY      |              |1       |\n'
+                '|1 |  TEXT RETRIEVAL SCAN|docs(fti_all) |8001    |\n'
+                '===================================================\n'
+                'Outputs & filters:\n-------------------------------------\n'
+                '  0 - output([T_FUN_COUNT(*)]), filter(nil), rowset=16\n'
+                '  1 - output([docs.id]), filter(nil), rowset=16\n'
+                '      access([docs.id]), partitions(p0)\n'
+                '      calc_relevance=%s, match_expr(MATCH(docs.title, docs.content) AGAINST(\'text\')),\n'
+                '      pushdown_match_filter(MATCH(docs.title, docs.content) AGAINST(\'text\'))\n') % ('true' if scored else 'false')
+
+    def plan_rows(self, role):
+        rows = {}
+        for name in p.QUERY_NAMES + p.PLAN_CONTROLS:
+            scored = p.expected_plan_relevance(role, name)
+            rows[name] = dict(role=role, kind='official' if name in p.QUERY_NAMES else 'scored_control',
+                passed=True, exitCode=0, childrenCleaned=True, expectedCalcRelevance=scored,
+                sqlSha256='c' * 64, outputSha256='d' * 64, **p.plan_relevance(self.plan_text(scored)))
+        return rows
+
+    def test_presentation_complete_all_pairs_categories_metrics_and_identities(self):
+        report = self.presentation_report()
+        original = copy.deepcopy(report)
+        lines = p.presentation_lines(report)
+        text = '\n'.join(lines)
+        self.assertIn('Paired development classification: improvement_established', text)
+        self.assertIn('Unbounded mean: +10%', text)
+        self.assertIn('predeclared margin: +2%', text)
+        self.assertIn('B actual build source: ' + DRIVER, text)
+        self.assertIn('B kernel origin: ' + p.KERNEL, text)
+        self.assertIn('Correctness baseline: 5/5', text)
+        self.assertIn('Correctness candidate: 7/7', text)
+        self.assertIn('Owned DB cleanup: 20/20', text)
+        self.assertIn('(20 expected)', text)
+        self.assertIn('Untimed actual-plan assertions: passed for A4/B4', text)
+        self.assertIn('three candidate COUNT queries unscored; protected implicit-ranked LIMIT', text)
+        self.assertEqual(sum(' category ' in line for line in lines), 12)
+        self.assertEqual(sum(' metric ' in line for line in lines), 36)
+        self.assertEqual(sum(line.startswith('Frozen reference ') for line in lines), 8)
+        for a, b in p.PAIRS:
+            self.assertTrue(any(a + '/' + b + ': unbounded improvement=' in line for line in lines))
+            for names in BASELINE['score_categories'].values():
+                for metric in names:
+                    self.assertTrue(any('Pair %s/%s metric %s: A=' % (a, b, metric) in line
+                                        and ' B=' in line and ' improvement=' in line for line in lines))
+        self.assertTrue(all(len('FTS_RESULT ' + line) < 512 for line in lines))
+        self.assertIn('No formal contest score', text)
+        self.assertIn('different-host reference only, separate from paired development', text)
+        self.assertEqual(report, original)
+
+    def test_presentation_regression_and_inconclusive_not_clamped(self):
+        for factor, classification, mean in ((1.1, 'regression', '-10%'), (1, 'inconclusive', '+0%')):
+            with self.subTest(classification=classification):
+                text = '\n'.join(p.presentation_lines(self.presentation_report((factor,) * 4)))
+                self.assertIn('Paired development classification: ' + classification, text)
+                self.assertIn('Unbounded mean: ' + mean, text)
+                self.assertNotIn('classification: improvement_established', text)
+
+    def test_presentation_counts_derive_from_cases_and_schedule(self):
+        with patch.object(p, 'REGRESSIONS', p.REGRESSIONS + ('fts_index.future_contract',)):
+            text = '\n'.join(p.presentation_lines(self.presentation_report()))
+        self.assertIn('Correctness candidate: 8/8', text)
+        self.assertIn('Owned DB cleanup: 21/21', text)
+        self.assertIn('(21 expected)', text)
+
+    def test_plan_assertion_report_rejects_missing_wrong_role_or_inconsistent_proof(self):
+        original = self.presentation_report()
+        self.assertTrue(p.accepted_plan_assertions(original['planAssertions']))
+        variants = [None, [], {}, {'A4': original['planAssertions']['A4']}]
+        for field, value in (('role', 'baseline'), ('kind', 'scored_control'), ('passed', False),
+                ('exitCode', False), ('exitCode', 1), ('childrenCleaned', 1),
+                ('expectedCalcRelevance', True), ('actualCalcRelevance', True),
+                ('actualCalcRelevance', 0), ('scanId', -1), ('scanId', True),
+                ('sqlSha256', 'bad'), ('outputSha256', None), ('calcRelevanceEvidence', []),
+                ('calcRelevanceEvidence', [None]),
+                ('calcRelevanceEvidence', ['calc_relevance=false']),
+                ('calcRelevanceEvidence', [self.plan_text(True)])):
+            value_report = copy.deepcopy(original['planAssertions'])
+            value_report['B4']['queries']['query_cn'][field] = value
+            variants.append(value_report)
+        for change in ('record_role', 'missing_control', 'extra_round', 'control_false', 'limit_false'):
+            value = copy.deepcopy(original['planAssertions'])
+            if change == 'record_role':
+                value['B4']['role'] = 'baseline'
+            elif change == 'missing_control':
+                value['B4']['queries'].pop(p.PLAN_CONTROLS[0])
+            elif change == 'extra_round':
+                value['B3'] = value['B4']
+            elif change == 'control_false':
+                value['B4']['queries'][p.PLAN_CONTROLS[0]]['actualCalcRelevance'] = False
+            else:
+                value['B4']['queries']['query_limit']['actualCalcRelevance'] = False
+            variants.append(value)
+        for index, value in enumerate(variants):
+            with self.subTest(index=index):
+                self.assertFalse(p.accepted_plan_assertions(value))
+                report = dict(original, planAssertions=value)
+                text = '\n'.join(p.presentation_lines(report))
+                self.assertIn('Paired development classification: unavailable', text)
+                self.assertIn('No improvement claim.', text)
+        report = copy.deepcopy(original)
+        row = report['planAssertions']['B4']['queries']['query_cn']
+        row.update(passed=False, failureReason='Actual calc_relevance differs')
+        self.assertIn('Untimed plan failure B4/candidate/query_cn: Actual calc_relevance differs',
+            '\n'.join(p.presentation_lines(report)))
+
+    def test_presentation_retains_each_pair_and_outlier(self):
+        lines = p.presentation_lines(self.presentation_report((.9, 1.2, .95, 1)))
+        self.assertTrue(any('Pair 2 A2/B2: unbounded improvement=-20%' in line for line in lines))
+        self.assertEqual(sum('Pair A2/B2 metric ' in line and 'improvement=-20%' in line for line in lines), 9)
+        self.assertEqual(sum(' metric ' in line for line in lines), 36)
+
+    def test_presentation_invalid_or_incomplete_never_claims_improvement(self):
+        reports = [{}, dict(status='phase_completed')]
+        for mutation in ('status', 'round', 'pair', 'metric', 'margin', 'classification', 'source'):
+            report = self.presentation_report()
+            if mutation == 'status':
+                report['status'] = 'invalid_calibration'
+                report['failure'] = dict(phase='validate', reason='Owned DB cleanup incomplete: B2')
+            elif mutation == 'round':
+                report['roundVerdicts'][-1]['cleanupPassed'] = False
+            elif mutation == 'pair':
+                report['sameHostPerformance']['pairs'].pop()
+            elif mutation == 'metric':
+                report['sameHostPerformance']['pairs'][0]['categories']['query']['metrics'].pop()
+            elif mutation == 'margin':
+                report['sameHostPerformance']['margin'] = .5
+            elif mutation == 'classification':
+                report['sameHostPerformance']['classification'] = 'regression'
+            else:
+                report['builds']['candidate']['sourceCommit'] = p.KERNEL
+            reports.append(report)
+        for report in reports:
+            with self.subTest(report=report.get('status')):
+                text = '\n'.join(p.presentation_lines(report))
+                self.assertIn('Paired development classification: unavailable', text)
+                self.assertIn('No improvement claim.', text)
+                self.assertNotIn('classification: improvement_established', text)
+        invalid = reports[2]
+        text = '\n'.join(p.presentation_lines(invalid))
+        self.assertIn('Failure phase: validate', text)
+        self.assertIn('Failure reason: Owned DB cleanup incomplete: B2', text)
+
+    def test_presentation_nonfinite_numbers_are_unavailable_not_nan(self):
+        for value in (float('nan'), float('inf'), float('-inf'), 10 ** 1000, True, 'not a number'):
+            with self.subTest(value_type=type(value).__name__):
+                report = self.presentation_report()
+                perf = report['sameHostPerformance']
+                perf['meanUnboundedImprovement'] = value
+                perf['pairs'][0]['categories']['build']['metrics'][0]['current'] = value
+                text = '\n'.join(p.presentation_lines(report))
+                self.assertIn('Paired development classification: unavailable', text)
+                self.assertNotIn('NaN', text)
+                self.assertNotIn('nan', text)
+                self.assertNotIn('Infinity', text)
+                self.assertNotIn('=inf', text)
+                self.assertTrue(all(len('FTS_RESULT ' + line) < 512 for line in text.splitlines()))
+
+    def test_presentation_long_failure_is_bounded_and_not_truncated(self):
+        reason = 'Owned cleanup failed: ' + 'precise-detail ' * 140 + '\nlast detail'
+        report = dict(status='invalid_calibration', failure=dict(phase='validate', reason=reason))
+        lines = p.presentation_lines(report)
+        chunks = [line.split(': ', 1)[1] for line in lines if line.startswith('Continuation ')]
+        self.assertEqual(''.join(chunks), json.dumps('Failure reason: ' + reason, ensure_ascii=True)[1:-1])
+        self.assertTrue(all(len('FTS_RESULT ' + line) < 512 for line in lines))
+
+    def test_presentation_summary_append_and_stdout_are_readable(self):
+        summary = self.root / 'summary.txt'
+        summary.write_text('Existing summary\n', encoding='utf-8')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            p.present_report(self.presentation_report(), summary)
+        text = summary.read_text(encoding='utf-8')
+        self.assertTrue(text.startswith('Existing summary\n'))
+        self.assertIn('## FTS same-host result', text)
+        self.assertIn('Paired development classification: improvement_established', text)
+        self.assertIn('Pair A4/B4 metric query_limit_avg_ms:', text)
+        self.assertTrue(all(line.startswith('FTS_RESULT ') and len(line) < 512 for line in output.getvalue().splitlines()))
+
+    def test_present_phase_is_read_only_and_tolerates_missing_invalid_report(self):
+        summary = self.root / 'summary.txt'
+        path = self.root / 'report.json'
+        arguments = ['--phase', 'present', '--source', str(self.source), '--root', str(self.root),
+                     '--driver-sha', DRIVER, '--summary', str(summary)]
+        for contents in (json.dumps(self.presentation_report()), '{invalid json', None):
+            with self.subTest(contents=contents is None):
+                if contents is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(contents, encoding='utf-8')
+                with patch.object(p, 'git', side_effect=AssertionError('Presentation must not run Git')), \
+                        patch.object(p, 'load_plan', side_effect=AssertionError('Presentation must not load/change source plan')):
+                    self.assertEqual(p.main(arguments), 0)
+                if contents is None:
+                    self.assertFalse(path.exists())
+                else:
+                    self.assertEqual(path.read_text(encoding='utf-8'), contents)
+        self.assertIn('Failure phase: presentation', summary.read_text(encoding='utf-8'))
+
+    def test_workflow_publishes_readable_summary_and_retains_json(self):
+        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        self.assertIn('--phase present', text)
+        self.assertIn('--summary "$GITHUB_STEP_SUMMARY"', text)
+        self.assertIn('PAIRED_VISIBLE_RESULT', text)
+        self.assertLess(text.index('--phase present'), text.index('PAIRED_VISIBLE_RESULT'))
+
+    def test_visible_json_and_small_report_retain_strict_presentation_evidence(self):
+        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        visible = text.split('print("PAIRED_VISIBLE_RESULT",', 1)[1].split('if k in r}', 1)[0]
+        for key in ('allOfficialInputsUnchanged', 'planAssertions', 'formalContestRun'):
+            with self.subTest(key=key):
+                self.assertIn('"' + key + '"', visible)
+        report = dict(self.presentation_report(), formalContestRun=False)
+        compact = p.small_report(report)
+        for key in ('allOfficialInputsUnchanged', 'planAssertions', 'formalContestRun'):
+            self.assertIn(key, compact)
+            self.assertEqual(compact[key], report[key])
+        self.assertTrue(p.accepted_plan_assertions(compact['planAssertions']))
 
     def test_source_exact_clean_and_tree(self):
         with patch.object(p, 'git', side_effect=[DRIVER.encode(), b'', TREE.encode()]) as git:
@@ -333,8 +586,9 @@ class Contracts(unittest.TestCase):
             p.write_json(self.root / 'runtime' / role / 'identity.json', identity)
         calls = []
         self.ports = []
-        native = SimpleNamespace(discover_cases=lambda source: [SimpleNamespace(name=n) for n in p.CASES + (p.REGRESSION,)])
+        native = SimpleNamespace(discover_cases=lambda source: [SimpleNamespace(name=n) for n in p.selected_cases('candidate')])
         harness = Mock()
+        self._fake_harness = harness
         harness.original_inputs.side_effect = inputs or (lambda source: {'official': 'fixed'})
         harness.load_native.return_value = native
         harness.original_case.return_value = lambda call, out: dict(passed=True)
@@ -344,6 +598,8 @@ class Contracts(unittest.TestCase):
             row = dict(name=name, status='passed', cleanupPassed=True, work={})
             if not initialize:
                 row['work']['metrics'] = self.metrics(factor if args.role == 'candidate' else 1)
+                if name in ('A4', 'B4'):
+                    row['work']['explain'] = self.plan_rows(args.role)
             if invoke_work:
                 self._running_binary = args.binary
                 out = args.out / name
@@ -365,7 +621,14 @@ class Contracts(unittest.TestCase):
             return p.CLIENTS[Path(path).name] if Path(path).name in p.CLIENTS else original_digest(path)
         stack = ExitStack()
         self.addCleanup(stack.close)
-        for target, value in [('load_module', lambda name, path: harness if 'harness' in name else SimpleNamespace(inspect_instance_process=lambda *a: 123) if 'sdb' in name else SCORER), ('source_identity', lambda source, commit: dict(commit=commit, tree=TREE)), ('verify_driver', lambda *a: {}), ('verify_loader', lambda *a: {}), ('digest', digest), ('benchmark_work', lambda args, *a: lambda call, out: dict(passed=True, metrics=self.metrics(factor if args.role == 'candidate' else 1)))]:
+        def benchmark(args, baseline, scorer, final):
+            def execute(call, out):
+                result = dict(passed=True, metrics=self.metrics(factor if args.role == 'candidate' else 1))
+                if final:
+                    result['explain'] = self.plan_rows(args.role)
+                return result
+            return execute
+        for target, value in [('load_module', lambda name, path: harness if 'harness' in name else SimpleNamespace(inspect_instance_process=lambda *a: 123) if 'sdb' in name else SCORER), ('source_identity', lambda source, commit: dict(commit=commit, tree=TREE)), ('verify_driver', lambda *a: {}), ('verify_loader', lambda *a: {}), ('digest', digest), ('benchmark_work', benchmark)]:
             stack.enter_context(patch.object(p, target, side_effect=value))
         stack.enter_context(patch.object(p.time, 'sleep'))
         if invoke_work:
@@ -381,13 +644,17 @@ class Contracts(unittest.TestCase):
         plan, report, calls = self.fake_validation(factor=1.1)
         p.validate(self.args, plan, report)
         self.assertEqual(calls[:5], [(n, 'baseline', True) for n in p.CASES])
-        self.assertEqual(calls[5:11], [(n, 'candidate', True) for n in p.CASES + (p.REGRESSION,)])
-        self.assertEqual(calls[11:], [(n, r, False) for n, r in p.SCHEDULE])
+        self.assertEqual(calls[5:12], [(n, 'candidate', True) for n in p.selected_cases('candidate')])
+        self.assertEqual(calls[12:], [(n, r, False) for n, r in p.SCHEDULE])
         self.assertEqual(report['status'], 'valid_calibration_completed')
         self.assertEqual(report['sameHostPerformance']['classification'], 'regression')
-        self.assertEqual(len(report['instances']), 19)
-        self.assertEqual(self.ports, list(range(7300, 7319)))
-        self.assertEqual(len(set(self.ports)), 19)
+        self.assertEqual(len(report['instances']), 20)
+        self.assertEqual(self.ports, list(range(7300, 7320)))
+        self.assertEqual(len(set(self.ports)), 20)
+        self.assertEqual(report['planAssertions'], {name: dict(role=role, queries=self.plan_rows(role))
+            for name, role in (('A4', 'baseline'), ('B4', 'candidate'))})
+        self.assertEqual([(call.args[0].role, call.args[-1]) for call in p.benchmark_work.call_args_list],
+                         [(role, name in ('A4', 'B4')) for name, role in p.SCHEDULE])
         self.assertTrue(report['allOfficialInputsUnchanged'])
 
     def test_validate_stops_after_failed_or_unclean_round_preserves_evidence(self):
@@ -396,10 +663,46 @@ class Contracts(unittest.TestCase):
                 plan, report, calls = self.fake_validation(fail_at='B1', cleanup=cleanup)
                 with self.assertRaises(RuntimeError):
                     p.validate(self.args, plan, report)
-                self.assertEqual([row[0] for row in calls[11:]], ['A1', 'B1'])
+                self.assertEqual([row[0] for row in calls[12:]], ['A1', 'B1'])
                 saved = json.loads((self.root / 'report.json').read_text())
                 self.assertEqual(saved['roundVerdicts'][-1]['name'], 'B1')
                 self.assertNotIn('sameHostPerformance', saved)
+
+    def test_validate_plan_failure_preserves_partial_proof_and_cleanup_before_raise(self):
+        plan, report, calls = self.fake_validation()
+        original_run = self._fake_harness.run_instance.side_effect
+        def failed_plan(*arguments, **kwargs):
+            row = original_run(*arguments, **kwargs)
+            if arguments[2] == 'B4':
+                row['status'] = 'failed'
+                row['work'].update(passed=False, failureKind='untimed_plan_assertion_failure')
+                row['work']['explain']['control_score_projection'].update(
+                    passed=False, actualCalcRelevance=False, failureReason='scored control did not calculate relevance')
+            return row
+        self._fake_harness.run_instance.side_effect = failed_plan
+        with self.assertRaisesRegex(RuntimeError, 'Owned instance failed'):
+            p.validate(self.args, plan, report)
+        saved = json.loads((self.root / 'report.json').read_text())
+        self.assertEqual(len(saved['instances']), 20)
+        self.assertTrue(saved['instances'][-1]['cleanupPassed'])
+        self.assertEqual(saved['roundVerdicts'][-1]['status'], 'failed')
+        self.assertFalse(saved['planAssertions']['B4']['queries']['control_score_projection']['passed'])
+        self.assertIn('did not calculate', saved['planAssertions']['B4']['queries']['control_score_projection']['failureReason'])
+        self.assertIn('B4', saved['roundMetrics'])
+        self.assertNotIn('sameHostPerformance', saved)
+
+    def test_validate_requires_complete_final_role_plan_proof(self):
+        plan, report, calls = self.fake_validation()
+        original_run = self._fake_harness.run_instance.side_effect
+        def missing_plan(*arguments, **kwargs):
+            row = original_run(*arguments, **kwargs)
+            row['work'].pop('explain', None)
+            return row
+        self._fake_harness.run_instance.side_effect = missing_plan
+        with self.assertRaisesRegex(RuntimeError, 'actual-plan assertions are required'):
+            p.validate(self.args, plan, report)
+        self.assertEqual(len(calls), 20)
+        self.assertNotIn('sameHostPerformance', report)
 
     def test_validate_rejects_input_hash_mismatch_before_any_case(self):
         plan, report, calls = self.fake_validation(inputs=lambda source: {'official': 'changed'})
@@ -419,14 +722,14 @@ class Contracts(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(report['instances']), 1)
 
-    def test_original_benchmark_and_harness_are_unchanged(self):
+    def test_original_benchmark_native_runner_and_candidate_harness_are_pinned(self):
         protected = {
             'tools/benchmark/fts_large_bench.sh': '596ea5d1c0038e666b78aa94bef22d2dfb87ffc9e84dbc7e2a1da1f746424462',
             'tools/benchmark/fts_large_bench_gen.py': 'b0c816dd8211ac0471f60b72a37a3fb5c62580357a5b6d7ac95f5a8c2e3f143d',
             'tools/benchmark/fts_large_bench_score.py': 'bea52eb1c68d05693bb3ac5b910ab0e2fa0e70e01582f40466898ee1e2e3ef55',
             'tools/benchmark/fts_large_bench_setup.sql': '311826751df7f51ac45156fb4284aeca9bd9197370aceb88f4fb92832b458108',
             'tools/benchmark/fts_large_bench_baseline.json': 'f4e97eddb2e49c982b967fc8047f7cf37177eebe53d648f6746d85aacda91f0c',
-            p.PREFIX + 'fts_contest_validation.py': '0a0d0dd8d6651fa9082d66d2821bb9e5dd25fdd4c7955315c64229281c95a174',
+            p.PREFIX + 'fts_contest_validation.py': '93098702921142f731624c5133ab05f9236589dea90e35f54e8a3586e4159583',
             p.PREFIX + 'mysqltest_for_seekdb.py': 'fc7bb1cb8e10ab0c3fd68bade220caa69b7cda94f459ef7d9cdef2e431629b22',
             p.PREFIX + 'sdb.py': '53d88d4372e5534fbd37e17be3f418a2353efea648395f0ffb859926ae9eecd6',
         }
@@ -438,6 +741,19 @@ class Contracts(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(canonical).hexdigest(), expected)
                 crlf = canonical.replace(b'\n', b'\r\n')
                 self.assertEqual(hashlib.sha256(crlf.replace(b'\r\n', b'\n')).hexdigest(), expected)
+
+    def test_original_inputs_still_protects_every_original_official_file(self):
+        path = REPO / p.PREFIX / 'fts_contest_validation.py'
+        text = path.read_text(encoding='utf-8')
+        function = next(node for node in ast.parse(text).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'original_inputs')
+        original = ast.get_source_segment(text, function)
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+            '6bed5afc79e4d41afd206c3ba0025ecec1b2fc1bcfc0263ee655c88a2ca62d27')
+        harness = p.load_module('test_candidate_harness', path)
+        self.assertEqual(harness.CASES, p.selected_cases('candidate'))
+        self.assertEqual(p.selected_cases('baseline'), p.CASES)
+        self.assertEqual(p.REGRESSIONS, ('fts_index.tokenize_casefold_contract', 'fts_index.match_filter_only_contract'))
 
 
     def snapshot_fixture(self):
@@ -571,7 +887,7 @@ class Contracts(unittest.TestCase):
         plan, report, calls = self.fake_validation(invoke_work=True)
         p.validate(self.args, plan, report)
         self.assertEqual(report['status'], 'valid_calibration_completed')
-        self.assertEqual(len(calls), 19)
+        self.assertEqual(len(calls), 20)
         self.assertEqual(set(report['observedParameters']), {'cases', 'rounds'})
         for name, role in p.SCHEDULE:
             proof = json.loads((self.root / 'validation/rounds' / name / 'owned-process.json').read_text())
@@ -641,11 +957,16 @@ class Contracts(unittest.TestCase):
         path = self.report_file()
         path.rename(self.root / 'report.txt')
         captured = []
+        events = []
         def capture(command, output, *a, **kw):
             captured.append((command, kw))
+            events.append(Path(output).name)
             Path(output).write_text('{}' if Path(output).name == 'frozen-score.json' else 'benchmark completed')
             return dict(exitCode=0, childrenCleaned=True)
-        with patch.object(p.time, 'sleep'), patch.object(p, 'capture_group', side_effect=capture), patch.object(p, 'explain_queries', return_value={'exact': True}) as explain:
+        def plan(*arguments):
+            events.append('untimed_explain')
+            return {'exact': True}
+        with patch.object(p.time, 'sleep'), patch.object(p, 'capture_group', side_effect=capture), patch.object(p, 'explain_queries', side_effect=plan) as explain:
             row = p.benchmark_work(args, BASELINE, SCORER, True)(SimpleNamespace(port=7300), self.root)
         self.assertTrue(row['passed'])
         self.assertEqual(captured[0][0], ['bash', str(self.source / (p.BENCH + '.sh'))])
@@ -653,30 +974,224 @@ class Contracts(unittest.TestCase):
         self.assertNotIn('--allow-config-mismatch', captured[1][0])
         self.assertNotIn('--baseline', captured[1][0])
         explain.assert_called_once()
+        self.assertEqual(events, ['benchmark.log', 'frozen-score.json', 'untimed_explain'])
 
-    def test_explain_uses_exact_four_queries_and_preserves_partial_failure(self):
-        args = SimpleNamespace(source=REPO, role='candidate', obclient='/client')
-        captured = []
+    def test_nonfinal_benchmark_never_runs_plan_controls(self):
+        args = SimpleNamespace(workspace=self.source, binary=self.root / 'seekdb', obclient='/client', source=self.source, role='candidate', expected_sha=DRIVER)
+        self.report_file().rename(self.root / 'report.txt')
         def capture(command, output, *a, **kw):
-            captured.append(kw['stdin'])
-            Path(output).write_text('calc_relevance=false\n')
+            Path(output).write_text('{}')
             return dict(exitCode=0, childrenCleaned=True)
-        with patch.object(p, 'capture_group', side_effect=capture):
-            result = p.explain_queries(args, SimpleNamespace(port=7300), self.root, {})
-        queries = p.queries_from_benchmark(REPO / (p.BENCH + '.sh'))
-        self.assertEqual(captured, [(p.SESSION + 'EXPLAIN ' + sql + '\n').encode('utf-8') for sql in queries.values()])
-        self.assertEqual(list(result), list(queries))
-        for row in result.values():
-            self.assertEqual(row['calcRelevanceEvidence'], ['calc_relevance=false'])
-        def failed(command, output, *a, **kw):
-            Path(output).write_text('ERROR 1000')
-            return dict(exitCode=1, childrenCleaned=True)
-        with patch.object(p, 'capture_group', side_effect=failed):
-            with self.assertRaises(RuntimeError):
+        with patch.object(p.time, 'sleep'), patch.object(p, 'capture_group', side_effect=capture), patch.object(p, 'explain_queries') as explain:
+            result = p.benchmark_work(args, BASELINE, SCORER, False)(SimpleNamespace(port=7300), self.root)
+        self.assertTrue(result['passed'])
+        self.assertNotIn('explain', result)
+        explain.assert_not_called()
+
+    def test_plan_parser_requires_actual_single_operator_and_annotation(self):
+        for scored in (False, True):
+            for tree in ('  ', '\u2514\u2500'):
+                with self.subTest(scored=scored, tree=tree):
+                    text = self.plan_text(scored).replace('|1 |  TEXT', '|1 |' + tree + 'TEXT')
+                    result = p.plan_relevance(text)
+                    self.assertIs(result['actualCalcRelevance'], scored)
+                    self.assertEqual(result['scanId'], 1)
+                    self.assertEqual(len(result['calcRelevanceEvidence']), 1)
+
+    def test_plan_relevance_contract_preserves_implicit_ranked_limit(self):
+        for role in ('baseline', 'candidate'):
+            for name in p.QUERY_NAMES + p.PLAN_CONTROLS:
+                with self.subTest(role=role, query=name):
+                    self.assertIs(p.expected_plan_relevance(role, name),
+                        False if role == 'candidate' and name in ('query_cn', 'query_beng', 'query_mixed') else True)
+        with self.assertRaisesRegex(RuntimeError, 'role confusion'):
+            p.expected_plan_relevance('other', 'query_cn')
+        with self.assertRaisesRegex(RuntimeError, 'Unknown EXPLAIN query'):
+            p.expected_plan_relevance('candidate', 'unknown')
+
+    def test_plan_parser_accepts_existing_official_result_plan_format(self):
+        # Complete real repository plans, including Unicode tree glyphs and
+        # SORT/retrieval output ownership. These are not Actions-log fixtures.
+        path = REPO / 'tools/deploy/mysql_test/test_suite/fts_index/r/mysql/create_fts_index_afterward.result'
+        original = path.read_bytes()
+        sections = path.read_text(encoding='utf-8').split('EXPLAIN SELECT')[1:]
+        self.assertEqual(len(sections), 2)
+        for section, columns in zip(sections, ('b, fts_col_orders.c', 'c, fts_col_orders.b')):
+            with self.subTest(query=section.splitlines()[0]):
+                self.assertIn('TEXT RETRIEVAL SCAN', section)
+                self.assertIn('Outputs & filters:', section)
+                self.assertIn('  0 - output(', section)
+                parsed = p.plan_relevance(section)
+                self.assertEqual(parsed['scanId'], 1)
+                self.assertIs(parsed['actualCalcRelevance'], True)
+                self.assertEqual(parsed['calcRelevanceEvidence'], [
+                    "      calc_relevance=true, match_expr(MATCH(fts_col_orders.%s) AGAINST('aa')), " % columns])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_plan_parser_accepts_hash_verified_actual_actions_outputs(self):
+        fixtures = ACTUAL_ACTIONS_EXPLAINS['fixtures']
+        self.assertEqual([row['query'] for row in fixtures], list(p.QUERY_NAMES))
+        for row in fixtures:
+            with self.subTest(query=row['query']):
+                # The same original hash was recorded for A4 and B4.
+                self.assertEqual(hashlib.sha256(row['output'].encode('utf-8')).hexdigest(), row['sha256'])
+                parsed = p.plan_relevance(row['output'])
+                self.assertEqual(parsed['scanId'], 2 if row['query'] == 'query_limit' else 1)
+                self.assertIs(parsed['actualCalcRelevance'], True)
+                self.assertEqual(parsed['calcRelevanceEvidence'], [line for line in row['output'].splitlines()
+                                                                     if 'calc_relevance' in line])
+        limit = fixtures[-1]['output']
+        self.assertIn('|1 |└─SUBPLAN SCAN', limit)
+        self.assertIn('sort_keys([MATCH(docs.content)', limit)
+        # The real LIMIT parent is a SUBPLAN. Moving evidence onto that node
+        # must fail even though the table still names a retrieval scan.
+        misplaced = limit.replace('  2 - output([docs.id])', '  3 - output([docs.id])')
+        with self.assertRaises(RuntimeError):
+            p.plan_relevance(misplaced)
+
+    def test_plan_parser_rejects_missing_malformed_ambiguous_conflicting_evidence(self):
+        text = self.plan_text()
+        bad = ['', 'calc_relevance=false\n', text.replace('TEXT RETRIEVAL SCAN', 'TABLE SCAN'),
+            text.replace('|0 |SCALAR GROUP BY', '|0 |TEXT RETRIEVAL SCAN'),
+            text.replace('Outputs & filters:', 'Unknown:'), text + 'Outputs & filters:\n',
+            text.replace('calc_relevance=false', 'calc_relevance=unknown'),
+            text.replace('calc_relevance=false', 'calc_relevance=falseish'),
+            text.replace('calc_relevance=false', 'calc_relevance=0'),
+            text.replace('match_expr(MATCH(', 'other_expr(MATCH('),
+            text.replace('  1 - output(', '  2 - output('),
+            text.replace('|1 |  TEXT', '|2 |  TEXT'),
+            text.replace('      calc_relevance', '  2 - output([docs.id]),\n      calc_relevance'),
+            text + 'calc_relevance=true\n', text + 'calc_relevance=false\n',
+            text + '  1 - output([docs.id]), filter(nil)\n',
+            text.replace('calc_relevance=false', 'calc_relevance=false, calc_relevance=true')]
+        for index, value in enumerate(bad):
+            with self.subTest(index=index), self.assertRaises(RuntimeError):
+                p.plan_relevance(value)
+
+    def test_scored_controls_derive_exact_original_literal_and_schema(self):
+        path = REPO / (p.BENCH + '.sh')
+        before = p.digest(path)
+        original = p.queries_from_benchmark(path)
+        queries = p.plan_queries(original)
+        self.assertEqual(list(queries), list(p.QUERY_NAMES + p.PLAN_CONTROLS))
+        self.assertEqual({name: queries[name] for name in p.QUERY_NAMES}, original)
+        expression = original['query_cn'].split(' WHERE ', 1)[1][:-1]
+        self.assertEqual(queries['control_score_projection'],
+            'SELECT id, %s AS relevance FROM fts_large_bench.docs WHERE %s;' % (expression, expression))
+        self.assertEqual(queries['control_score_order'],
+            'SELECT id FROM fts_large_bench.docs WHERE %s ORDER BY %s DESC, id LIMIT 20;' % (expression, expression))
+        self.assertEqual(queries['control_nonzero_threshold'],
+            'SELECT COUNT(*) FROM fts_large_bench.docs WHERE %s > 0.5;' % expression)
+        self.assertEqual(p.digest(path), before)
+        for sql in (original['query_cn'].replace('fts_large_bench.docs', 'other.docs'),
+                    original['query_cn'].replace('COUNT(*)', 'id')):
+            with self.subTest(sql=sql), self.assertRaises(RuntimeError):
+                p.plan_queries(dict(original, query_cn=sql))
+
+    def test_explain_exact_official_queries_plus_controls_role_flags_and_hashes(self):
+        queries = p.plan_queries(p.queries_from_benchmark(REPO / (p.BENCH + '.sh')))
+        for role in ('baseline', 'candidate'):
+            args = SimpleNamespace(source=REPO, role=role, obclient='/client')
+            captured = []
+            def capture(command, output, *a, **kw):
+                captured.append((command, kw['stdin']))
+                scored = p.expected_plan_relevance(role, Path(output).name.removesuffix('-explain.log'))
+                Path(output).write_text(self.plan_text(scored), encoding='utf-8')
+                return dict(exitCode=0, childrenCleaned=True)
+            with self.subTest(role=role), patch.object(p, 'capture_group', side_effect=capture):
+                result = p.explain_queries(args, SimpleNamespace(port=7300), self.root, {})
+                self.assertEqual([value for _, value in captured],
+                    [(p.SESSION + 'EXPLAIN ' + sql + '\n').encode('utf-8') for sql in queries.values()])
+                self.assertEqual(list(result), list(queries))
+                for command, _ in captured:
+                    self.assertEqual(command[-4:-1], ['-N', '-B', '--raw'])
+                for name, row in result.items():
+                    expected = p.expected_plan_relevance(role, name)
+                    self.assertIs(row['actualCalcRelevance'], expected)
+                    self.assertIs(row['expectedCalcRelevance'], expected)
+                    self.assertTrue(row['passed'])
+                    self.assertEqual(row['role'], role)
+                    self.assertEqual(row['sqlSha256'], p.digest(self.root / (name + '-explain.sql')))
+                    self.assertEqual(row['outputSha256'], p.digest(self.root / (name + '-explain.log')))
+                self.assertEqual(json.loads((self.root / 'explain-result.json').read_text()), result)
+
+    def test_explain_role_confusion_never_starts_process(self):
+        with patch.object(p, 'capture_group') as capture:
+            with self.assertRaisesRegex(RuntimeError, 'role confusion'):
+                p.explain_queries(SimpleNamespace(role='other'), None, self.root, {})
+        capture.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'role confusion'):
+            p.selected_cases('other')
+
+    def test_explain_rejects_actual_role_mismatch_and_unscored_controls(self):
+        for role, failed_query, bad_scored in (('baseline', 'query_cn', False), ('candidate', 'query_cn', True),
+                ('candidate', 'query_limit', False), ('candidate', 'control_score_projection', False),
+                ('candidate', 'control_score_order', False), ('candidate', 'control_nonzero_threshold', False)):
+            args = SimpleNamespace(source=REPO, role=role, obclient='/client')
+            def capture(command, output, *a, **kw):
+                name = Path(output).name.removesuffix('-explain.log')
+                scored = bad_scored if name == failed_query else p.expected_plan_relevance(role, name)
+                Path(output).write_text(self.plan_text(scored))
+                return dict(exitCode=0, childrenCleaned=True)
+            with self.subTest(role=role, failed_query=failed_query), patch.object(p, 'capture_group', side_effect=capture):
+                with self.assertRaises(p.PlanEvidenceError) as raised:
+                    p.explain_queries(args, SimpleNamespace(port=7300), self.root, {})
+                results = raised.exception.results
+                self.assertEqual(list(results)[-1], failed_query)
+                self.assertFalse(results[failed_query]['passed'])
+                self.assertIn('differs from required', results[failed_query]['failureReason'])
+                self.assertEqual(json.loads((self.root / 'explain-result.json').read_text()), results)
+
+    def test_explain_failure_preserves_partial_output_hash_and_reason_before_exception(self):
+        args = SimpleNamespace(source=REPO, role='candidate', obclient='/client')
+        for process, output in ((dict(exitCode=1, childrenCleaned=True), 'ERROR 1000'),
+                (dict(exitCode=124, childrenCleaned=False, timedOut=True), self.plan_text()),
+                (dict(exitCode=0, childrenCleaned=False), self.plan_text()),
+                (dict(exitCode=0, childrenCleaned=1), self.plan_text()),
+                (dict(exitCode=False, childrenCleaned=True), self.plan_text()),
+                (dict(exitCode=0, childrenCleaned=True), 'calc_relevance=false\n'),
+                (dict(exitCode=0, childrenCleaned=True), self.plan_text() + 'calc_relevance=true\n')):
+            def capture(command, path, *a, **kw):
+                Path(path).write_text(output)
+                return dict(process)
+            with self.subTest(process=process, output=output[:30]), patch.object(p, 'capture_group', side_effect=capture) as capture_mock:
+                with self.assertRaises(p.PlanEvidenceError) as raised:
+                    p.explain_queries(args, SimpleNamespace(port=7300), self.root, {})
+                capture_mock.assert_called_once()
+                partial = json.loads((self.root / 'explain-result.json').read_text())
+                self.assertEqual(partial, raised.exception.results)
+                self.assertEqual(list(partial), ['query_cn'])
+                row = partial['query_cn']
+                self.assertFalse(row['passed'])
+                self.assertTrue(row['failureReason'])
+                self.assertEqual(row['outputSha256'], p.digest(self.root / 'query_cn-explain.log'))
+                self.assertEqual(row['sqlSha256'], p.digest(self.root / 'query_cn-explain.sql'))
+                self.assertEqual(row['calcRelevanceEvidence'], [line for line in output.splitlines() if 'calc_relevance' in line])
+
+    def test_explain_launch_error_preserves_failure(self):
+        args = SimpleNamespace(source=REPO, role='candidate', obclient='/client')
+        with patch.object(p, 'capture_group', side_effect=FileNotFoundError('client missing')):
+            with self.assertRaises(p.PlanEvidenceError) as raised:
                 p.explain_queries(args, SimpleNamespace(port=7300), self.root, {})
-        partial = json.loads((self.root / 'explain-result.json').read_text())
-        self.assertEqual(list(partial), ['query_cn'])
-        self.assertEqual(partial['query_cn']['exitCode'], 1)
+        row = raised.exception.results['query_cn']
+        self.assertIn('client missing', row['failureReason'])
+        self.assertFalse(row['passed'])
+        self.assertIsNone(row['outputSha256'])
+
+    def test_benchmark_plan_failure_retains_metrics_and_evidence_for_owned_cleanup(self):
+        args = SimpleNamespace(workspace=self.source, binary=self.root / 'seekdb', obclient='/client', source=self.source, role='candidate', expected_sha=DRIVER)
+        self.report_file().rename(self.root / 'report.txt')
+        results = {'query_cn': dict(passed=False, failureReason='missing actual plan')}
+        def capture(command, output, *a, **kw):
+            Path(output).write_text('{}')
+            return dict(exitCode=0, childrenCleaned=True)
+        with patch.object(p.time, 'sleep'), patch.object(p, 'capture_group', side_effect=capture), \
+                patch.object(p, 'explain_queries', side_effect=p.PlanEvidenceError('plan assertion failed', results)):
+            row = p.benchmark_work(args, BASELINE, SCORER, True)(SimpleNamespace(port=7300), self.root)
+        self.assertFalse(row['passed'])
+        self.assertEqual(row['failureKind'], 'untimed_plan_assertion_failure')
+        self.assertEqual(row['explain'], results)
+        self.assertEqual(row['metrics'], self.metrics())
 
     @unittest.skipUnless(sys.platform == 'linux', 'Real SIGTERM lifecycle requires Linux')
     def test_real_sigterm_cleans_owned_child_and_prevents_next_work(self):

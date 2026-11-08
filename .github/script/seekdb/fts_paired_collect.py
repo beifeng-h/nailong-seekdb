@@ -29,6 +29,38 @@ EXTENSIONS = {'.json', '.log', '.txt', '.sha256', '.sql', '.reject', '.result'}
 FORBIDDEN = re.compile(r'(^|[._-])(env|config|configuration|credential|credentials|secret|secrets|token|password|core|database|datafile)([._-]|$)', re.I)
 
 
+def owned_db_log(path, root):
+    parts = path.relative_to(root).parts
+    return (parts[:2] in (('validation', 'cases'), ('validation', 'rounds'))
+            and path.parent.name == 'db-log-tails'
+            and re.fullmatch(r'seekdb\.log(?:\.wf)?(?:\.[0-9]+)?(?:\.wf)?', path.name) is not None)
+
+
+def escaped_db_diagnostic(raw, budget):
+    """Escape sparse encoding damage, not arbitrary binary, within output caps.
+
+    Literal backslashes are doubled; invalid bytes become backslash-xNN text. The caller
+    records the selected raw bytes separately from the diagnostic representation.
+    """
+    text = raw.decode('utf-8', errors='surrogateescape')
+    invalid = sum(0xdc80 <= ord(ch) <= 0xdcff for ch in text)
+    if (len(raw) < 100 or invalid > min(4096, len(raw) // 100)
+            or any(ord(ch) < 32 and ch not in '\t\r\n' or ord(ch) == 127 for ch in text)):
+        raise ValueError('DB log is not predominantly text; refusing binary conversion')
+
+    def render(value):
+        value = value.decode('utf-8', errors='surrogateescape').replace('\\', '\\\\')
+        return re.sub('[\udc80-\udcff]', lambda m: '\\x%02x' % (ord(m[0]) - 0xdc00), value).encode('utf-8')
+
+    encoded = render(raw)
+    if len(encoded) > budget:
+        # Each raw byte expands to at most four ASCII bytes. Preserve a bounded
+        # suffix, never cut a diagnostic escape or silently exceed either cap.
+        raw = raw[-(budget // 4):] if budget >= 4 else b''
+        encoded = render(raw)
+    return raw, encoded
+
+
 def checked_path(path):
     """Reject links/reparse points in every component before resolving."""
     path = Path(os.path.abspath(path))
@@ -178,8 +210,7 @@ def collect(root, out):
             parts = path.relative_to(root).parts
             helper_text = parts[:2] in (('validation', 'cases'), ('validation', 'rounds')) and (
                 (path.parent.name == 'mysqltest-log' and path.name == 'timer') or
-                (path.parent.name == 'db-log-tails' and re.fullmatch(
-                    r'seekdb\.log(?:\.wf)?(?:\.[0-9]+)?(?:\.wf)?', path.name)))
+                owned_db_log(path, root))
             if (path.suffix.lower() not in EXTENSIONS and not helper_text) or any(FORBIDDEN.search(p) for p in parts):
                 raise ValueError('Not an allowed owned evidence name')
             evidence.append((path, st.st_size))
@@ -243,26 +274,45 @@ def collect(root, out):
                         raise ValueError('Unexpected binary evidence')
                     f.seek(original - size)
                     data = f.read(size)
-                # Text only. Reject disguised binary including ELF/NUL and invalid UTF-8.
-                if path.suffix.lower() != '.json':
+                    if len(data) != size:
+                        raise ValueError('Evidence changed during collection')
+                # ELF/NUL protections apply before any narrow text conversion.
+                if b'\x00' in data or data.startswith(b'\x7fELF'):
+                    raise ValueError('Unexpected binary evidence')
+                raw_selected = data
+                if path.suffix.lower() != '.json' and not owned_db_log(path, root):
                     # Our tail or an upstream bounded log can start inside a code point.
                     while data and data[0] & 0xc0 == 0x80:
                         data = data[1:]
                         size -= 1
-                data.decode('utf-8')
-                if b'\x00' in data or data.startswith(b'\x7fELF'):
-                    raise ValueError('Unexpected binary evidence')
-                if size == original and path.suffix.lower() == '.json':
+                try:
+                    data.decode('utf-8')
+                except UnicodeDecodeError:
+                    if not owned_db_log(path, root):
+                        raise
+                    selected, data = escaped_db_diagnostic(raw_selected, min(LOG_FILE_CAP, max(0, LOG_TOTAL_CAP - total)))
+                    size = len(selected)
+                    entry.update(converted=True, representation='UTF8_DIAGNOSTIC_BACKSLASH_ESCAPES',
+                                 inputTailBytes=len(raw_selected),
+                                 inputTailSha256=hashlib.sha256(raw_selected).hexdigest(),
+                                 conversion='Literal backslashes doubled; invalid bytes escaped as backslash-xNN',
+                                 diagnosticLoss='Raw byte representation changed; any omitted prefix is recorded by tailOffset',
+                                 selectedRawBytes=size, selectedRawSha256=hashlib.sha256(selected).hexdigest(),
+                                 escapedInvalidByteCount=sum(0xdc80 <= ord(ch) <= 0xdcff
+                                     for ch in selected.decode('utf-8', errors='surrogateescape')))
+                    if len(raw_selected) == original:
+                        entry['originalSha256'] = entry['inputTailSha256']
+                if path.suffix.lower() == '.json':
                     json.loads(data)
-                if regular(path).st_size != original or len(data) != size:
+                if regular(path).st_size != original:
                     raise ValueError('Evidence changed during collection')
-                entry.update(bytes=size, truncated=size != original, tailOffset=original - size,
+                entry.update(bytes=len(data), truncated=size != original, tailOffset=original - size,
                              sha256=hashlib.sha256(data).hexdigest())
-                if size or original == 0:
+                if data or original == 0:
                     add_bytes(tar, name, data)
                 else:
                     entry['omitted'] = 'Shared evidence payload cap exhausted'
-                total += size
+                total += len(data)
             except (OSError, ValueError, UnicodeError) as exc:
                 entry['error'] = str(exc)
                 error(name, exc)

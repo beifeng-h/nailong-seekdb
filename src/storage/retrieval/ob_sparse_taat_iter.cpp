@@ -113,6 +113,8 @@ int ObSRTaaTIterImpl::get_next_row()
   int64_t count = 0;
   if (OB_FAIL(get_next_rows(1, count))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
+    } else if (1 == count) {
+      ret = OB_SUCCESS;
     } else if (OB_UNLIKELY(count != 0)) {
       ret = OB_ERR_UNEXPECTED;
     }
@@ -125,6 +127,7 @@ int ObSRTaaTIterImpl::get_next_row()
 int ObSRTaaTIterImpl::get_next_rows(const int64_t capacity, int64_t &count)
 {
   int ret = OB_SUCCESS;
+  count = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(0 == capacity)) {
@@ -257,7 +260,7 @@ int ObSRTaaTIterImpl::fill_chunk_stores()
   } else {
     ObSEArray<ObExpr *, 2> exprs;
     if (OB_FAIL(exprs.push_back(iter_param_->id_proj_expr_))) {
-    } else if (iter_param_->need_project_relevance()
+    } else if (OB_NOT_NULL(iter_param_->relevance_expr_)
         && OB_FAIL(exprs.push_back(iter_param_->relevance_expr_))) {
     }
     ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
@@ -377,7 +380,7 @@ int ObSRTaaTIterImpl::load_next_hash_map()
 
     ObSEArray<ObExpr *, 2> exprs;
     if (OB_FAIL(exprs.push_back(iter_param_->id_proj_expr_))) {
-    } else if (iter_param_->need_project_relevance()
+    } else if (OB_NOT_NULL(iter_param_->relevance_expr_)
         && OB_FAIL(exprs.push_back(iter_param_->relevance_expr_))) {
     }
     ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
@@ -395,7 +398,7 @@ int ObSRTaaTIterImpl::load_next_hash_map()
       } else {
         ObDatum &id_datum = iter_param_->id_proj_expr_->locate_expr_datum(*eval_ctx);
         if (OB_FAIL(id.from_datum(id_datum))) {
-        } else if (iter_param_->need_project_relevance()) {
+        } else if (OB_NOT_NULL(iter_param_->relevance_expr_)) {
           ObDatum &relevance_datum = iter_param_->relevance_expr_->locate_expr_datum(*eval_ctx);
           cur_relevance = relevance_datum.get_double();
           if (OB_FAIL(map->get_refactored(id, last_relevance))) {
@@ -405,7 +408,7 @@ int ObSRTaaTIterImpl::load_next_hash_map()
           } else if (OB_FAIL(map->set_refactored(id, cur_relevance + last_relevance, 1 /* overwrite */))) {
           }
         } else {
-          if (OB_FAIL(map->set_refactored(id, 1.0, 0 /* overwrite */))) {
+          if (OB_FAIL(map->set_refactored(id, 1.0, 1 /* overwrite */))) {
           }
         }
       }
@@ -481,7 +484,8 @@ int ObSRTaaTIterImpl::project_results(const int64_t safe_capacity, int64_t &coun
       }
     }
   }
-  if (OB_SUCC(ret) && iter_param_->need_project_relevance()) {
+  if ((OB_SUCC(ret) || OB_ITER_END == ret) && count > 0
+      && iter_param_->need_project_relevance()) {
     relevance_expr->set_evaluated_projected(*eval_ctx);
   }
   return ret;
