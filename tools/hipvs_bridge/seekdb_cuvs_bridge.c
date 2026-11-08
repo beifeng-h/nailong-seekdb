@@ -21,7 +21,16 @@ typedef struct {
   pthread_mutex_t search_mutex;
   void *query_workspace, *neighbor_workspace, *distance_workspace;
   size_t query_capacity, neighbor_capacity, distance_capacity;
+  int workspace_failed;
 } sk_cuvs_index;
+
+/* Successful cuVS cleanup clears its thread-local last-error text. */
+static void sk_cuvs_report_error(const char* operation)
+{
+  const char* detail = cuvsGetLastErrorText();
+  fprintf(stderr, "[seekdb_cuvs] %s failed: %s\n",
+          operation, detail ? detail : "cuVS error text unavailable");
+}
 
 static void sk_cuvs_destroy_search_mutex(sk_cuvs_index* index)
 {
@@ -29,12 +38,16 @@ static void sk_cuvs_destroy_search_mutex(sk_cuvs_index* index)
   if (rc != 0) fprintf(stderr, "[seekdb_cuvs] search mutex destroy failed: %d\n", rc);
 }
 
-/* Match the bridge's best-effort teardown, but report workspace release errors. */
-static void sk_cuvs_release(sk_cuvs_index* index, void* buffer, size_t bytes)
+/* A failed deallocation does not establish whether the pointer is still live. */
+static int sk_cuvs_release(sk_cuvs_index* index, void* buffer, size_t bytes)
 {
   if (buffer && cuvsRMMFree(index->res, buffer, bytes) != CUVS_SUCCESS) {
-    fprintf(stderr, "[seekdb_cuvs] workspace release failed: %s\n", cuvsGetLastErrorText());
+    sk_cuvs_report_error("workspace release");
+    fprintf(stderr, "[seekdb_cuvs] workspace ownership unknown: %zu bytes; handle disabled\n", bytes);
+    index->workspace_failed = 1;
+    return 1;
   }
+  return 0;
 }
 
 static sk_cuvs_index* sk_cuvs_index_alloc(void)
@@ -67,10 +80,12 @@ static int sk_cuvs_reserve(sk_cuvs_index* index, void** buffer,
   if (bytes > *capacity) {
     void* replacement = NULL;
     if (cuvsRMMAlloc(index->res, &replacement, bytes) != CUVS_SUCCESS || !replacement) {
+      sk_cuvs_report_error("workspace allocation");
       sk_cuvs_release(index, replacement, bytes);
       rc = 1;
     } else {
-      sk_cuvs_release(index, *buffer, *capacity);
+      rc = sk_cuvs_release(index, *buffer, *capacity);
+      /* Track the known-owned replacement; never retry an ambiguous old free. */
       *buffer = replacement;
       *capacity = bytes;
     }
@@ -120,6 +135,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   int unlock_rc = 0;
   size_t query_bytes = 0, neighbor_bytes = 0, distance_bytes = 0;
   float* qd = 0; unsigned* nd = 0; float* dd = 0; cuvsCagraSearchParams_t sp = 0;
+  if (h->workspace_failed) { rc=19; goto done; }
   if (sk_cuvs_tensor_bytes(nq, h->dim, sizeof(float), &query_bytes)) { rc=10; goto done; }
   if (sk_cuvs_tensor_bytes(nq, topk, sizeof(unsigned), &neighbor_bytes)) { rc=11; goto done; }
   if (sk_cuvs_tensor_bytes(nq, topk, sizeof(float), &distance_bytes)) { rc=12; goto done; }
@@ -137,7 +153,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     qt.dl_tensor.shape=qs; qt.dl_tensor.strides=0; qt.dl_tensor.byte_offset=0;
     nt=qt; nt.dl_tensor.data=nd; nt.dl_tensor.dtype.code=kDLUInt; nt.dl_tensor.shape=nsh;
     dt=qt; dt.dl_tensor.data=dd; dt.dl_tensor.dtype.code=kDLFloat; dt.dl_tensor.shape=dsh;
-    if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { rc=14; goto done; }
+    if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { sk_cuvs_report_error("search params"); rc=14; goto done; }
     {
       size_t required_itopk = (size_t)topk * 4;
       if (required_itopk < 512) required_itopk = 512;
@@ -145,7 +161,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
       sp->search_width = 4;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
-    if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { rc=15; goto done; }
+    if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { sk_cuvs_report_error("CAGRA search"); rc=15; goto done; }
     if (cudaMemcpy(out_ids, nd, neighbor_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=16; goto done; }
     if (out_dist && cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault) != cudaSuccess) { rc=18; goto done; }
   }
@@ -156,7 +172,7 @@ done:
     fprintf(stderr, "[seekdb_cuvs] search mutex unlock failed: %d\n", unlock_rc);
     if (rc == 0) rc = 17;
   }
-  if (rc) fprintf(stderr, "[seekdb_cuvs] search rc=%d: %s\n", rc, cuvsGetLastErrorText());
+  if (rc) fprintf(stderr, "[seekdb_cuvs] search rc=%d\n", rc);
   return rc;
 }
 
@@ -178,6 +194,7 @@ int seekdb_cuvs_serialize(void* handle, const char* filename)
 {
   sk_cuvs_index* index = (sk_cuvs_index*)handle;
   if (!index || !filename) return 1;
+  if (index->workspace_failed) return 1;
   if (cuvsCagraSerialize(index->res, filename, index->idx, true) != CUVS_SUCCESS) {
     fprintf(stderr, "[seekdb_cuvs] serialize failed: %s\n", cuvsGetLastErrorText());
     return 1;

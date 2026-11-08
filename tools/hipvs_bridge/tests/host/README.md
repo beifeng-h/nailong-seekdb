@@ -20,13 +20,16 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 - Graph and search parameter values remain those of the frozen source in this model.
 - Allocation failures at each of the three growth positions return failure, leave the handle usable and balance all model allocations at teardown.
 - An injected distance-copy failure returns an error after the ID copy, and the handle remains usable for a later successful search.
+- Workspace-release failures before and after model deallocation are tested at query, neighbor and distance growth in 128 and 256 dimensions. They return failure before CAGRA, disable further search/serialization, and never retry the ambiguous pointer. Other known-owned buffers are each freed once. Model allocations left live by a failure before deallocation remain explicitly unknown; they are not counted as recovered GPU memory.
 - Deserialize begins with empty workspace, and rejected snapshot dimensions clean up model resources.
 - Invalid nonpositive shapes return before allocating or searching.
 - A deterministic IDs-copyback gate proves a second same-handle search blocks on the mutex. Both output arrays are checked. The separate distance-copy tail is not independently gated.
 
 The fixture returns an explicitly synthetic protocol, not nearest neighbors. Windows LLP64 has 32-bit `long`; the model deliberately uses `long*` tensor shapes to match the bridge arrays on this host. It does not validate real Linux DLPack layout or the Linux 64-bit `long` overflow boundary. The pthread double uses `std::mutex`, so this is not POSIX ABI validation. Concurrent destruction is outside the API contract; tests join callers before freeing.
 
-Separate-handle concurrency, serialize/search concurrency, real snapshot files, actual GPU streams, external deallocator failures and pthread initialization failures remain untested. The test does not establish Recall, peak VRAM, formal gates or a latency improvement.
+Separate-handle concurrency, serialize/search concurrency, real snapshot files, actual GPU streams, real deallocator failure semantics and pthread initialization failures remain untested. The test does not establish Recall, peak VRAM, formal gates or a latency improvement.
+
+The isolated `--release-failure-before` and `--release-failure-after` modes run only the new release-failure cases. The full `--require-reuse` suite includes both. Build the fixture against the previous bridge and these isolated modes fail because a release error returns success; the full frozen-comparison mode without arguments still runs the common plumbing checks.
 
 ## Frozen comparison
 

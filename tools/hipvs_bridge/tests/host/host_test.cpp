@@ -25,6 +25,11 @@ struct State {
  bool gate=false, entered=false, release=false, second_blocked=false;
  int attempts=0, cross_thread_api=0;
  bool fail_distance_copy=false; int d2h_copy_count=0;
+ int free_calls=0, free_fail_at=0, serialize_calls=0;
+ bool free_after_release=false;
+ void* failed_free=nullptr;
+ size_t failed_free_bytes=0;
+ std::map<void*,int> free_attempts;
  std::thread::id owner;
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
@@ -43,6 +48,8 @@ static void clean_state() {
  S.blocks.clear(); S.alloc_calls=S.fail_at=S.searches=0;
  S.gate=S.entered=S.release=S.second_blocked=false; S.attempts=S.cross_thread_api=0;
  S.fail_distance_copy=false; S.d2h_copy_count=0;
+ S.free_calls=S.free_fail_at=S.serialize_calls=0; S.free_after_release=false;
+ S.failed_free=nullptr; S.failed_free_bytes=0; S.free_attempts.clear();
 }
 int cuvsResourcesCreate(cuvsResources_t* p) { *p=new FakeResource; ++S.resources; return 0; }
 int cuvsResourcesDestroy(cuvsResources_t p) { delete p; --S.resources; return 0; }
@@ -63,7 +70,14 @@ int cuvsRMMAlloc(cuvsResources_t,void** p,size_t n) {
 }
 int cuvsRMMFree(cuvsResources_t,void* p,size_t n) {
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); auto it=S.blocks.find(p);
- CHECK(it!=S.blocks.end()); CHECK(it->second.live); CHECK(it->second.size==n); it->second.live=false; return 0;
+ CHECK(it!=S.blocks.end()); CHECK(++S.free_attempts[p]==1);
+ CHECK(it->second.live); CHECK(it->second.size==n);
+ if(++S.free_calls==S.free_fail_at) {
+  S.failed_free=p; S.failed_free_bytes=n;
+  if(S.free_after_release) it->second.live=false;
+  return CUVS_ERROR;
+ }
+ it->second.live=false; return 0;
 }
 int cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
  std::unique_lock<std::mutex> lk(S.mu); api_entry(); CHECK(kind==cudaMemcpyDefault);
@@ -87,7 +101,7 @@ int cuvsCagraSearch(cuvsResources_t,cuvsCagraSearchParams_t p,cuvsCagraIndex_t i
  for(long a=0;a<nq;++a) for(long b=0;b<topk;++b) { ids[a*topk+b]=static_cast<unsigned>(queries[a*dim])*10+static_cast<unsigned>(b); dist[a*topk+b]=queries[a*dim]+0.25f*b; }
  return 0;
 }
-int cuvsCagraSerialize(cuvsResources_t,const char*,cuvsCagraIndex_t i,bool dataset) { CHECK(dataset); snapshot_n=i->n; snapshot_dim=i->dim; return 0; }
+int cuvsCagraSerialize(cuvsResources_t,const char*,cuvsCagraIndex_t i,bool dataset) { ++S.serialize_calls; CHECK(dataset); snapshot_n=i->n; snapshot_dim=i->dim; return 0; }
 int cuvsCagraDeserialize(cuvsResources_t,const char*,cuvsCagraIndex_t i) { i->n=snapshot_n; i->dim=snapshot_dim; return 0; }
 int cuvsCagraIndexGetSize(cuvsCagraIndex_t i,int64_t* n) { *n=i->n; return 0; }
 int cuvsCagraIndexGetDims(cuvsCagraIndex_t i,int64_t* d) { *d=i->dim; return 0; }
@@ -160,9 +174,47 @@ static void serialized_copyback() {
  CHECK(entered); CHECK(attempted); CHECK(S.second_blocked); CHECK(S.cross_thread_api==0);
  S.gate=false; seekdb_cuvs_free(h); clean_state(); std::cout<<"PASS same-handle serialization includes D2H IDs copyback\n";
 }
+static void release_failure_disables_handle(bool after_release) {
+ for(long dim : {128L,256L}) for(int workspace=0;workspace<3;++workspace) {
+  clean_state();
+  std::vector<float> base(static_cast<size_t>(256*dim),0), query(static_cast<size_t>(2*dim),0);
+  query[0]=1; query[dim]=2;
+  unsigned ids[200]={}; float distances[200]={};
+  void* h=seekdb_cuvs_build(base.data(),256,dim); CHECK(h);
+  CHECK(seekdb_cuvs_search(h,query.data(),1,10,ids,distances)==0);
+  CHECK(live_blocks()==3);
+  S.free_after_release=after_release; S.free_fail_at=S.free_calls+(workspace==2?2:1);
+  const int searches=S.searches;
+  const int rc=seekdb_cuvs_search(h,query.data(),workspace==0?2:1,workspace==0?10:100,ids,distances);
+  const int allocs=S.alloc_calls;
+  const bool stopped_before_search=S.searches==searches;
+  const int later_rc=seekdb_cuvs_search(h,query.data(),1,10,ids,distances);
+  const int serialize_rc=seekdb_cuvs_serialize(h,"fake.disabled.snapshot");
+  const bool no_later_work=S.alloc_calls==allocs && S.searches==searches && S.serialize_calls==0;
+  seekdb_cuvs_free(h);
+  const size_t unknown_live=live_blocks();
+  const bool one_attempt=S.failed_free && S.free_attempts[S.failed_free]==1;
+  std::cout<<"release failure dim="<<dim<<" workspace="<<workspace<<" after_release="<<after_release
+   <<" rc="<<rc<<" later_rc="<<later_rc<<" serialize_rc="<<serialize_rc
+   <<" unknown_live_blocks="<<unknown_live<<" uncertain_bytes="<<S.failed_free_bytes<<"\n";
+  CHECK(rc!=0); CHECK(stopped_before_search); CHECK(later_rc!=0); CHECK(serialize_rc!=0);
+  CHECK(no_later_work); CHECK(one_attempt); CHECK(unknown_live==(after_release?0U:1U));
+  // Model-only unknown allocation; its real ownership cannot be inferred from an error.
+  for(auto& block:S.blocks) block.second.live=false;
+  clean_state();
+ }
+ std::cout<<"PASS release failure "<<(after_release?"after":"before")<<" deallocation / disabled handle / no retry\n";
+}
 int main(int argc,char** argv) {
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
- if(argc>1 && !strict) {std::cerr<<"usage: host_test [--require-reuse]\n"; return 2;}
- try {reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict); if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback();} std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;}
+ const bool before_only=argc==2 && std::string(argv[1])=="--release-failure-before";
+ const bool after_only=argc==2 && std::string(argv[1])=="--release-failure-after";
+ if(argc>1 && !strict && !before_only && !after_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after]\n"; return 2;}
+ try {
+  if(before_only || after_only) {release_failure_disables_handle(after_only); return 0;}
+  reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict);
+  if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback(); release_failure_disables_handle(false); release_failure_disables_handle(true);}
+  std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;
+ }
  catch(const std::exception& e) {std::cerr<<"FAIL "<<e.what()<<"\n"; return 1;}
 }
