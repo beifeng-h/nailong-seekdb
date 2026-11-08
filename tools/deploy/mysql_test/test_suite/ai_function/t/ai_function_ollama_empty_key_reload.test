@@ -1,0 +1,21 @@
+#owner: oceanbase
+#owner group: shenzhen
+connection default;
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_empty_key_model');
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ollama_empty_key_model', '{"type":"completion","model_name":"development-model"}');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint', '{"ai_model_name":"ollama_empty_key_model","scope":"all","url":"http://127.0.0.1:9/unreachable","access_key":"","provider":"ollama"}');
+--disable_query_log
+--disable_result_log
+--error 11114
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint', '{"provider":"OPENAI"}');
+--enable_result_log
+--enable_query_log
+select provider from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where endpoint_name = 'ollama_empty_key_endpoint';
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint', '{"provider":"Ollama"}');
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint', '{"provider":"OLLAMA"}');
+select provider from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where endpoint_name = 'ollama_empty_key_endpoint';
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ollama_empty_key_model');
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('ollama_empty_key_endpoint');
