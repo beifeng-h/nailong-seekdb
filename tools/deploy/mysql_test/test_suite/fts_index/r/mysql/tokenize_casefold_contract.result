@@ -1,1 +1,16 @@
-tokenize_casefold_contract_passed
+binary_preserves_case
+1
+utf8mb4_bin_folds_ascii
+1
+utf8mb4_general_ci_folds_ascii
+1
+utf8mb4_unicode_ci_folds_ascii
+1
+utf8mb4_bin_folds_unicode
+1
+empty_binary_has_no_tokens
+1
+binary_spaces_have_no_tokens
+1
+utf8mb4_spaces_have_no_tokens
+1
