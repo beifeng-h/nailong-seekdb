@@ -23,7 +23,7 @@ import traceback
 
 sys.dont_write_bytecode = True
 BASELINE = '5bce9e06d1281347ad61344e4b01fab9158c58a2'
-KERNEL = '8db524bb0a3a847b4eb384232bd576761e4075b3'
+KERNEL = '9647105cef007c57938a3139d58e39e6ca0d1b92'
 PREFIX = '.github/script/seekdb/'
 ALLOWED_DRIVER_PATHS = frozenset((
     '.github/workflows/fts-contest-validation.yml',

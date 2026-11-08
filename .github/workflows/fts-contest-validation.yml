@@ -29,7 +29,7 @@ jobs:
           printf 'PAIRED_ROOT=%s/seekdb-paired\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           git init "$GITHUB_WORKSPACE"
           git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 8db524bb0a3a847b4eb384232bd576761e4075b3; do
+          for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 9647105cef007c57938a3139d58e39e6ca0d1b92; do
             git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin "$sha"
             git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
           done
