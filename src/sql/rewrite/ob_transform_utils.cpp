@@ -12805,7 +12805,7 @@ bool ObTransformUtils::is_full_group_by(ObSelectStmt& stmt, ObSQLMode mode)
 }
 
 int ObTransformUtils::check_need_calc_match_score(ObExecContext *exec_ctx,
-                                                 ObDMLStmt *stmt,
+                                                 const ObDMLStmt *stmt,
                                                  ObMatchFunRawExpr *match_expr,
                                                  bool &need_calc,
                                                  ObIArray<ObExprConstraint> &constraints)
