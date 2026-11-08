@@ -114,6 +114,15 @@ def capture(command, output, cwd, timeout, stdin=None, env=None):
     return row
 
 
+def validate_loader(path, output, source):
+    """The real loader decides runtime dependencies; an optional SO is not a prerequisite."""
+    row = capture(['ldd', path], output, source, 30)
+    if row['exitCode'] or b'not found' in output.read_bytes():
+        show_log(output)
+        raise RuntimeError('Actual artifact loader prerequisite failed: ' + str(path))
+    return row
+
+
 @contextmanager
 def capture_fds(path):
     sys.stdout.flush()
@@ -310,28 +319,32 @@ def main():
     if any(case not in selected for case in CASES):
         raise RuntimeError('A required official case is excluded or not discoverable')
     args.binary = args.source / 'build_release/src/observer/seekdb'
-    library = args.binary.with_name('liboceanbase.so')
     args.obclient = args.source / 'deps/3rd/u01/obclient/bin/obclient'
     args.mysqltest = args.obclient.with_name('mysqltest')
-    artifacts = (args.binary, library, args.obclient, args.mysqltest)
+    # The official seekdb target links oceanbase_static. The separate
+    # pretest-only oceanbase SHARED EXCLUDE_FROM_ALL target is not required,
+    # even if a liboceanbase.so from another build happens to exist.
+    artifacts = (args.binary, args.obclient, args.mysqltest)
     for path in artifacts:
         if not path.is_file() or path.is_symlink():
             raise RuntimeError('Required exact built artifact missing or symlink: ' + str(path))
     args.out.mkdir(parents=True)
     ACTIVE_REPORT = args.out / 'report.json'
     report.update(status='running', startedUtc=utc(), originalInputHashes=pinned,
+        artifactContract='Official seekdb executable plus native SQL clients; no pretest-only shared-library assumption',
         builtArtifacts={str(path.relative_to(args.source)): dict(bytes=path.stat().st_size,
                         sha256=digest(path)) for path in artifacts}, results=[])
     write(ACTIVE_REPORT, report)
-    os.environ['LD_LIBRARY_PATH'] = ':'.join(map(str, [library.parent,
+    os.environ['LD_LIBRARY_PATH'] = ':'.join(map(str, [args.binary.parent,
         args.obclient.parent.parent / 'lib', args.obclient.parent.parent / 'lib64',
         args.source / 'deps/3rd/usr/local/oceanbase/deps/devel/lib',
         args.source / 'deps/3rd/usr/local/oceanbase/deps/devel/lib64'])) + ':' + os.environ.get('LD_LIBRARY_PATH', '')
     os.environ['PATH'] = str(args.obclient.parent) + os.pathsep + os.environ.get('PATH', '')
+    report['actualLoaders'] = {}
     for path in artifacts:
-        row = capture(['ldd', path], args.out / (path.name + '.ldd.log'), args.source, 30)
-        if row['exitCode'] or b'not found' in Path(row['output']).read_bytes():
-            raise RuntimeError('Actual artifact loader prerequisite failed: ' + str(path))
+        report['actualLoaders'][str(path.relative_to(args.source))] = validate_loader(
+            path, args.out / (path.name + '.ldd.log'), args.source)
+        write(ACTIVE_REPORT, report)
     for number, name in enumerate(CASES):
         report['results'].append(run_instance(args, native, name, 7200 + number,
             original_case(args, native, selected[name]), initialize=True))

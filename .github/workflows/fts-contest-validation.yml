@@ -147,9 +147,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          file build_release/src/observer/seekdb build_release/src/observer/liboceanbase.so | tee "$RUNNER_TEMP/seekdb-evidence/binaries.txt"
-          sha256sum build_release/src/observer/seekdb build_release/src/observer/liboceanbase.so | tee "$RUNNER_TEMP/seekdb-evidence/binaries.sha256"
-          stat -c '%s %n' build_release/src/observer/seekdb build_release/src/observer/liboceanbase.so | tee "$RUNNER_TEMP/seekdb-evidence/binary-sizes.txt"
+          # Official seekdb links oceanbase_static. The separate pretest-only
+          # oceanbase SHARED EXCLUDE_FROM_ALL target is neither built nor required.
+          test -f build_release/src/observer/seekdb
+          test -x build_release/src/observer/seekdb
+          file build_release/src/observer/seekdb | tee "$RUNNER_TEMP/seekdb-evidence/binaries.txt"
+          sha256sum build_release/src/observer/seekdb | tee "$RUNNER_TEMP/seekdb-evidence/binaries.sha256"
+          stat -c '%s %n' build_release/src/observer/seekdb | tee "$RUNNER_TEMP/seekdb-evidence/binary-sizes.txt"
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/build_release/src/observer:$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib:$GITHUB_WORKSPACE/deps/3rd/u01/obclient/lib64:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib:$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/deps/devel/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          ldd build_release/src/observer/seekdb | tee "$RUNNER_TEMP/seekdb-evidence/seekdb-ldd.txt"
+          if grep -F 'not found' "$RUNNER_TEMP/seekdb-evidence/seekdb-ldd.txt"; then exit 2; fi
 
       - name: Run original FTS mysqltest cases, native casefold regression and untouched official benchmark
         shell: bash
@@ -176,7 +183,7 @@ jobs:
             --validation "$RUNNER_TEMP/seekdb-fts-validation" \
             --out "$RUNNER_TEMP/seekdb-fts-artifact"
 
-      - name: Preserve the reusable build and FTS results for three days
+      - name: Preserve the complete seekdb executable and FTS evidence for three days
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -200,8 +207,10 @@ jobs:
             printf '### Seekdb FTS candidate validation\n\n'
             printf 'Exact checkout SHA: `%s`\n\n' "$GITHUB_SHA"
             printf 'Runner: standard public-repository `ubuntu-24.04`, two build jobs, no Actions cache.\n\n'
-            printf 'Five original FTS cases plus one added native casefold regression, each once; no unrelated AI suite.\n\n'
-            printf 'Official FTS benchmark, generator, baseline and scoring script are unchanged, with exact default settings.\n\n'
+            printf 'Planned SQL coverage: five original FTS cases plus one added native casefold regression, each once; no unrelated AI suite.\n\n'
+            printf 'Planned benchmark: unchanged official FTS benchmark, generator, baseline and scoring script, with exact default settings.\n\n'
+            printf 'Build, loader checks, SQL and benchmark outcomes are separate. An earlier failure can leave SQL/benchmark unexecuted; read the actual steps and report.\n\n'
+            printf 'Required build artifact: complete native seekdb executable, with SHA-256 and actual ldd evidence. The pretest-only shared-library target is not assumed or built.\n\n'
             printf 'This is development CI, not formal contest submission. The frozen-baseline score is informative across different hosts, not a same-host speedup.\n\n'
-            printf 'Candidate ELF and bounded owned logs: Actions artifact retained three days. Read its manifest for any truncation/cap failure.\n'
+            printf 'Candidate seekdb ELF and bounded owned logs: Actions artifact retained three days. ELF is complete or explicitly failed, never stripped/truncated. Read its manifest for log truncation or cap failures.\n'
           } >> "$GITHUB_STEP_SUMMARY"

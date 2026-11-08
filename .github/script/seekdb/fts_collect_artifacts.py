@@ -23,7 +23,7 @@ BUILD_EVIDENCE = frozenset(('checkout-sha.txt', 'configure.log', 'configuration.
     'build.log', 'native-fts-validation.log', 'dependency-source-before.sha256',
     'expected-clients.sha256', 'obclient-ldd.txt', 'mysqltest-ldd.txt',
     'obclient-version.txt', 'mysqltest-version.txt', 'binaries.txt',
-    'binaries.sha256', 'binary-sizes.txt', 'rust-versions.txt'))
+    'binaries.sha256', 'binary-sizes.txt', 'rust-versions.txt', 'seekdb-ldd.txt'))
 
 
 class LimitedWriter:
@@ -81,14 +81,17 @@ def main():
         maximumCombinedCompressedBytes=476 * MIB, binaryPolicy='FULL_BYTES_NO_STRIP_NO_TRUNCATION',
         binaryArchiveCapBytes=BINARY_ARCHIVE_CAP, logArchiveCapBytes=LOG_ARCHIVE_CAP,
         files=[], errors=[], archives=[])
-    # The seekdb launcher and shared library are both required to reuse the build.
-    binaries = [args.source / 'build_release/src/observer' / name
-                for name in ('seekdb', 'liboceanbase.so')]
+    # Official seekdb links oceanbase_static. liboceanbase.so is a separate
+    # pretest-only EXCLUDE_FROM_ALL target, not a runtime dependency or part of
+    # this artifact contract. Do not copy an unused SO merely because it exists.
+    binaries = [args.source / 'build_release/src/observer/seekdb']
+    manifest['requiredBuildArtifacts'] = ['build_release/src/observer/seekdb']
+    manifest['runtimeDependencyEvidence'] = 'build-evidence/seekdb-ldd.txt (actual ldd; missing dependencies fail validation)'
     try:
         if not all(path.is_file() and not path.is_symlink() for path in binaries):
-            raise RuntimeError('Complete candidate ELF pair absent; build may have failed')
+            raise RuntimeError('Required candidate seekdb ELF absent; build may have failed')
         if sum(path.stat().st_size for path in binaries) > BINARY_RAW_CAP:
-            raise RuntimeError('Candidate ELF pair exceeds 4 GiB raw admission limit')
+            raise RuntimeError('Candidate seekdb ELF exceeds 4 GiB raw admission limit')
         for path in binaries:
             with path.open('rb') as stream:
                 if stream.read(4) != b'\x7fELF':
