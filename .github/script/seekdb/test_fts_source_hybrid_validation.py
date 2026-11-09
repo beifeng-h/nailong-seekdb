@@ -205,8 +205,9 @@ class HybridContracts(unittest.TestCase):
     def token_rows(self, reverse=False):
         items = [{'alpha':2}, {'中文':1}]
         if reverse: items.reverse()
-        return ('\n'.join(name+'\t'+json.dumps(dict(tokens=items, doc_len=3), ensure_ascii=False)
-                for name in [p+'/'+n for p in ('ik','beng') for n,_ in h.TOKENIZE_CORPUS])+'\n').encode()
+        return ('\n'.join(p+'/'+n+'\t'+json.dumps(
+                dict(tokens=[], doc_len=0) if n in ('empty','null') else dict(tokens=items, doc_len=3),
+                ensure_ascii=False) for p in ('ik','beng') for n,_ in h.TOKENIZE_CORPUS)+'\n').encode()
 
     def test_tokenize_canonical_sorts_only_unordered_tokens_preserving_freq_doclen(self):
         a, b = h.canonical_tokenize(self.token_rows()), h.canonical_tokenize(self.token_rows(True))
@@ -238,9 +239,199 @@ class HybridContracts(unittest.TestCase):
         sql=h.tokenize_sql()
         self.assertEqual(sql.count('SELECT '), 2*len(h.TOKENIZE_CORPUS))
         self.assertEqual(sql.count('[{"output": "all"}]'), 2*len(h.TOKENIZE_CORPUS))
-        self.assertIn('TOKENIZE(NULL',sql)
+        self.assertEqual(sql.count('TOKENIZE(CAST(NULL AS CHAR CHARACTER SET utf8mb4)'),2)
+        self.assertNotIn('TOKENIZE(NULL',sql)
         self.assertNotIn('fts_large_bench',sql)
         self.assertIn(('Generic multilingual 中文 ABC123 alpha-beta. '*512).encode().hex(),sql)
+
+
+class NullableTokenizeMatrix(unittest.TestCase):
+    token_rows = HybridContracts.token_rows
+    # These tests are offline process-boundary simulations, not SQL execution.
+    def setUp(self):
+        HybridContracts.setUp(self)
+        self.args.obclient = self.source / 'never-executed-client'
+        self.args.workspace = self.source
+        self.args.binary = self.root / 'never-executed-server'
+        self.args.expected_sha = DRIVER
+        self.call = argparse.Namespace(port=7300)
+
+    def capture_fixture(self, command, output, cwd, timeout, *, env, stdin):
+        name = output.stem
+        specs = {n:(sql,code,raw) for n,sql,code,raw in h.tokenize_preflight()}
+        sql, code, raw = specs.get(name, (h.tokenize_sql(),0,self.token_rows()))
+        self.assertEqual(stdin, sql.encode('utf-8'))
+        self.assertEqual(command, [str(self.args.obclient),'-h127.0.0.1','-P7300',
+            '-uroot','-A','-N','-B','--raw','--default-character-set=utf8mb4'])
+        self.assertEqual(cwd,self.source)
+        self.assertEqual(timeout,120)
+        output.write_bytes(raw)
+        row = dict(output=str(output),exitCode=code,childrenCleaned=True,timedOut=False,
+            outputSha256=h.digest(output))
+        h.write_json(Path(str(output)+'.json'),row)
+        return row
+
+    def run_fixture(self, out=None):
+        with patch.object(h,'capture_group',side_effect=self.capture_fixture) as capture:
+            work=h.tokenize_work(self.args)(self.call,out or self.root)
+        return work,capture
+
+    def completed_fixture(self):
+        rows=[]
+        for role,commit in (('baseline',h.BASELINE),('candidate',DRIVER)):
+            out=self.root/'validation/untimed'/('tokenize-'+role)
+            out.mkdir(parents=True)
+            self.args.expected_sha=commit
+            work,_=self.run_fixture(out)
+            rows.append(dict(role=role,name='tokenize-'+role,status='passed',cleanupPassed=True,work=work))
+        return rows
+
+    def test_exact_sql_values_typed_null_preserves_16_original_cases(self):
+        lines=h.tokenize_sql().splitlines()
+        self.assertEqual(lines[0],h.legacy.SESSION.rstrip('\n'))
+        self.assertEqual(len(lines),17)
+        for line,(parser,name,value) in zip(lines[1:],
+                [(p,n,v) for p in ('ik','beng') for n,v in h.TOKENIZE_CORPUS]):
+            literal='CAST(NULL AS CHAR CHARACTER SET utf8mb4)' if value is None else \
+                "CONVERT(X'%s' USING utf8mb4)" % value.encode('utf-8').hex()
+            self.assertEqual(line,"SELECT '%s/%s', TOKENIZE(%s, '%s', '[{\"output\": \"all\"}]');" %
+                             (parser,name,literal,parser))
+        specs=h.tokenize_preflight()
+        self.assertEqual([n for n,*_ in specs],['tokenize-input','tokenize-negative-raw-null',
+            'tokenize-negative-binary','tokenize-negative-latin1'])
+        self.assertEqual(specs[0][1],h.legacy.SESSION+
+            "SELECT 'raw_null', NULL IS NULL, CHARSET(NULL);\n"
+            "SELECT 'typed_null', CAST(NULL AS CHAR CHARACTER SET utf8mb4) IS NULL, "
+            "CHARSET(CAST(NULL AS CHAR CHARACTER SET utf8mb4));\n"
+            "SELECT 'utf8_empty', CONVERT(X'' USING utf8mb4) IS NULL, CHARSET(CONVERT(X'' USING utf8mb4));\n")
+        for (_,sql,code,raw),expr,charset in zip(specs[1:],
+                ('NULL',"CONVERT(X'616263' USING binary)","CONVERT(X'616263' USING latin1)"),
+                ('binary','binary','latin1')):
+            self.assertEqual(sql,h.legacy.SESSION+"SELECT TOKENIZE(%s, 'ik', '[{\"output\": \"all\"}]');\n"%expr)
+            self.assertEqual(code,1)
+            self.assertEqual(raw,('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n'%charset).encode())
+
+    def test_five_separate_invocations_capture_exact_sql_and_raw_error_proofs(self):
+        work,capture=self.run_fixture()
+        self.assertTrue(work['passed'])
+        self.assertEqual(capture.call_count,5)
+        self.assertEqual([c.args[1].name for c in capture.call_args_list],
+            [n+'.log' for n,*_ in h.tokenize_preflight()]+['tokenize.log'])
+        self.assertNotIn('--force',capture.call_args_list[0].args[0])
+        for name,sql,_,raw in h.tokenize_preflight():
+            proof=work['preflight'][name]
+            self.assertEqual(proof['sqlSha256'],hashlib.sha256(sql.encode()).hexdigest())
+            self.assertEqual(proof['invocation']['outputSha256'],hashlib.sha256(raw).hexdigest())
+        self.assertEqual(work['canonical']['ik/null'],dict(tokens={},doc_len=0))
+        self.assertEqual(work['canonical']['beng/null'],dict(tokens={},doc_len=0))
+
+    def test_isolated_negative_never_accepts_generic_1235_or_process_failure(self):
+        original=self.capture_fixture
+        for mutate in ('wrong-error','wrong-line','extra-stdout','missing-LF','success','timeout','unclean','bool-exit'):
+            def capture(*args,**kwargs):
+                row=original(*args,**kwargs)
+                if args[1].stem=='tokenize-negative-raw-null':
+                    if mutate in ('wrong-error','wrong-line','extra-stdout','missing-LF'):
+                        raw=args[1].read_bytes()
+                        raw={'wrong-error':raw.replace(b'ik with the binary',b'other with the binary'),
+                            'wrong-line':raw.replace(b'line 2:',b'line 3:'),
+                            'extra-stdout':b'partial result\n'+raw,'missing-LF':raw[:-1]}[mutate]
+                        args[1].write_bytes(raw)
+                        row['outputSha256']=h.digest(args[1])
+                    else:
+                        row.update({'success':dict(exitCode=0),'timeout':dict(timedOut=True),
+                            'unclean':dict(childrenCleaned=False),'bool-exit':dict(exitCode=True)}[mutate])
+                return row
+            with self.subTest(mutate=mutate),patch.object(h,'capture_group',side_effect=capture) as mocked:
+                work=h.tokenize_work(self.args)(self.call,self.root)
+                self.assertFalse(work['passed'])
+                self.assertEqual(mocked.call_count,2)
+                self.assertNotIn('canonical',work)
+
+    def test_decoder_refuses_sql_null_wrong_empty_shape_and_bad_bytes(self):
+        raw=self.token_rows()
+        empty=b'{"tokens": [], "doc_len": 0}'
+        for bad in (raw[:-1],raw.replace(b'\n',b'\r\n'),raw+b'\n',b'\xff'+raw,
+                raw.replace(empty,b'NULL',1),raw.replace(empty,b'null',1),
+                raw.replace(empty,b'[]',1),raw.replace(empty,b'{"tokens": [], "doc_len": true}',1),
+                raw.replace(empty,b'{"tokens": [{"unexpected": 1}], "doc_len": 1}',1),
+                raw.replace(empty,b'{"tokens": [], "doc_len": 1}',1),
+                raw.replace(b'"alpha": 2',b'"": 2',1),
+                raw.replace(b'"doc_len": 3',b'"doc_len": 3, "doc_len": 3',1),
+                raw.replace(b'ik/empty',b'ik/null',1)):
+            with self.subTest(bad=bad[:100]),self.assertRaises((ValueError,UnicodeError)):
+                h.canonical_tokenize(bad)
+        lines=raw.splitlines(True)
+        with self.assertRaises(ValueError):h.canonical_tokenize(b''.join(lines[1:2]+lines[:1]+lines[2:]))
+
+    def test_completed_reopens_sql_outputs_negative_proofs_and_both_sources(self):
+        rows=self.completed_fixture()
+        self.assertTrue(h.tokenize_complete(rows,DRIVER,self.root))
+        for mutate in ('missing','hash','exit','output','sql','typed-null','no-negative','source','positive-sql','positive-SQL-NULL'):
+            altered=copy.deepcopy(rows)
+            directory=self.root/'validation/untimed/tokenize-candidate'
+            proof=altered[1]['work']['preflight']['tokenize-negative-raw-null']
+            changed=None
+            if mutate=='missing':altered[1]['work']['preflight'].pop('tokenize-negative-raw-null')
+            elif mutate=='hash':proof['sqlSha256']='0'*64
+            elif mutate=='exit':proof['invocation']['exitCode']=0
+            elif mutate=='no-negative':altered[1]['work'].pop('preflight')
+            elif mutate=='source':altered[1]['work']['sourceCommit']=h.BASELINE
+            else:
+                filename={'output':'tokenize-negative-raw-null.log','sql':'tokenize-negative-raw-null.sql',
+                    'typed-null':'tokenize-input.log','positive-sql':'tokenize.sql',
+                    'positive-SQL-NULL':'tokenize.log'}[mutate]
+                path=directory/filename;before=path.read_bytes();changed=(path,before)
+                if mutate=='positive-SQL-NULL':
+                    path.write_bytes(before.replace(b'{"tokens": [], "doc_len": 0}',b'NULL'))
+                    altered[1]['work']['invocation']['outputSha256']=h.digest(path)
+                else:path.write_bytes(before+b'extra')
+            with self.subTest(mutate=mutate):self.assertFalse(h.tokenize_complete(altered,DRIVER,self.root))
+            if changed:changed[0].write_bytes(changed[1])
+
+    def test_collector_keeps_all_probe_sql_raw_logs_and_invocations_only(self):
+        rows=self.completed_fixture()
+        h.write_json(self.root/'report.json',dict(status='invalid_calibration',untimedVerdicts=rows))
+        directory=self.root/'validation/untimed/tokenize-baseline'
+        (directory/'tokenize-negative-unapproved.log').write_bytes(b'not allowlisted')
+        manifest=h.collect_evidence(self.root,self.args.out)
+        found={x['path']:x for x in manifest['files']}
+        for role in ('baseline','candidate'):
+            for name,*_ in h.tokenize_preflight():
+                for suffix in ('.sql','.log','.log.json'):
+                    relative='validation/untimed/tokenize-'+role+'/'+name+suffix
+                    self.assertIn(relative,found)
+                    self.assertEqual(found[relative]['sha256'],h.digest(self.root/relative))
+        self.assertFalse(any('unapproved' in x for x in found))
+
+    def test_null_charset_mode_signatures_are_pinned_to_real_engine_source(self):
+        # Original A and archived B3 have byte-identical versions of these files.
+        pins={
+            'src/sql/engine/expr/ob_expr_tokenize.cpp':'c722685d91119a41ca1f1e5cdbd047b612c1932f26a6ff2aef25adfc9cb169af',
+            'src/sql/engine/expr/ob_expr_cast.cpp':'ae09302d045cc855daa79e972ece11e57d232e909f30d427e97b3cbb03b9082e',
+            'src/sql/engine/expr/ob_expr_collation.cpp':'6c0fce50d3e7632ff34a15ec8255410460f6dfb7c45c28b5748c268ac55bafde',
+            'src/sql/engine/expr/ob_datum_cast.cpp':'16539d9fc39081f897168b88456afd0522cb401dff1e0e6cf5cf775bc080bba4',
+            'src/sql/parser/sql_parser_mysql_mode.y':'edcba6fc1f2349c048855db077a369891393564af23ec34b87e4315613c03b85',
+            'src/storage/fts/dict/ob_gen_dic_loader.cpp':'e652616500baea120c1b1fd2dde738147a464c1837ca3923120593e5195017ef',
+            'src/storage/fts/ob_fts_parser_helper.cpp':'deef82c8ce2e0fd123d823bb91b784f99f6d4e92998838f98c4438880308f11c'}
+        for path,digest in pins.items():self.assertEqual(h.digest(REPO/path),digest)
+        expr=(REPO/'src/sql/engine/expr/ob_expr_tokenize.cpp').read_text()
+        self.assertIn('param_num < 1 || param_num > 3',expr)
+        self.assertIn('param.fulltext_ = ObString::make_empty_string();',expr)
+        self.assertIn('param.meta_.set_collation_type(expr.args_[0]->obj_meta_.get_collation_type());',expr)
+        self.assertIn('param.try_load_dictionary_for_ik()',expr)
+        self.assertIn('ObCharset::charset_type_by_coll(meta_.get_collation_type())',expr)
+        self.assertIn('0 != param.fulltext_.length()',expr)
+        self.assertIn('tokenize_helper.make_detail_json(token_map, doc_len, result)',expr)
+        self.assertIn('case_compare("ALL")',expr)
+        self.assertIn('cast func of null -> xxx is cast_eval_arg',
+            (REPO/'src/sql/engine/expr/ob_datum_cast.cpp').read_text())
+        self.assertIn('expr.args_[0]->datum_meta_.get_cs_type()',
+            (REPO/'src/sql/engine/expr/ob_expr_collation.cpp').read_text())
+        self.assertIn('| CHARACTER opt_string_length_i_v2 charset_key charset_name',
+            (REPO/'src/sql/parser/sql_parser_mysql_mode.y').read_text())
+        self.assertIn('case ObCharsetType::CHARSET_UTF8MB4:',
+            (REPO/'src/storage/fts/dict/ob_gen_dic_loader.cpp').read_text())
 
 
 class HybridPreparationFilesystem(unittest.TestCase):

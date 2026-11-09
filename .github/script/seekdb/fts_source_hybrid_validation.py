@@ -700,6 +700,8 @@ def collect_evidence(root, out):
              'original-run-case.log', 'original-result-diff.log', 'supplemental-plan-compatibility.json',
              'benchmark.log', 'benchmark.log.json', 'report.txt', 'frozen-score.json',
              'frozen-score.json.json', 'explain-result.json', 'tokenize.sql', 'tokenize.log', 'tokenize.log.json', 'tokenize-canonical.json'}
+    names.update(name + suffix for name, _, _, _ in tokenize_preflight()
+                 for suffix in ('.sql', '.log', '.log.json'))
     names.update(name + suffix for name in QUERY_NAMES + PLAN_CONTROLS
                  for suffix in ('-explain.sql', '-explain.log', '-explain.log.json'))
     for directory in instances:
@@ -827,11 +829,40 @@ TOKENIZE_CORPUS = (
     ('long', ('Generic multilingual 中文 ABC123 alpha-beta. ' * 512)))
 
 
+# CAST changes the expression type/collation, not its SQL NULL datum. Bare NULL
+# has binary collation; IK loads its charset-specific dictionary even for NULL.
+TOKENIZE_UTF8_NULL = 'CAST(NULL AS CHAR CHARACTER SET utf8mb4)'
+
+
+def tokenize_preflight():
+    """Separate real invocations: prove NULL/type, then exact expected errors.
+
+    A negative is never mixed into the 16 successful ALL-mode corpus queries.
+    Source: ob_expr_tokenize.cpp parse_fulltext/try_load_dictionary_for_ik and
+    ob_gen_dic_loader.cpp gen_dic_loader (only CHARSET_UTF8MB4 supports IK).
+    """
+    sql = legacy.SESSION + (
+        "SELECT 'raw_null', NULL IS NULL, CHARSET(NULL);\n"
+        "SELECT 'typed_null', %s IS NULL, CHARSET(%s);\n"
+        "SELECT 'utf8_empty', CONVERT(X'' USING utf8mb4) IS NULL, "
+        "CHARSET(CONVERT(X'' USING utf8mb4));\n") % (TOKENIZE_UTF8_NULL, TOKENIZE_UTF8_NULL)
+    result = [('tokenize-input', sql, 0,
+               b'raw_null\t1\tbinary\ntyped_null\t1\tutf8mb4\nutf8_empty\t0\tutf8mb4\n')]
+    for name, expression, charset in (
+            ('raw-null', 'NULL', 'binary'),
+            ('binary', "CONVERT(X'616263' USING binary)", 'binary'),
+            ('latin1', "CONVERT(X'616263' USING latin1)", 'latin1')):
+        sql = legacy.SESSION + "SELECT TOKENIZE(%s, 'ik', '[{\"output\": \"all\"}]');\n" % expression
+        error = ('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n' % charset).encode('ascii')
+        result.append(('tokenize-negative-' + name, sql, 1, error))
+    return tuple(result)
+
+
 def tokenize_sql():
     statements = [legacy.SESSION]
     for parser in ('ik', 'beng'):
         for name, value in TOKENIZE_CORPUS:
-            literal = 'NULL' if value is None else "CONVERT(X'%s' USING utf8mb4)" % value.encode('utf-8').hex()
+            literal = TOKENIZE_UTF8_NULL if value is None else "CONVERT(X'%s' USING utf8mb4)" % value.encode('utf-8').hex()
             statements.append("SELECT '%s/%s', TOKENIZE(%s, '%s', '[{\"output\": \"all\"}]');\n" %
                               (parser, name, literal, parser))
     return ''.join(statements)
@@ -846,48 +877,66 @@ def canonical_tokenize(raw):
                 raise ValueError('Duplicate JSON key in TOKENIZE output')
             result[key] = value
         return result
+    if not raw.endswith(b'\n') or b'\r' in raw or b'\0' in raw:
+        raise ValueError('TOKENIZE output must be complete LF-delimited UTF-8 rows')
     rows = {}
-    for line in raw.decode('utf-8', errors='strict').splitlines():
+    for line in raw.decode('utf-8', errors='strict')[:-1].split('\n'):
         name, data = line.split('\t')
         if name in rows:
             raise ValueError('Duplicate TOKENIZE case')
-        if data == 'NULL':
-            value = None
-        else:
-            value = json.loads(data, object_pairs_hook=pairs)
-            if (not isinstance(value, dict) or set(value) != {'tokens', 'doc_len'}
-                    or type(value['doc_len']) is not int or value['doc_len'] < 0
-                    or not isinstance(value['tokens'], list)):
-                raise ValueError('Unexpected ALL-mode TOKENIZE output shape')
-            tokens = {}
-            for item in value['tokens']:
-                if not isinstance(item, dict) or len(item) != 1:
-                    raise ValueError('Unexpected TOKENIZE frequency record')
-                token, frequency = next(iter(item.items()))
-                if not isinstance(token, str) or type(frequency) is not int or frequency <= 0 or token in tokens:
-                    raise ValueError('Ambiguous TOKENIZE token/frequency')
-                tokens[token] = frequency
-            value = dict(tokens=dict(sorted(tokens.items())), doc_len=value['doc_len'])
+        value = json.loads(data, object_pairs_hook=pairs)
+        if (not isinstance(value, dict) or set(value) != {'tokens', 'doc_len'}
+                or type(value['doc_len']) is not int or value['doc_len'] < 0
+                or not isinstance(value['tokens'], list)):
+            raise ValueError('Unexpected ALL-mode TOKENIZE output shape')
+        tokens = {}
+        for item in value['tokens']:
+            if not isinstance(item, dict) or len(item) != 1:
+                raise ValueError('Unexpected TOKENIZE frequency record')
+            token, frequency = next(iter(item.items()))
+            if not isinstance(token, str) or not token or type(frequency) is not int or frequency <= 0 or token in tokens:
+                raise ValueError('Ambiguous TOKENIZE token/frequency')
+            tokens[token] = frequency
+        value = dict(tokens=dict(sorted(tokens.items())), doc_len=value['doc_len'])
+        if name.rsplit('/', 1)[-1] in ('empty', 'null') and value != dict(tokens={}, doc_len=0):
+            raise ValueError('Empty and SQL NULL inputs require empty ALL-mode details')
         rows[name] = value
-    expected = {parser + '/' + name for parser in ('ik', 'beng') for name, _ in TOKENIZE_CORPUS}
-    if set(rows) != expected:
-        raise ValueError('Missing or unknown TOKENIZE case')
+    expected = [parser + '/' + name for parser in ('ik', 'beng') for name, _ in TOKENIZE_CORPUS]
+    if list(rows) != expected:
+        raise ValueError('Missing, unknown or out-of-order TOKENIZE case')
     return dict(sorted(rows.items()))
+
+
+def tokenize_invocation_ok(result, expected_exit):
+    return (isinstance(result, dict) and type(result.get('exitCode')) is int and result['exitCode'] == expected_exit
+            and result.get('childrenCleaned') is True and not result.get('timedOut'))
 
 
 def tokenize_work(args):
     def execute(call, out):
+        def invoke(name, sql):
+            (out / (name + '.sql')).write_text(sql, encoding='utf-8')
+            return capture_group([str(args.obclient), '-h127.0.0.1', '-P' + str(call.port),
+                '-uroot', '-A', '-N', '-B', '--raw', '--default-character-set=utf8mb4'],
+                out / (name + '.log'), args.source, 120, env=runtime_env(args.workspace, args.binary),
+                stdin=sql.encode('utf-8'))
+        preflight = {}
+        for name, sql, expected_exit, expected_output in tokenize_preflight():
+            result = invoke(name, sql)
+            passed = (tokenize_invocation_ok(result, expected_exit)
+                      and (out / (name + '.log')).stat().st_size == len(expected_output)
+                      and (out / (name + '.log')).read_bytes() == expected_output)
+            preflight[name] = dict(passed=passed, invocation=result,
+                sqlSha256=digest(out / (name + '.sql')))
+            if not passed:
+                return dict(passed=False, preflight=preflight)
         sql = tokenize_sql()
-        (out / 'tokenize.sql').write_text(sql, encoding='utf-8')
-        result = capture_group([str(args.obclient), '-h127.0.0.1', '-P' + str(call.port),
-            '-uroot', '-A', '-N', '-B', '--raw', '--default-character-set=utf8mb4'],
-            out / 'tokenize.log', args.source, 120, env=runtime_env(args.workspace, args.binary),
-            stdin=sql.encode('utf-8'))
-        if result.get('exitCode') != 0 or result.get('childrenCleaned') is not True:
-            return dict(passed=False, invocation=result)
+        result = invoke('tokenize', sql)
+        if not tokenize_invocation_ok(result, 0):
+            return dict(passed=False, invocation=result, preflight=preflight)
         data = canonical_tokenize((out / 'tokenize.log').read_bytes())
         write_json(out / 'tokenize-canonical.json', data)
-        return dict(passed=True, invocation=result, canonical=data,
+        return dict(passed=True, invocation=result, preflight=preflight, canonical=data,
             sqlSha256=digest(out / 'tokenize.sql'), canonicalSha256=digest(out / 'tokenize-canonical.json'),
             kind='independent_untimed_generic_corpus_not_official', sourceCommit=args.expected_sha)
     return execute
@@ -895,28 +944,48 @@ def tokenize_work(args):
 
 def tokenize_complete(rows, driver, root):
     if (not isinstance(rows, list) or len(rows) != 2
+            or any(not isinstance(r, dict) or not isinstance(r.get('work'), dict) for r in rows)
             or [(r.get('role'), r.get('name')) for r in rows] !=
                [('baseline', 'tokenize-baseline'), ('candidate', 'tokenize-candidate')]
             or any(r.get('status') != 'passed' or r.get('cleanupPassed') is not True
                    or r.get('work', {}).get('passed') is not True for r in rows)):
         return False
     works = [row['work'] for row in rows]
+    def checked_output(directory, name, sql, invocation, expected_exit):
+        path = directory / (name + '.log')
+        sql_path = directory / (name + '.sql')
+        for target, cap in ((path, 2 * 1024 ** 2), (sql_path, 1024 ** 2)):
+            no_symlinks(target)
+            info = target.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > cap:
+                raise ValueError('Unsafe or oversized TOKENIZE evidence')
+        if (not isinstance(invocation, dict) or sql_path.read_bytes() != sql.encode('utf-8')
+                or invocation.get('output') != str(path)
+                or not tokenize_invocation_ok(invocation, expected_exit)
+                or invocation.get('outputSha256') != digest(path)):
+            raise ValueError('TOKENIZE SQL/invocation/output proof mismatch')
+        return path.read_bytes()
     sql_sha = hashlib.sha256(tokenize_sql().encode('utf-8')).hexdigest()
     try:
         for row, work in zip(rows, works):
             role = row['role']
-            invocation = work.get('invocation', {})
-            path = root / 'validation/untimed' / ('tokenize-' + role) / 'tokenize.log'
-            no_symlinks(path)
-            info = path.stat()
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 2 * 1024 ** 2
-                    or invocation.get('output') != str(path) or invocation.get('exitCode') != 0
-                    or type(invocation.get('exitCode')) is not int or invocation.get('childrenCleaned') is not True
-                    or invocation.get('timedOut') or invocation.get('outputSha256') != digest(path)
-                    or work.get('sourceCommit') != (BASELINE if role == 'baseline' else driver)
+            directory = root / 'validation/untimed' / ('tokenize-' + role)
+            raw = checked_output(directory, 'tokenize', tokenize_sql(), work.get('invocation', {}), 0)
+            probes = work.get('preflight', {})
+            if not isinstance(probes, dict) or set(probes) != {spec[0] for spec in tokenize_preflight()}:
+                return False
+            for name, sql, expected_exit, expected_output in tokenize_preflight():
+                proof = probes[name]
+                if not isinstance(proof, dict):
+                    return False
+                output = checked_output(directory, name, sql, proof.get('invocation', {}), expected_exit)
+                if (proof.get('passed') is not True or output != expected_output
+                        or proof.get('sqlSha256') != hashlib.sha256(sql.encode('utf-8')).hexdigest()):
+                    return False
+            if (work.get('sourceCommit') != (BASELINE if role == 'baseline' else driver)
                     or work.get('kind') != 'independent_untimed_generic_corpus_not_official'
                     or work.get('sqlSha256') != sql_sha
-                    or work.get('canonical') != canonical_tokenize(path.read_bytes())):
+                    or work.get('canonical') != canonical_tokenize(raw)):
                 return False
             serialized = (json.dumps(work['canonical'], indent=2, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
             if work.get('canonicalSha256') != hashlib.sha256(serialized).hexdigest():
