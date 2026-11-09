@@ -22,6 +22,8 @@ cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" /c "%SOU
 if errorlevel 1 goto failure
 cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\src\development_main.cpp" page_store.obj database.obj sql_parser.obj sql_executor.obj development_protocol.obj /Fe:minivectordb_development_server.exe
 if errorlevel 1 goto failure
+cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\tests\serialization_tests.cpp" page_store.obj database.obj sql_parser.obj sql_executor.obj development_protocol.obj /Fe:serialization_tests.exe
+if errorlevel 1 goto failure
 cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\tests\storage_tests.cpp" page_store.obj /Fe:storage_tests.exe
 if errorlevel 1 goto failure
 cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\tests\storage_fault_driver.cpp" page_store.obj /Fe:storage_fault_driver.exe

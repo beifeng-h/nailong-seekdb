@@ -1,5 +1,7 @@
 #include "minivectordb/development_protocol.hpp"
 
+#include <array>
+#include <charconv>
 #include <iomanip>
 #include <istream>
 #include <locale>
@@ -7,6 +9,19 @@
 #include <type_traits>
 
 namespace minivectordb::development {
+
+namespace {
+
+void write_floating(std::ostream& output, double value) {
+  std::array<char, 64> buffer{};
+  const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
+                                   std::chars_format::scientific, static_cast<int>(output.precision()));
+  if (result.ec != std::errc{}) throw std::runtime_error("Cannot format floating-point value");
+  output.write(buffer.data(), static_cast<std::streamsize>(result.ptr - buffer.data()));
+  output << std::defaultfloat;
+}
+
+}  // namespace
 
 void write_string(std::ostream& output, std::string_view value) {
   constexpr char hex[] = "0123456789abcdef";
@@ -27,11 +42,11 @@ void write_value(std::ostream& output, const SqlValue& cell) {
       output << '[';
       for (std::size_t i = 0; i < value.size(); ++i) {
         if (i != 0) output << ',';
-        output << std::scientific << value[i] << std::defaultfloat;
+        write_floating(output, value[i]);
       }
       output << ']';
     } else if constexpr (std::is_same_v<Current, std::int64_t>) output << value;
-    else output << std::scientific << value << std::defaultfloat;
+    else write_floating(output, value);
   }, cell);
 }
 

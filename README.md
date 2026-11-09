@@ -95,6 +95,11 @@ The executable retains the current SQL input line and serializes each output
 row directly. It does not accumulate the query result set. JSON integers
 preserve BIGINT values and vector cells contain the stored float32 values.
 
+Floating cells use `std::to_chars` with the callers' scientific precision of 17
+fractional digits and a fixed 64-byte formatting buffer. The byte regression
+checks finite double and float32 samples, signed zero, subnormals, numeric
+extremes and BIGINT bounds against the previous classic-locale formatting.
+
 The transport and command handling are isolated in `development_protocol.cpp`.
 The SQL engine exposes its existing sink interface and explicit mode setter.
 The file-capture test driver shares the same scalar and vector serialization.
@@ -123,11 +128,11 @@ The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
 then installs build tools from the HTTPS `20261109T000000Z` Ubuntu package
 snapshot. APT archive signatures and HTTPS certificate verification remain
 enabled. The `development-checks` stage runs
-the six CTest programs, all 20 public fixture groups and the legacy schema
+the seven CTest programs, all 20 public fixture groups and the legacy schema
 fixture. Installed package versions are saved inside the image at
 `/build/installed-packages.tsv`.
 
-The independent Actions workflow builds the default image from an explicit Git
+The frozen M9 Actions workflow builds the default image from an explicit Git
 archive of source, tests and build files. It then runs the 95 public SQL
 statements through the default database entry with real container pipes,
 including process restarts and mode changes. It checks 1200 streamed ordered
@@ -148,8 +153,26 @@ unverified.
 
 The default image starts `/build/minivectordb_development_server` with the
 explicit development protocol and `/data`. Its `formal-ready` label remains
-`false`. The workflow builds without `--target`, inspects the actual final
+`false`. That M9 workflow builds without `--target`, inspects the actual final
 configuration, and exercises default startup without overriding the entrypoint.
+
+## Numeric serialization comparison
+
+The M10 workflow uses the runner's installed CMake and C++ compiler to build
+frozen M9 and the candidate with matching Release options. It runs the focused
+byte regression and process-contract test, followed by a same-program A/A
+control and three A/B/B/A blocks. This workflow uses direct processes and the
+existing development protocol.
+
+`tests/serialization_comparison.py` creates one fixed 10,000-row, 128-dimensional
+database, then separately measures `SELECT id` and `SELECT id, v`. It records
+external process wall time with stdout redirected to a file. Each result is
+checked outside the timing window against independently generated quarter-integer
+vectors, and all output bytes must match the frozen baseline. It also checks
+that query runs preserve the database file. Operating-system cache is retained.
+Results apply to these projection workloads and the measured environment.
+Filtered TopK scoring, physical device I/O and formal resource acceptance
+require their own measurements.
 
 ## Integration status
 
