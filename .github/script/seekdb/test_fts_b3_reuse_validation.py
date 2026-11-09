@@ -94,12 +94,14 @@ class ReuseContracts(unittest.TestCase):
         self.assertIn('NOT a claim of local artifact byte verification',
             (REPO/r.PREFIX/r.INVENTORY_FILE).read_text())
 
-    def test_original_production_modules_and_live_workflow_remain_exact_B3(self):
+    def test_original_production_modules_and_historical_workflow_remain_exact_B3(self):
         for name in r.legacy.DRIVER_FILES:
             path=r.PREFIX+name
             self.assertEqual((REPO/path).read_bytes(),r.git(REPO,'show',r.B3+':'+path))
-        path='.github/workflows/fts-contest-validation.yml'
-        self.assertEqual((REPO/path).read_bytes(),r.git(REPO,'show',r.B3+':'+path))
+        archived=REPO/r.PREFIX/'fixtures/fts-source-hybrid-b3-build.yml'
+        self.assertNotEqual(archived.parent, REPO/'.github/workflows')
+        self.assertEqual(r.digest(archived), '699080e5bb0229d9d982b286a74bba26c63a5b5ac9173a975911c90c8b61e2f4')
+        self.assertEqual(archived.read_bytes(),r.git(REPO,'show',r.B3+':.github/workflows/fts-contest-validation.yml'))
 
     def test_existing_75_inputs_and_three_native_diagnostics_remain_B3(self):
         self.assertEqual(len(h.inventory(REPO)),75)
@@ -327,7 +329,7 @@ class ReuseContracts(unittest.TestCase):
         self.assertFalse(r.completed(report,args,{}))
         out=io.StringIO()
         with redirect_stdout(out):r.present(report,args,None)
-        visible=json.loads(out.getvalue().split(' ',1)[1])
+        visible=json.loads(out.getvalue().splitlines()[0].split(' ',1)[1])
         self.assertIn('no performance claim',visible['result'])
 
     def test_current_A_B_and_client_loader_checks_are_bounded_and_fail_closed(self):

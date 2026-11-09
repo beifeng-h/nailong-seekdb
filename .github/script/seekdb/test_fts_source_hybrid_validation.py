@@ -1,4 +1,4 @@
-"""Offline contracts for the LIVE one-new-build hybrid workflow, separate from legacy proof.
+"""Offline contracts for the archived one-new-build B3 workflow, separate from legacy proof.
 
 No production compile, artifact download, preserved-ELF execution or SQL starts.
 """
@@ -26,7 +26,7 @@ import test_fts_plan_compatibility as proof_fixtures
 REPO = Path(__file__).resolve().parents[3]
 DRIVER = 'a' * 40
 TREE = 'b' * 40
-WORKFLOW = REPO / '.github/workflows/fts-contest-validation.yml'
+WORKFLOW = REPO / '.github/script/seekdb/fixtures/fts-source-hybrid-b3-build.yml'
 
 
 class HybridContracts(unittest.TestCase):
@@ -403,7 +403,7 @@ class HybridPreparationFilesystem(unittest.TestCase):
         self.assertEqual(args.out.read_bytes(), b'preserve conflicting file')
 
 
-class HybridWorkflowContracts(unittest.TestCase):
+class HistoricalHybridWorkflowContracts(unittest.TestCase):
     def workflow(self, text=None):
         # A strict projection of this workflow's indentation/schema, not a
         # general YAML parser. Full YAML parsing is a separate preparation check.
@@ -473,10 +473,10 @@ class HybridWorkflowContracts(unittest.TestCase):
             self.assertNotIn(forbidden,text)
         self.assertEqual(sum('runs-on' in x for x in workflow['jobs'].values()),1)
 
-    def test_live_hybrid_workflow_positive_contract(self):
+    def test_historical_hybrid_workflow_positive_contract(self):
         self.assert_contract(WORKFLOW.read_text())
 
-    def test_live_hybrid_rejects_extra_build_rebuild_A_wrong_artifact_expanded_permission_or_kernel(self):
+    def test_historical_hybrid_rejects_extra_build_rebuild_A_wrong_artifact_expanded_permission_or_kernel(self):
         text=WORKFLOW.read_text()
         for bad in (text.replace('--build build_release --target seekdb -j2','--build build_release --target seekdb -j2; cmake --build build_release --target seekdb -j2'),
                     text.replace('--role candidate','--role baseline'),text.replace('13621468966','13608812363'),
@@ -484,7 +484,7 @@ class HybridWorkflowContracts(unittest.TestCase):
                     text.replace(' fe876f8f805969970621a18a1cf812ff322fc78c','')):
             with self.assertRaises(AssertionError): self.assert_contract(bad)
 
-    def test_every_live_Bash_step_parses(self):
+    def test_every_historical_Bash_step_parses(self):
         for step in self.workflow()['jobs']['paired']['steps']:
             if 'run' in step:
                 result=subprocess.run(['bash','-n'],input=step['run'],text=True,capture_output=True)

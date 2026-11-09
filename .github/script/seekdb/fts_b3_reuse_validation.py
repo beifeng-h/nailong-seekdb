@@ -45,6 +45,8 @@ DRIVER_FILES = hybrid.DRIVER_FILES + ('fts_b3_reuse_validation.py', INVENTORY_FI
 ALLOWED_CHANGES = frozenset((
     PREFIX + 'fts_b3_reuse_validation.py', PREFIX + 'test_fts_b3_reuse_validation.py',
     PREFIX + INVENTORY_FILE, PREFIX + 'fixtures/fts-b3-reuse-proposal.yml',
+    PREFIX + 'fixtures/fts-source-hybrid-b3-build.yml',
+    PREFIX + 'test_fts_b3_live_workflow.py',
     PREFIX + 'fts_source_hybrid_validation.py', PREFIX + 'test_fts_source_hybrid_validation.py',
     '.github/workflows/fts-contest-validation.yml'))
 
@@ -339,10 +341,12 @@ def verify_driver(source, driver_sha, kernel_sha):
     # Existing proof/loader and all protected build/SQL/native inputs cannot change.
     if git(source, 'diff', '--name-only', B3, driver_sha, '--', *hybrid.PROTECTED_BUILD).strip():
         raise RuntimeError('Original build/dependency profile changed')
-    hybrid.inventory(source)
+    inputs = hybrid.inventory(source)
     return dict(driverCommit=driver_sha, driverTree=identity['tree'], candidateBuildCommit=B3,
         candidateBuildTree=B3_TREE, kernelOrigin=kernel_sha, kernelTree=PRODUCTION_KERNEL_TREE,
-        allowedDriverChanges=sorted(changed), caseInputs=hybrid.case_input_hashes(source))
+        allowedDriverChanges=sorted(changed), officialInputCount=len(inputs),
+        officialInputInventorySha256=hybrid.INVENTORY_SHA256,
+        caseInputs=hybrid.case_input_hashes(source))
 
 
 def plan_for(source, root, driver_sha, kernel_sha):
@@ -833,6 +837,9 @@ def present(report, args, plan=None):
         result=report.get('sameHostPerformance') if valid else 'invalid/incomplete; no performance claim',
         rawSimpleQueryFailRetained=True, failure=report.get('failure'))
     print('B3_REUSE_VISIBLE_RESULT ' + json.dumps(visible,ensure_ascii=False,allow_nan=False),flush=True)
+    # Keep complete fresh evidence readable in logs even when collection fails.
+    # Collection has its own outcome and cannot redefine this calibration verdict.
+    print('B3_REUSE_FULL_REPORT\n' + json.dumps(report,ensure_ascii=False,allow_nan=False,indent=2),flush=True)
     if args.summary:
         with args.summary.open('a',encoding='utf-8') as stream:
             stream.write('\n## Exact B3 reuse calibration\n\n' + json.dumps(visible,ensure_ascii=False) + '\n')
@@ -840,7 +847,7 @@ def present(report, args, plan=None):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--phase',choices=('plan','prepare-reuse','validate','finalize','present','collect-evidence'),default='plan')
+    parser.add_argument('--phase',choices=('plan','verify-source','prepare-reuse','validate','finalize','present','collect-evidence'),default='plan')
     parser.add_argument('--source',type=Path,required=True)
     parser.add_argument('--root',type=Path,required=True)
     parser.add_argument('--driver-sha',required=True)
@@ -853,6 +860,8 @@ def main(argv=None):
     args=parser.parse_args(argv)
     no_symlinks(args.source); no_symlinks(args.root)
     args.source=args.source.resolve(strict=True); args.root=args.root.resolve(strict=False)
+    if args.phase == 'verify-source':
+        print(json.dumps(verify_driver(args.source,args.driver_sha,args.kernel_sha),indent=2)); return 0
     if args.phase == 'plan' or (not args.execute and args.phase != 'collect-evidence'):
         print(json.dumps(plan_for(args.source,args.root,args.driver_sha,args.kernel_sha),indent=2)); return 0
     if sys.platform != 'linux':
