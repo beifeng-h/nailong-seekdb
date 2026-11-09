@@ -13,6 +13,7 @@ import signal
 import sys
 import time
 import tempfile
+import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -1632,6 +1633,99 @@ except InterruptedError:
         (logs / 'environment.txt').write_text('unexpected')
         with self.assertRaisesRegex(RuntimeError, 'Unexpected native evidence filename'):
             p.collect_continuation_evidence(self.root, self.root.parent / 'unexpected-native')
+
+
+CHECKOUT_COMMITS = (
+    'a' * 40,
+    '5bce9e06d1281347ad61344e4b01fab9158c58a2',
+    'bc4dde62eee39acb630ffe54741aecebe4ab0a2a',
+    'f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65',
+)
+
+
+class CheckoutContracts(unittest.TestCase):
+    def run_checkout(self, **overrides):
+        workflow = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        first_step = workflow.split('    steps:\n', 1)[1].split('      - name:', 2)[1]
+        script = textwrap.dedent(first_step.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stub = root / 'git'
+            stub.write_text(textwrap.dedent('''\
+                #!/usr/bin/env python3
+                import json, os, sys
+                args = sys.argv[1:]
+                with open(os.environ['GIT_TRACE_FILE'], 'a', encoding='utf-8') as out:
+                    out.write(json.dumps(args) + '\\n')
+                while args and args[0] in ('-c', '-C'):
+                    args = args[2:]
+                command = args[0]
+                if command == 'fetch':
+                    sys.exit(int(os.environ.get('FETCH_EXIT', '0')))
+                if command == 'cat-file' and args[-1] == os.environ.get('MISSING_COMMIT', '') + '^{commit}':
+                    sys.exit(72)
+                if command == 'rev-parse':
+                    print(os.environ.get('CHECKOUT_HEAD', os.environ['GITHUB_SHA']))
+                if command == 'status':
+                    print(os.environ.get('CHECKOUT_STATUS', ''), end='')
+            '''), encoding='utf-8')
+            stub.chmod(0o755)
+            trace = root / 'git-calls.jsonl'
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                       GIT_TRACE_FILE=str(trace), GITHUB_WORKSPACE=str(root / 'workspace'),
+                       RUNNER_TEMP=str(root), GITHUB_ENV=str(root / 'github-env'),
+                       GITHUB_SERVER_URL='https://github.com',
+                       GITHUB_REPOSITORY='beifeng-h/nailong-seekdb', GITHUB_SHA=CHECKOUT_COMMITS[0])
+            env.update(overrides)
+            result = subprocess.run(['bash', '--noprofile', '--norc', '-c', script],
+                                    env=env, cwd=root, text=True, capture_output=True, timeout=10)
+            calls = [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()]
+            return result, calls, env['GITHUB_WORKSPACE']
+
+    def fetch_call(self, workspace):
+        return ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', '-C', workspace,
+                'fetch', '--atomic', '--no-auto-maintenance', '--no-tags', '--depth=1',
+                'origin', *CHECKOUT_COMMITS]
+
+    def test_single_atomic_fetch_precedes_all_commit_checks_and_driver_checkout(self):
+        result, calls, workspace = self.run_checkout()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [
+            ['init', workspace],
+            ['-C', workspace, 'remote', 'add', 'origin', 'https://github.com/beifeng-h/nailong-seekdb.git'],
+            self.fetch_call(workspace),
+            *[['-C', workspace, 'cat-file', '-e', sha + '^{commit}'] for sha in CHECKOUT_COMMITS],
+            ['-C', workspace, 'checkout', '--detach', CHECKOUT_COMMITS[0]],
+            ['rev-parse', 'HEAD'],
+            ['status', '--porcelain=v1', '--untracked-files=all'],
+        ])
+
+    def test_fetch_failure_stops_without_retry_verification_or_checkout(self):
+        result, calls, workspace = self.run_checkout(FETCH_EXIT='71')
+        self.assertEqual(result.returncode, 71)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1], self.fetch_call(workspace))
+
+    def test_each_missing_commit_stops_before_checkout(self):
+        for index, sha in enumerate(CHECKOUT_COMMITS):
+            with self.subTest(commit=sha):
+                result, calls, workspace = self.run_checkout(MISSING_COMMIT=sha)
+                self.assertEqual(result.returncode, 72)
+                self.assertEqual(calls[2], self.fetch_call(workspace))
+                self.assertEqual(calls[3:], [
+                    ['-C', workspace, 'cat-file', '-e', value + '^{commit}']
+                    for value in CHECKOUT_COMMITS[:index + 1]
+                ])
+
+    def test_driver_head_mismatch_fails_before_cleanliness_check(self):
+        result, calls, _ = self.run_checkout(CHECKOUT_HEAD='b' * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls[-1], ['rev-parse', 'HEAD'])
+
+    def test_dirty_driver_checkout_fails(self):
+        result, calls, _ = self.run_checkout(CHECKOUT_STATUS='?? unexpected\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls[-1], ['status', '--porcelain=v1', '--untracked-files=all'])
 
 
 if __name__ == '__main__':
