@@ -1,0 +1,1039 @@
+{
+  "provenance": "Completed native job log only; NOT a claim of local artifact byte verification.",
+  "runId": 42565036644,
+  "jobId": 128989606853,
+  "artifactId": 13652898100,
+  "zipBytes": 328291894,
+  "zipSha256": "a284cb7e4cd7c3a657b78b14f05e320a21645246a820f74381bcaddc0d91e703",
+  "evidenceManifest": {
+    "schema": 1,
+    "kind": "verified_original_A_new_source_B_v1",
+    "files": [
+      {
+        "path": "plan.json",
+        "bytes": 5756,
+        "sha256": "06375cf3b1df04ba9cc20262a15c2cca79a9499f82c13dee57b66872310836a7"
+      },
+      {
+        "path": "report.json",
+        "bytes": 82580,
+        "sha256": "93ad0fe8432ea4816d001f600d722ebf472a34f241946eccc43801b7b384d625"
+      },
+      {
+        "path": "runtime/candidate/identity.json",
+        "bytes": 13288,
+        "sha256": "7898d90149faaff800d20d34d651341f64c1a3f334dade49f74f73f24ad01306"
+      },
+      {
+        "path": "historical/runtime/verification.json",
+        "bytes": 101497,
+        "sha256": "a1af887e9557b0595f38c092e6930e4b9a275908915adadd9fa342d788184c5c"
+      },
+      {
+        "path": "historical/runtime/manifest.original.json",
+        "bytes": 67163,
+        "sha256": "d959817390ac03ce8769aebfd7ab1ef726315724eb2aa3fc8cb5eb0cc460e5d9"
+      },
+      {
+        "path": "historical/runtime/plan.original.json",
+        "bytes": 2240,
+        "sha256": "db7d65c17456dfa11f48bae494abf4d2a9e5348cbd44df61710faaf72f59bd3c"
+      },
+      {
+        "path": "historical/runtime/baseline/identity.original.json",
+        "bytes": 11392,
+        "sha256": "220076ec8da4a6f066af06be95fc85d28c81e6ee1263304b4d9218ba4eeecab9"
+      },
+      {
+        "path": "historical/runtime/baseline/relocation.json",
+        "bytes": 1094,
+        "sha256": "875dc7b64ea94e8437425a6e741f08739bb33498d74e39c7817ae055cf853f4a"
+      },
+      {
+        "path": "historical/runtime/baseline/readelf-notes.log",
+        "bytes": 1436,
+        "sha256": "f4bd7f894af98b75f93d52020ba89ec74f30d62fa66fcf492ca4a4c84f1d07d4"
+      },
+      {
+        "path": "evidence/baseline/runtime-ldd.log",
+        "bytes": 299,
+        "sha256": "7ec8b59b651135f045acdaff724daa88d2054ce01de519e8129782bf99a00541"
+      },
+      {
+        "path": "evidence/baseline/runtime-ldd.log.json",
+        "bytes": 354,
+        "sha256": "bd6de64cfd1185234f7c9d92a5a841c8d128a6833f65dfbf05804dc0fb91b308"
+      },
+      {
+        "path": "evidence/baseline/prebuild-ldd.log",
+        "bytes": 299,
+        "sha256": "2f94c252179defc13508935701103a927eb3a2a3d77e730112f6e2d1e66a1ddb"
+      },
+      {
+        "path": "evidence/baseline/prebuild-ldd.log.json",
+        "bytes": 355,
+        "sha256": "8f8cdd7d651481af754f9768ed5e656e3bb0b2dd3ea14e5d83ee454b630ded3b"
+      },
+      {
+        "path": "evidence/baseline/resources-before.txt",
+        "bytes": 438,
+        "sha256": "4aed665f266f5ece57270bf9e2e88b62759f4f19d5453ef524baaff85a95fac2"
+      },
+      {
+        "path": "evidence/baseline/obclient-runtime-ldd.log",
+        "bytes": 589,
+        "sha256": "2787d67c77825cb977b6c156a7e4cb97011a4d069a916ddbbfc9ec22543aae7a"
+      },
+      {
+        "path": "evidence/baseline/obclient-runtime-ldd.log.json",
+        "bytes": 373,
+        "sha256": "c5e53d9f99ef70d818fb21024f537905b24b53a1eadd49e5c9eb35dc1af67dea"
+      },
+      {
+        "path": "evidence/baseline/mysqltest-runtime-ldd.log",
+        "bytes": 589,
+        "sha256": "6c646b1ae73a42ca0a390db6d0aa518c02ef0f5aaee491c7d593c2bbc3aabd70"
+      },
+      {
+        "path": "evidence/baseline/mysqltest-runtime-ldd.log.json",
+        "bytes": 375,
+        "sha256": "e8a1cdfc4f71fe6e1fabcddf671b505bc4a776138a6bdf4f2ebf43c64fa18fcb"
+      },
+      {
+        "path": "historical/runtime/candidate/identity.original.json",
+        "bytes": 11396,
+        "sha256": "f67a974013835b1cfaf679da6862fd81561bb1efb52597ef4264cb3806f3a5b3"
+      },
+      {
+        "path": "historical/runtime/candidate/relocation.json",
+        "bytes": 1097,
+        "sha256": "4f3b324fcba5d2e08765fe2ccc83b2809e719ec15dd79e96baa3810834d09dc9"
+      },
+      {
+        "path": "historical/runtime/candidate/readelf-notes.log",
+        "bytes": 1436,
+        "sha256": "8a1b4fa4c09839e9f8049509f1416464950998e4749a7f56a9373fcdc15be0b3"
+      },
+      {
+        "path": "evidence/candidate/runtime-ldd.log",
+        "bytes": 299,
+        "sha256": "e5900833eaf57ed06ef1b02aa81b25f816832973d69a5445c259c2bbbf04d9e8"
+      },
+      {
+        "path": "evidence/candidate/runtime-ldd.log.json",
+        "bytes": 345,
+        "sha256": "c551c458a8135d687f679f5b2fcccb2a1ca2428ee1638f89e3599c17c06a66db"
+      },
+      {
+        "path": "evidence/candidate/elf-notes.log",
+        "bytes": 1436,
+        "sha256": "77d373c9d0595b36e8e9b7f64dc2574d7201e5e58485c4c662d81669fd15544a"
+      },
+      {
+        "path": "evidence/candidate/elf-notes.log.json",
+        "bytes": 357,
+        "sha256": "802531cb4dc707cbacb4084128f1b4760a9f593bef28112791a341a87290647f"
+      },
+      {
+        "path": "evidence/candidate/seekdb-ldd.log",
+        "bytes": 299,
+        "sha256": "9f063e9cd6b287fe57cd95e44ea5b6e00f6ceb27b5c6a3aa735f537a46c9afe2"
+      },
+      {
+        "path": "evidence/candidate/seekdb-ldd.log.json",
+        "bytes": 344,
+        "sha256": "35bb11a8790cc3317a806e33190ae688c261f67b1ffd3c21da6e220040cd6eee"
+      },
+      {
+        "path": "evidence/candidate/obclient-ldd.log",
+        "bytes": 589,
+        "sha256": "48460b6c4e7595891f8f7b7272ca500f20ed172f7711e8cff70a74efaf1cbe30"
+      },
+      {
+        "path": "evidence/candidate/obclient-ldd.log.json",
+        "bytes": 366,
+        "sha256": "aff771e82d049819cbc1832ce5b5b7285c53f03764a3606dcd546ea6e4e010c5"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-ldd.log",
+        "bytes": 589,
+        "sha256": "43f42300af27ce42b059442017ac209b0173d42dd3985aab7b3f56c8074d186d"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-ldd.log.json",
+        "bytes": 368,
+        "sha256": "bbefda7bf36d851e065f99efbcadb696016fc63a2bbbef2da4190a188a935032"
+      },
+      {
+        "path": "evidence/candidate/prebuild.json",
+        "bytes": 357,
+        "sha256": "5e1a3d32b7f639dbe05e2e0ef2ee26c510c616ca2c67f56205fb87203271fae1"
+      },
+      {
+        "path": "evidence/candidate/obclient-prebuild-ldd.log",
+        "bytes": 589,
+        "sha256": "6e735f1ce717027665a06b2e6ee2c896bb1ca2d44c76c510d1400ed38e196103"
+      },
+      {
+        "path": "evidence/candidate/obclient-prebuild-ldd.log.json",
+        "bytes": 375,
+        "sha256": "9d7706925721b7e7e2499a78118ef80645e11411db0c38728bce275904b50393"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-prebuild-ldd.log",
+        "bytes": 589,
+        "sha256": "ac58e9eef2eaf32201cbfbf4dc2c64ca5888f866251e3cc6b93bfdc42fe0791f"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-prebuild-ldd.log.json",
+        "bytes": 377,
+        "sha256": "149e7dc7367eea0a00b7e0be64faa828d679efa9989442005ee0950e28a281d4"
+      },
+      {
+        "path": "evidence/candidate/obclient-runtime-ldd.log",
+        "bytes": 589,
+        "sha256": "ff5c82bbd354d0b374167f14f51a5a949221e956419c6fee64805b1c2274bfb6"
+      },
+      {
+        "path": "evidence/candidate/obclient-runtime-ldd.log.json",
+        "bytes": 374,
+        "sha256": "b2be174fb25d8c42eb8ae46df18181ccbe956e49fe04bdab1ee601ffbb71a6aa"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-runtime-ldd.log",
+        "bytes": 589,
+        "sha256": "de529a5ad38cc36c714b4845d84f5336b0fe5a6c8eabaacba689cea291960761"
+      },
+      {
+        "path": "evidence/candidate/mysqltest-runtime-ldd.log.json",
+        "bytes": 376,
+        "sha256": "46ee067fc00e9e4d53083123152ec0c3d2b95b34c79ea4830c9f7fcf9bdfcc44"
+      },
+      {
+        "path": "evidence/candidate/initialize-tail.log",
+        "bytes": 11561,
+        "sha256": "24661f15041d206dd22f1cd5819e69f16ee80f92350b8a900e2d7e5913796033"
+      },
+      {
+        "path": "evidence/candidate/initialize-tail.json",
+        "bytes": 209,
+        "sha256": "40bcc3d2676dfae2eed5dd42ed519256efc3a4c2de5cb204dc11bce4ca1905a8"
+      },
+      {
+        "path": "evidence/candidate/build-tail.log",
+        "bytes": 52879,
+        "sha256": "627dcca2281aa228966d6fce0db69e0d4967ebdb3424e19a1dbfb021d75f28fa"
+      },
+      {
+        "path": "evidence/candidate/build-tail.json",
+        "bytes": 209,
+        "sha256": "be9e3d1a24199068a8eb5dd01cca3b30cfcf4b95c6a9e8a33485da4053b47836"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/original-init.log",
+        "bytes": 420,
+        "sha256": "3f503f6d3e2a22c2148f626a20682761d7095e6bae22a3156a1fd54ea46f01c5"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/original-run-case.log",
+        "bytes": 91,
+        "sha256": "d33ddfea451de113d7077328e7c0f0c5f74169823e163c0a09879da29998c705"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/owned-process.json",
+        "bytes": 480,
+        "sha256": "87f3362c4958f578d7df0477fc6ef8a5827211f77f09bbb72df45b259a9a1741"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/result.json",
+        "bytes": 4692,
+        "sha256": "765be9d040d23b8f04d7a91cbd30180e4e2c02e8c5cea9f7415151792f820a01"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/start.log",
+        "bytes": 18,
+        "sha256": "a1a22297a5a757102fbb09a28d0ec1c0f5c17dba5d6393b933bb855c1a313089"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/mysqltest-log/timer",
+        "bytes": 3,
+        "sha256": "1d28c120568c10e19b9d8abe8b66d0983fa3d2e11ee7751aca50f83c6f4a43aa"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.tokenize_function/mysqltest-log/tokenize_function.log",
+        "bytes": 20967,
+        "sha256": "46485235f362d7a77717fc00263a44122e919ccf3b0df70ff521e0fc38d5dc2d"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/original-init.log",
+        "bytes": 420,
+        "sha256": "d1831cf4a06ad06f478edddaa45c59b6adfeb742869aedb1ca625571b47f1d1a"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/original-run-case.log",
+        "bytes": 71,
+        "sha256": "12057c7c55eb46e143efc963f1ba53327e4b73be2d1c091fd33f0d4acf08d5d8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/owned-process.json",
+        "bytes": 480,
+        "sha256": "b3930a3343cc6681b5097baca4cf0a87b88a2cb330a63938065937c196cf84b6"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/result.json",
+        "bytes": 4582,
+        "sha256": "87dd43e67e537262a9dd716ef9da47b532ccf2940e0ddf3cdef83aeadd38737e"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/start.log",
+        "bytes": 18,
+        "sha256": "cda62a968cff89c6d17685cf576bc037a299a2b75c817bfac8904cb088e30b89"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/mysqltest-log/cn_word.log",
+        "bytes": 12069,
+        "sha256": "37568de31d9632eacda4f13332fb6b190922b27f1ed53fb1093cfc03cbef1b03"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.cn_word/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "52018340d5255b7d07aebb084a7eb0df40c47d8fedbb66bede461d52847f4006"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/original-init.log",
+        "bytes": 420,
+        "sha256": "fa344cb26df243851b3fbdcf67c0811bbf939324f75bbc63e9da269d1213e097"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/original-run-case.log",
+        "bytes": 91,
+        "sha256": "5238b74ec5f8581fdafcb8602d666e9274f485e93c42392284e2162202fdf55b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/owned-process.json",
+        "bytes": 480,
+        "sha256": "054a8ef86540d0d1ea287c2302a8069fb4925d095e634b837e5d2f6db3345818"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/result.json",
+        "bytes": 4692,
+        "sha256": "fdbd050a1b7b6b8d819c182eb47262b7cd81b975b06d1801f7fa3b8e5048f40d"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/start.log",
+        "bytes": 18,
+        "sha256": "5f6ab86e340786591d78032bba4cb5fe9e5558085dc56b14f3b571a6fa96dc15"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/mysqltest-log/parser_properties.log",
+        "bytes": 12213,
+        "sha256": "e6dbc1e407e909d83d571c840c3292c766e70c2da173594fa1c98b090f03d60a"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.parser_properties/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "04ad22d7630382dd5ece1410d2d8a131c44bdf54b53eb6b22a0276994b836d53"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/original-init.log",
+        "bytes": 420,
+        "sha256": "45e1e05058216bb3496f9011be9274110d382cec6e05a2a588bf2991bdbb8f6f"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/original-run-case.log",
+        "bytes": 75,
+        "sha256": "b6d4a8dd242a39d27e9951cbfe7fa5adc38f16d686fd05bb71a8fae39c84de11"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/owned-process.json",
+        "bytes": 480,
+        "sha256": "c40bd168473987d37f0ce8ec7a383f0d112ba2a428a3f1aeaf3f0e2664a61404"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/result.json",
+        "bytes": 4604,
+        "sha256": "88a18b76f64f91f8eba980d2601c1f07bb5bc1e6fb642b0ed717198a9ff68ef9"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/start.log",
+        "bytes": 18,
+        "sha256": "e39cf772b54937305af0d15607de2d58b6195b376b8bf53ce3269b0dec9589a8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/mysqltest-log/basic_dml.log",
+        "bytes": 220793,
+        "sha256": "6686ab5340271fd3772d145ecb98ba5d69bda1d7d3266277d79c4c6ca84629d0"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.basic_dml/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "62b6e02ebbd465afb4b7c0ed0e40449773fec2f622b98de4b08a85408be4390e"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/original-init.log",
+        "bytes": 420,
+        "sha256": "8a12b1bee902776d44fd1dcb62653133922e565e2a03370f37d03ff1c4826f80"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/original-run-case.log",
+        "bytes": 81,
+        "sha256": "205368f0de81ed3fe43069642184027b2424a644fc1f335672969bde55a00dfa"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/owned-process.json",
+        "bytes": 480,
+        "sha256": "3328b5c703d0022b20f963076210bd7f58d7bed58a61211cd7915cb00694ca7c"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/result.json",
+        "bytes": 4637,
+        "sha256": "53af51475f82638a686fb949c7ba07f1e3b9a549b3d7112a7a981057a5d494ef"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/start.log",
+        "bytes": 18,
+        "sha256": "0b0370f361e07844e82d34fd6e07c580f208768c0949695a6487eeb2247cfa73"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/mysqltest-log/simple_query.log",
+        "bytes": 184285,
+        "sha256": "6172886af795b7e6e12f990bfc355985dbf51560da25a10775e20190ed7675e8"
+      },
+      {
+        "path": "validation/cases/baseline/fts_index.simple_query/mysqltest-log/timer",
+        "bytes": 3,
+        "sha256": "fce86e339dc3131c489202ec3b6c8d4319c61f152b3541ba0e4141e5d5c3fac3"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/original-init.log",
+        "bytes": 406,
+        "sha256": "d0b136711db186e236bf6462c4fa9cc01e47a758afb12042ee7a3d3a68c2c56f"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/original-run-case.log",
+        "bytes": 91,
+        "sha256": "af3ab53a69c4cde7a3288185413c2a5a51fcf4b223faa9dfa29deaac36c30fe6"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/owned-process.json",
+        "bytes": 470,
+        "sha256": "b789ea3aa2623bff2a2e81ce767508a43688d833a6fcae2047144e9081fe6089"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/result.json",
+        "bytes": 4664,
+        "sha256": "7ce846f52de06660d747f11ce222da7d4da90e3d0b56fa8dc9c5e5cfa22c05e5"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/start.log",
+        "bytes": 18,
+        "sha256": "70701d3eb54362e5c18eac3947d2f80ade059ebb375db13b03c23abc28aef087"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/mysqltest-log/timer",
+        "bytes": 3,
+        "sha256": "79d6eaa2676189eb927f2e16a70091474078e2117c3fc607d35cdc6b591ef355"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_function/mysqltest-log/tokenize_function.log",
+        "bytes": 20967,
+        "sha256": "46485235f362d7a77717fc00263a44122e919ccf3b0df70ff521e0fc38d5dc2d"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/original-init.log",
+        "bytes": 406,
+        "sha256": "65a5e710183b940470c0f5a6fee2b9e2bbb8c47be32bd63546279900a39bbf00"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/original-run-case.log",
+        "bytes": 71,
+        "sha256": "4452e58d827702ac619e41e9e5350840ef602b4d64a859f5f8b3626b4ffb6a15"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/owned-process.json",
+        "bytes": 470,
+        "sha256": "5578c2b1ecd96e445babef73b95300135c29db3241db8d790cb81c64653fb007"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/result.json",
+        "bytes": 4554,
+        "sha256": "0e5171b045f9eddb5bb8281c2ff9551d06fc1ea5b3dc5e09746650dda49ee9d5"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/start.log",
+        "bytes": 18,
+        "sha256": "897414bf7928f7c923cf70bde29d3835c864c14252b25016afcc2ddcb8646b54"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/mysqltest-log/cn_word.log",
+        "bytes": 12069,
+        "sha256": "37568de31d9632eacda4f13332fb6b190922b27f1ed53fb1093cfc03cbef1b03"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.cn_word/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "08c159cb811c2742199fed6b07c10860a7b8e777515377e20fe0f2d90f230657"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/original-init.log",
+        "bytes": 406,
+        "sha256": "ff31bf00d84871f54f967132a37d6b2bab1c2cf82f51cbfc298f9ebdefe1e96a"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/original-run-case.log",
+        "bytes": 91,
+        "sha256": "67cb01f3b92e4187235bd9fdf64c3e1ac1cf16a10bc17b5c44f5e4ccf992b06c"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/owned-process.json",
+        "bytes": 470,
+        "sha256": "b1e28dbd2dffa623a560016064994c7e09fe87c62511f523a33bffc365f10ac6"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/result.json",
+        "bytes": 4664,
+        "sha256": "b864661e94e1d0a7905d069185641ac9332ad7ea041c869bc54c4f643792b81a"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/start.log",
+        "bytes": 18,
+        "sha256": "696aa38ac977791ad81bb399b39c89f407ba1db6449f096ef7d76900815305e9"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/mysqltest-log/parser_properties.log",
+        "bytes": 12213,
+        "sha256": "e6dbc1e407e909d83d571c840c3292c766e70c2da173594fa1c98b090f03d60a"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.parser_properties/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "eed5fe88eedf687582e394a4afc70a7b8c6afbf20072c1a1d4a935ef5ef94640"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/original-init.log",
+        "bytes": 406,
+        "sha256": "eca50849cfbd3ee37a57133e188ac1714cc73f52da9de33d05debc3eb7009449"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/original-run-case.log",
+        "bytes": 75,
+        "sha256": "6d7259204910b84c2eb45701ae3fe6f55a8fe7a4b5baf22f1f10e4f935d650f4"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/owned-process.json",
+        "bytes": 470,
+        "sha256": "09de1d05b4949530721e3a12f6526d973ccb91dcd303d425addb6d3278e7d85c"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/result.json",
+        "bytes": 4576,
+        "sha256": "f6521e6992d56254edb0ad74df1559dd9d8e1addc00626abcae3f3186d48a99e"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/start.log",
+        "bytes": 18,
+        "sha256": "e4d4607a75626659406ca5d3d683645d7673d6999bce1b5ef435612485e05b2a"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/mysqltest-log/basic_dml.log",
+        "bytes": 220793,
+        "sha256": "6686ab5340271fd3772d145ecb98ba5d69bda1d7d3266277d79c4c6ca84629d0"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.basic_dml/mysqltest-log/timer",
+        "bytes": 4,
+        "sha256": "0c8f86d7e62776666e662e5e4f60c33620752d6d7d14abf31697f85022e6028d"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/mysqltest-output.log",
+        "bytes": 2922,
+        "sha256": "79d838de798270f2423550eabf8b7d6ab9800d4ebf29f8e8828f2c465313d458"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/original-init.log",
+        "bytes": 406,
+        "sha256": "6802722c5ed0f4184ca9d681ef0b64743eda674ae7e124649a6cf26ac3084611"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/original-result-diff.log",
+        "bytes": 2594,
+        "sha256": "b02ff195b47d539821253b3029f8d31a18a04d3b999eb510936b213c9e71d9e4"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/original-run-case.log",
+        "bytes": 3011,
+        "sha256": "66d5e00cb2091cf7dc04850dfe8bb272e1fb5078c72b88f874103a3aac8c6ce6"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/owned-process.json",
+        "bytes": 470,
+        "sha256": "d4ae9d10d64cb2319ca234e6cd442552f9dbed82bcab59221f4181d24f62f1fd"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/result.json",
+        "bytes": 4610,
+        "sha256": "b0a7bce009d0ec2a57c186cf22650ab330b59ea31be54d0d74092cc5fe36f912"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/start.log",
+        "bytes": 18,
+        "sha256": "2391cc986c709e9354826554eb6f05282b98f7754381257909f6e448928e5ad0"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/supplemental-plan-compatibility.json",
+        "bytes": 4148,
+        "sha256": "c1a37720596f90a144cf2c2f12cdea427a44ba6566ce53bf1f01d104e632ea6c"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/mysqltest-log/simple_query.log",
+        "bytes": 184289,
+        "sha256": "737c4257fabf57dbd5365fdd04cfe2573206129d19991a8a1616e7e3db1e4896"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.simple_query/mysqltest-log/simple_query.reject",
+        "bytes": 184289,
+        "sha256": "737c4257fabf57dbd5365fdd04cfe2573206129d19991a8a1616e7e3db1e4896"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/original-init.log",
+        "bytes": 406,
+        "sha256": "76b9938379ac1aa9d15fa7227a38fae7e21f94e88fef6afded58bc37fe15a935"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/original-run-case.log",
+        "bytes": 109,
+        "sha256": "864edfdda42db6391277a72cdcc21a3b24a0ae5bcdb0b23b64ea4204f98307eb"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/owned-process.json",
+        "bytes": 470,
+        "sha256": "1d2e601f2364937928e310bff4e62aa14cf718fc846c9994aeebb4ccae93a846"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/result.json",
+        "bytes": 4763,
+        "sha256": "090e9472ce4dd3950befbf5407672757ce07f6318b9eedbb82c03aa70d216686"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/start.log",
+        "bytes": 18,
+        "sha256": "5e298fb9bb422c8c6be4c9214df28f3d375a56008655e10eea187e3afbe5e557"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/mysqltest-log/timer",
+        "bytes": 1,
+        "sha256": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_casefold_contract/mysqltest-log/tokenize_casefold_contract.log",
+        "bytes": 236,
+        "sha256": "2fc98df4e6ea00c20456ef661e21a2a2a9976d2f05efcfc3900a91f9fe2302fb"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/original-init.log",
+        "bytes": 406,
+        "sha256": "c1184f1b17fd0da00be5f45e60092e965186d6e50922190005255344a678aba9"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/original-run-case.log",
+        "bytes": 109,
+        "sha256": "f3144b1bf1a5c0687259d95d5f727f514b7fa8ea93e3595bcee2e86cd119fb62"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/owned-process.json",
+        "bytes": 470,
+        "sha256": "b9ff29c597147099fcc91808d5be973004ff8ca2ef5600045674eea06519998c"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/result.json",
+        "bytes": 4763,
+        "sha256": "e6c58b65131dd3f021cde855eb87ee2a1d12a9923973d251c89f6dfee41312bb"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/start.log",
+        "bytes": 18,
+        "sha256": "0d429c4c1a47de7346808cc512a0060ede67207d3c8fb361a319583a0219f8c3"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/mysqltest-log/match_filter_only_contract.log",
+        "bytes": 2116,
+        "sha256": "90bf4aa965edae394d4685ac2546ef658cb8164dc17fec171a7f321c7fc5a777"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.match_filter_only_contract/mysqltest-log/timer",
+        "bytes": 3,
+        "sha256": "c498f3fe97c0df55ee8dea01a72572059b93f42d235a5e439e9c9a1654d6d4e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/actual-parameters.log",
+        "bytes": 114,
+        "sha256": "41cee44f7dd2392e85d64b6f50a747b1ff0f288265cb1fce05b8d99f0b4b3647"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/mysqltest-output.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/original-init.log",
+        "bytes": 406,
+        "sha256": "ee11279ee70cdde93f45955932e350c20ad22fe69e7409a44ea68525253bf8f7"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/original-run-case.log",
+        "bytes": 129,
+        "sha256": "774344107e27321a41cccc51aa837239095707f7bacc59d50a8bf6412183d5cb"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/own-destroy.log",
+        "bytes": 10,
+        "sha256": "29bc78b0861197b53c6a197726051f7173c8f17da944ef1848ae5d456ef989e1"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/own-stop.log",
+        "bytes": 8,
+        "sha256": "f247a76b2893208aae7751dbf51f4c495efacfb6d9e743802870300f31ac45c8"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/owned-process.json",
+        "bytes": 470,
+        "sha256": "7e97a6682f6dd3514f3cc39c6af7d343c8afc6409c7d3f3ac318da5f58a39f58"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/ready.log",
+        "bytes": 6,
+        "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/result.json",
+        "bytes": 4873,
+        "sha256": "8f8a965b21203f158bb272f1ff3db2d3844e3f2fb7113ff16138d9c9c22815a5"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/start.log",
+        "bytes": 18,
+        "sha256": "32abe1b1a539f27838789851348cbf17e57c5babef80f8310db221c702956441"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/mysqltest-log/timer",
+        "bytes": 1,
+        "sha256": "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683"
+      },
+      {
+        "path": "validation/cases/candidate/fts_index.tokenize_beng_noop_casefold_contract/mysqltest-log/tokenize_beng_noop_casefold_contract.log",
+        "bytes": 342,
+        "sha256": "62afb026fd38fb30cdb2a11c6b023df963ea85d8d01e76930e3fdb1d63a89300"
+      }
+    ],
+    "bytes": 1553759,
+    "unchangedElfsReuploaded": false,
+    "historicalCollectorPassed": false,
+    "historicalValidationAccepted": false,
+    "historicalFailure": "Original manifest ok=false: baseline/cn_word non-text DB log collector failure.",
+    "excludes": [
+      "ELF",
+      "database",
+      "core",
+      "environment",
+      "db-log-tails"
+    ],
+    "maxFileBytes": 8388608,
+    "maxTotalBytes": 67108864,
+    "maxEntries": 640
+  }
+}

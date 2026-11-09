@@ -1,0 +1,184 @@
+# INACTIVE PROPOSAL ONLY. This file is outside .github/workflows.
+# Activation/download/CI execution requires separately resolved authorization.
+# The artifact bytes have NOT been verified locally. Known pins come solely from
+# completed run 42565036644 / job 128989606853 and immutable original-A records.
+# Future D may contain the validation/untimed parent repair (8e40d4d), these new
+# modules/tests/metadata and an explicitly authorized workflow change only.
+# Candidate source/tree/build driver remain B3; D is only validation driver.
+# No compilation target, snapshot, candidate-preserve, old timing reuse, or proof
+# relabel is part of this continuation. Original invalid B3 report remains invalid.
+name: Seekdb FTS exact archived B3 continuation proposal
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: seekdb-fts-free-linux-validation
+  cancel-in-progress: false
+jobs:
+  paired:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      actions: read
+    env:
+      HYBRID_KERNEL_SHA: 'c235713689325d2bb8882b86f8f89ee99ff9b43a'
+      B3_SHA: 'b3eed52688fc1b178632a9dbb38aabb32f805c5d'
+      GIT_TERMINAL_PROMPT: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout exact D and all separate actual source objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'PAIRED_ROOT=%s/seekdb-b3-reuse\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
+            fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
+            "$GITHUB_SHA" "$B3_SHA" "$HYBRID_KERNEL_SHA" \
+            5bce9e06d1281347ad61344e4b01fab9158c58a2 fe876f8f805969970621a18a1cf812ff322fc78c
+          for sha in "$GITHUB_SHA" "$B3_SHA" "$HYBRID_KERNEL_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 fe876f8f805969970621a18a1cf812ff322fc78c; do
+            git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
+          done
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Run all offline contracts before downloading or execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/script/seekdb -p 'test_fts*.py' -v
+      - name: Admit resources and install unchanged documented host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -srmo; getconf GNU_LIBC_VERSION; nproc; free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 48318382080
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git wget curl rpm rpm2cpio cpio make build-essential binutils m4 file python3 libtool-bin libaio1t64
+          mkdir -m 0700 "$RUNNER_TEMP/seekdb-original-artifact" "$RUNNER_TEMP/seekdb-b3-artifact"
+      - name: Download immutable original artifact for A only via official route
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: '13621468966'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42486120779'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/seekdb-original-artifact
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Download exact immutable new B3 artifact via official route
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: '13652898100'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42565036644'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/seekdb-b3-artifact
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Verify complete streams and preserve original identities without relabel
+        shell: bash
+        run: |
+          set -euo pipefail
+          for directory in "$RUNNER_TEMP/seekdb-original-artifact" "$RUNNER_TEMP/seekdb-b3-artifact"; do
+            test -d "$directory" && test ! -L "$directory"
+            mapfile -d '' -t files < <(find "$directory" -mindepth 1 -maxdepth 1 -print0)
+            test "${#files[@]}" -eq 1
+            test -f "${files[0]}" && test ! -L "${files[0]}"
+            test "$(stat -c '%h' -- "${files[0]}")" -eq 1
+            if test "$directory" = "$RUNNER_TEMP/seekdb-original-artifact"; then
+              original="${files[0]}"
+            else
+              candidate="${files[0]}"
+            fi
+          done
+          python3 -B .github/script/seekdb/fts_b3_reuse_validation.py --phase prepare-reuse \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --kernel-sha "$HYBRID_KERNEL_SHA" --artifact-zip "$original" \
+            --candidate-artifact-zip "$candidate" --execute
+      - name: Preserve original HTTPS dependency transport with no alternate hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/seekdb-https-tools"
+          mkdir -p "$tools"
+          cat > "$tools/wget" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          for value in "$@"; do
+            case "$value" in
+              http://mirrors.oceanbase.com/*) value="https://mirrors.oceanbase.com/${value#http://mirrors.oceanbase.com/}" ;;
+              https://mirrors.oceanbase.com/*) ;;
+              http://*|https://*) exit 93 ;;
+            esac
+            args+=("$value")
+          done
+          exec /usr/bin/wget --https-only --timeout=30 --tries=1 "${args[@]}"
+          SH
+          chmod 0755 "$tools/wget"
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+      - name: Set up unchanged pinned Rust with no Actions cache writes
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+          crates-mirror: 'false'
+      - name: Initialize clients and libraries in actual B3 source with no compile target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PAIRED_ROOT/sources/candidate"
+          timeout --signal=TERM --kill-after=30s 45m ./build.sh release --init \
+            > "$PAIRED_ROOT/evidence/candidate/dependency-initialize.log" 2>&1
+          test "$(git rev-parse HEAD)" = "$B3_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test ! -e build_release/src/observer/seekdb
+          printf '%s\n' \
+            '798aa952d536563ee0291e69251a6d0cd0d85e0c470d5499768fa0731ff3c1be  deps/3rd/u01/obclient/bin/obclient' \
+            '64e0323b385af2831c5b166a375e8320ec40e3ead0bd925295de1b8f5a2196c6  deps/3rd/u01/obclient/bin/mysqltest' \
+            | sha256sum -c -
+      - name: Run all fresh native untimed and timed instances with owned cleanups
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=180s 180m python3 -B "$PAIRED_ROOT/driver/fts_b3_reuse_validation.py" \
+            --phase validate --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
+      - name: Finalize only complete fresh B3 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/script/seekdb/fts_b3_reuse_validation.py --phase finalize \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
+      - name: Collect new bounded evidence and unchanged historical invalid verdict only
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/script/seekdb/fts_b3_reuse_validation.py --phase collect-evidence \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --kernel-sha "$HYBRID_KERNEL_SHA" --out "$RUNNER_TEMP/seekdb-b3-reuse-evidence"
+      - name: Upload bounded continuation evidence without reuploading ELFs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fts-exact-B3-reuse-${{ github.sha }}
+          path: ${{ runner.temp }}/seekdb-b3-reuse-evidence/
+          retention-days: 3
+          compression-level: 6
+          if-no-files-found: error
+          include-hidden-files: false
+      - name: Present explicit fresh result or no-performance-claim blocker
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B .github/script/seekdb/fts_b3_reuse_validation.py --phase present \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+            --kernel-sha "$HYBRID_KERNEL_SHA" --summary "$GITHUB_STEP_SUMMARY" --execute
