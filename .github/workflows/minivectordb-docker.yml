@@ -1,9 +1,9 @@
-name: MiniVectorDB v4 vector index validation
+name: MiniVectorDB development entry validation
 
 on:
   push:
     branches:
-      - codex/minivectordb-public-v4-followup-20261109
+      - codex/minivectordb-development-entry-m9
 
 permissions:
   contents: read
@@ -23,67 +23,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Build and check the pinned development image
+      - name: Build the default development image
         shell: bash
         run: |
           set -euo pipefail
-          image="minivectordb-ci:${GITHUB_SHA}"
+          image="minivectordb-entry:${GITHUB_SHA}"
           git archive --format=tar HEAD \
             .dockerignore Dockerfile CMakeLists.txt include src tests mysqltest \
             | docker build --no-cache --platform linux/amd64 \
-              --target development-checks --progress plain --tag "$image" -
-          docker image inspect "$image" --format '{{.Id}}'
-
-      - name: Inspect the default development image and closed-input startup
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="minivectordb-default:${GITHUB_SHA}"
-          git archive --format=tar HEAD \
-            .dockerignore Dockerfile CMakeLists.txt include src tests mysqltest \
-            | docker build --platform linux/amd64 --progress plain --tag "$image" -
+              --progress plain --tag "$image" -
           docker image inspect "$image" --format \
             'DEFAULT_CONFIG Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}} WorkingDir={{json .Config.WorkingDir}} Labels={{json .Config.Labels}}'
-          status=0
-          docker run --rm --network none --cpus 2 --memory 2g "$image" \
-            > "$RUNNER_TEMP/minivectordb-default.stdout" \
-            2> "$RUNNER_TEMP/minivectordb-default.stderr" || status=$?
-          printf 'DEFAULT_CLOSED_INPUT_EXIT %s\n' "$status"
-          wc -c "$RUNNER_TEMP/minivectordb-default.stdout" "$RUNNER_TEMP/minivectordb-default.stderr"
-          cat "$RUNNER_TEMP/minivectordb-default.stdout" "$RUNNER_TEMP/minivectordb-default.stderr"
-          test "$status" -eq 0
 
-      - name: Check process-kill recovery without network access
+      - name: Check default entry through real container pipes
         shell: bash
         run: |
           set -euo pipefail
-          image="minivectordb-ci:${GITHUB_SHA}"
-          docker run --rm --network none --cpus 2 --memory 2g \
-            --entrypoint /bin/sh "$image" -ec '
-              mkdir -p /data
-              python3 /source/tests/crash_recovery.py /build/storage_fault_driver \
-                --scope "development container page layer" \
-                --report /data/page-crash.json
-              python3 /source/tests/crash_recovery.py /build/database_fault_driver \
-                --sort-cleanup --scope "development container Database layer" \
-                --report /data/table-crash.json
-              python3 /source/tests/crash_recovery.py /build/sql_fault_driver \
-                --sort-cleanup --commit-returned-stage session.commit_returned \
-                --scope "development container SqlSession with persistent vector index maintenance" \
-                --report /data/sql-crash.json
-              python3 /source/tests/index_build_recovery.py /build/sql_fault_driver \
-                --report /data/index-build-crash.json
-            '
-
-      - name: Check persistent vector index beyond the process address-space cap
-        shell: bash
-        run: |
-          set -euo pipefail
-          image="minivectordb-ci:${GITHUB_SHA}"
-          docker run --rm --network none --cpus 2 --memory 2g \
-            --entrypoint /bin/sh "$image" -ec '
-              mkdir -p /data
-              python3 /source/tests/table_scale.py /build/database_fault_driver \
-                --vector-index --rows 100000 --address-space-mib 32 \
-                --report /data/index-scale.json
-            '
+          python3 tests/development_protocol_test.py \
+            --container-image "minivectordb-entry:${GITHUB_SHA}" \
+            --report "$RUNNER_TEMP/development-pipes.json"

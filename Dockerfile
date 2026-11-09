@@ -37,7 +37,7 @@ RUN cmake -S /source -B /build -DCMAKE_BUILD_TYPE=Release \
 
 FROM build AS development-checks
 LABEL org.opencontainers.image.title="MiniVectorDB development checks" \
-      minivectordb.phase="build-preparation" \
+      minivectordb.phase="development-protocol-v1" \
       minivectordb.formal-ready="false"
 
 RUN ctest --test-dir /build --output-on-failure \
@@ -47,3 +47,6 @@ RUN ctest --test-dir /build --output-on-failure \
        --report /build/legacy-schema.json
 RUN python3 /source/tests/legacy_schema.py /build/sql_public_case_driver \
        --vector-index --report /build/legacy-index-schema.json
+
+ENTRYPOINT ["/build/minivectordb_development_server"]
+CMD ["--development-protocol", "mvdb-dev-jsonl-v1", "--data", "/data"]
