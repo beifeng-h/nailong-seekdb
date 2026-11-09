@@ -1059,6 +1059,7 @@ class Contracts(unittest.TestCase):
     def test_plan_parser_rejects_missing_malformed_ambiguous_conflicting_evidence(self):
         text = self.plan_text()
         bad = ['', 'calc_relevance=false\n', text.replace('TEXT RETRIEVAL SCAN', 'TABLE SCAN'),
+            text.replace('TEXT RETRIEVAL SCAN', 'TABLE FULL SCAN'),
             text.replace('|0 |SCALAR GROUP BY', '|0 |TEXT RETRIEVAL SCAN'),
             text.replace('Outputs & filters:', 'Unknown:'), text + 'Outputs & filters:\n',
             text.replace('calc_relevance=false', 'calc_relevance=unknown'),
@@ -1088,12 +1089,27 @@ class Contracts(unittest.TestCase):
         self.assertEqual(queries['control_score_order'],
             'SELECT id FROM fts_large_bench.docs WHERE %s ORDER BY %s DESC, id LIMIT 20;' % (expression, expression))
         self.assertEqual(queries['control_nonzero_threshold'],
-            'SELECT COUNT(*) FROM fts_large_bench.docs WHERE %s > 0.5;' % expression)
+            'SELECT COUNT(*) FROM fts_large_bench.docs WHERE %s AND %s > 0.5;' % (expression, expression))
         self.assertEqual(p.digest(path), before)
         for sql in (original['query_cn'].replace('fts_large_bench.docs', 'other.docs'),
                     original['query_cn'].replace('COUNT(*)', 'id')):
             with self.subTest(sql=sql), self.assertRaises(RuntimeError):
                 p.plan_queries(dict(original, query_cn=sql))
+
+    def test_nonzero_control_keeps_identical_indexable_match_and_numeric_consumer(self):
+        original = p.queries_from_benchmark(REPO / (p.BENCH + '.sh'))
+        queries = p.plan_queries(original)
+        expression = original['query_cn'].split(' WHERE ', 1)[1][:-1]
+        control = queries['control_nonzero_threshold']
+        prefix, predicates = control.split(' WHERE ', 1)
+        self.assertEqual(prefix, 'SELECT COUNT(*) FROM fts_large_bench.docs')
+        # The positive conjunct exposes fulltext access. Its identical numeric
+        # consumer still requires actual relevance, without changing the rows.
+        self.assertEqual(predicates.split(' AND '), [expression, expression + ' > 0.5;'])
+        self.assertEqual(control.count(expression), 2)
+        self.assertEqual({name: queries[name] for name in p.QUERY_NAMES}, original)
+        for role in ('baseline', 'candidate'):
+            self.assertIs(p.expected_plan_relevance(role, 'control_nonzero_threshold'), True)
 
     def test_explain_exact_official_queries_plus_controls_role_flags_and_hashes(self):
         queries = p.plan_queries(p.queries_from_benchmark(REPO / (p.BENCH + '.sh')))

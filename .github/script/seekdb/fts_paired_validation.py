@@ -563,7 +563,7 @@ def plan_queries(queries):
     return dict(queries, **dict(zip(PLAN_CONTROLS, (
         'SELECT id, %s AS relevance FROM %s WHERE %s;' % (expression, table, expression),
         'SELECT id FROM %s WHERE %s ORDER BY %s DESC, id LIMIT 20;' % (table, expression, expression),
-        'SELECT COUNT(*) FROM %s WHERE %s > 0.5;' % (table, expression)))))
+        'SELECT COUNT(*) FROM %s WHERE %s AND %s > 0.5;' % (table, expression, expression)))))
 
 
 def plan_relevance(text):
