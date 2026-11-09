@@ -295,7 +295,18 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      bool unchanged_ascii = CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(
+          static_cast<ObCollationType>(cs_->number));
+      for (uint32_t i = 0; unchanged_ascii && i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        unchanged_ascii = c < 0x80 && (c < 'A' || c > 'Z');
+      }
+      if (unchanged_ascii) {
+        // Lowercasing is the identity for these UTF-8 bytes. The input view
+        // has the token stream's lifetime; callers retaining a token still
+        // make their own copy, as ObBEngFTParser does.
+        next_token.set_string(norm_alnum_token);
+      } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
       } else {
         next_token.set_string(norm_lower_token);
       }

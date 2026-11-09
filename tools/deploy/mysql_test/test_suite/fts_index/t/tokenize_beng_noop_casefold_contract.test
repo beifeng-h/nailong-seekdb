@@ -1,0 +1,25 @@
+# Regression: the Beng no-op lowercase path must preserve normalization,
+# grouping and input lifetimes. Membership checks ignore hash iteration order.
+--disable_query_log
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'alpha bravo charlie delta' COLLATE utf8mb4_bin, 'beng')) = 4 AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'alpha bravo charlie delta' COLLATE utf8mb4_bin, 'beng'), JSON_QUOTE('alpha')) AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'alpha bravo charlie delta' COLLATE utf8mb4_bin, 'beng'), JSON_QUOTE('delta')) AS lowercase_views_survive_later_tokens;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'ALPHA alpha AlPhA' COLLATE utf8mb4_bin, 'beng')) = 1 AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'ALPHA alpha AlPhA' COLLATE utf8mb4_bin, 'beng'), JSON_QUOTE('alpha')) AS uppercase_fallback_groups_with_lowercase;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 'alpha alpha bravo' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens')) = 2 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'alpha alpha bravo' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"alpha":2}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 'alpha alpha bravo' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.doc_len') = 3 AS lowercase_frequencies_and_document_length;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'alpha 12345 bravo' COLLATE utf8mb4_general_ci, 'beng')) = 3 AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'alpha 12345 bravo' COLLATE utf8mb4_general_ci, 'beng'), JSON_QUOTE('12345')) AS general_ci_ascii_unchanged;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'alpha BRAVO charlie' COLLATE utf8mb4_unicode_ci, 'beng')) = 3 AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'alpha BRAVO charlie' COLLATE utf8mb4_unicode_ci, 'beng'), JSON_QUOTE('bravo')) AS unicode_ci_mixed_case;
+
+SELECT JSON_LENGTH(TOKENIZE(CONVERT(0x414C5048412041C384422041C3A442 USING utf8mb4) COLLATE utf8mb4_bin, 'beng')) = 2 AND JSON_CONTAINS(TOKENIZE(CONVERT(0x414C5048412041C384422041C3A442 USING utf8mb4) COLLATE utf8mb4_bin, 'beng'), JSON_QUOTE(CONVERT(0x61C3A462 USING utf8mb4))) AS non_ascii_keeps_unicode_casefold;
+
+SELECT JSON_LENGTH(TOKENIZE(_binary 'ALPHA alpha', 'beng')) = 2 AND JSON_CONTAINS(TOKENIZE(_binary 'ALPHA alpha', 'beng'), JSON_QUOTE('ALPHA')) AS binary_keeps_existing_case_behavior;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'the alpha are bravo', 'beng')) = 2 AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'the alpha are bravo', 'beng'), JSON_QUOTE('alpha')) AND JSON_CONTAINS(TOKENIZE(_utf8mb4 'the alpha are bravo', 'beng'), JSON_QUOTE('bravo')) AS stopwords_unchanged;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 'alpha,bravo;charlie!delta', 'beng')) = 4 AS punctuation_boundaries_unchanged;
+
+SELECT JSON_LENGTH(TOKENIZE(_utf8mb4 '', 'beng')) = 0 AND JSON_LENGTH(TOKENIZE(_utf8mb4 '  !!  ', 'beng')) = 0 AS empty_and_delimiters_unchanged;
+
+--enable_query_log
