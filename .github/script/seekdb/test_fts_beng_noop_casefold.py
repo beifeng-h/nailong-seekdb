@@ -175,7 +175,7 @@ def main():
     #define LOG_DEBUG(...)
     #define MEMCPY std::memcpy
     constexpr int OB_MALLOC_NORMAL_BLOCK_SIZE=7936;
-    enum ObCollationType { CS_TYPE_UTF8MB4_GENERAL_CI=45, CS_TYPE_UTF8MB4_BIN=46, CS_TYPE_BINARY=63, CS_TYPE_UTF8MB4_UNICODE_CI=224, CS_TYPE_UTF8MB4_TURKISH_UCA_CI=233, CS_TYPE_OTHER=999 };
+    enum ObCollationType { CS_TYPE_UTF8MB4_GENERAL_CI=45, CS_TYPE_UTF8MB4_BIN=46, CS_TYPE_BINARY=63, CS_TYPE_UTF8MB4_UNICODE_CI=224, CS_TYPE_OTHER=999 };
     enum ObCharsetType { CHARSET_INVALID=0, CHARSET_BINARY=1, CHARSET_UTF8MB4=2 };
     struct ObString {
       int32_t len_=0; const char *ptr_=nullptr;
@@ -206,7 +206,7 @@ def main():
     }
     struct ObCharset {
       static ObCharsetType charset_type_by_coll(ObCollationType c){
-        switch(c){case CS_TYPE_UTF8MB4_GENERAL_CI:case CS_TYPE_UTF8MB4_BIN:case CS_TYPE_UTF8MB4_UNICODE_CI:case CS_TYPE_UTF8MB4_TURKISH_UCA_CI:return CHARSET_UTF8MB4;
+        switch(c){case CS_TYPE_UTF8MB4_GENERAL_CI:case CS_TYPE_UTF8MB4_BIN:case CS_TYPE_UTF8MB4_UNICODE_CI:return CHARSET_UTF8MB4;
         case CS_TYPE_BINARY:return CHARSET_BINARY;default:return CHARSET_INVALID;}
       }
       static int tolower(const ObCharsetInfo*,const ObString&,ObString&,ObArenaAllocator&);

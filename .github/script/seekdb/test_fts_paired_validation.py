@@ -1,4 +1,10 @@
-"""Synthetic paired-contract tests. Never builds or starts SQL; one Linux test owns synthetic subprocesses."""
+"""Historical paired/reuse contracts, not coverage of the new live hybrid workflow.
+
+Workflow assertions below intentionally read the immutable historical fixture.
+They retain the old no-build and exact-four-commit checkout assertions unchanged.
+The live source-hybrid workflow has independent positive/negative tests.
+Never builds or starts SQL; one Linux test owns synthetic subprocesses.
+"""
 import argparse
 import ast
 from contextlib import ExitStack, redirect_stdout
@@ -50,12 +56,12 @@ class Contracts(unittest.TestCase):
         self.assertIn('printf \'PAIRED_ROOT=%s/seekdb-paired\\n\' "$RUNNER_TEMP" >> "$GITHUB_ENV"', first_step)
         self.assertIn('path: ${{ runner.temp }}/seekdb-paired-artifact/', steps)
 
-    def test_workflow_runner_context_is_step_scoped_and_root_exported_early(self):
-        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+    def test_historical_fixture_workflow_runner_context_is_step_scoped_and_root_exported_early(self):
+        text = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text(encoding='utf-8')
         self.assert_workflow_expression_scope(text)
 
-    def test_workflow_rejects_runner_temp_in_job_env_regression(self):
-        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+    def test_historical_fixture_workflow_rejects_runner_temp_in_job_env_regression(self):
+        text = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text(encoding='utf-8')
         broken = text.replace('    steps:', '      PAIRED_ROOT: ${{ runner.temp }}/seekdb-paired\n    steps:', 1)
         with self.assertRaises(AssertionError):
             self.assert_workflow_expression_scope(broken)
@@ -328,15 +334,15 @@ class Contracts(unittest.TestCase):
                     self.assertEqual(path.read_text(encoding='utf-8'), contents)
         self.assertIn('Failure phase: presentation', summary.read_text(encoding='utf-8'))
 
-    def test_workflow_publishes_readable_summary_and_retains_json(self):
-        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+    def test_historical_fixture_workflow_publishes_readable_summary_and_retains_json(self):
+        text = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text(encoding='utf-8')
         self.assertIn('--phase present', text)
         self.assertIn('--summary "$GITHUB_STEP_SUMMARY"', text)
         self.assertIn('PAIRED_VISIBLE_RESULT', text)
         self.assertLess(text.index('--phase present'), text.index('PAIRED_VISIBLE_RESULT'))
 
     def test_visible_json_and_small_report_retain_strict_presentation_evidence(self):
-        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        text = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text(encoding='utf-8')
         visible = text.split('print("PAIRED_VISIBLE_RESULT",', 1)[1].split('if k in r}', 1)[0]
         for key in ('allOfficialInputsUnchanged', 'planAssertions', 'formalContestRun'):
             with self.subTest(key=key):
@@ -1781,8 +1787,8 @@ except InterruptedError:
         with self.assertRaisesRegex(RuntimeError, 'fresh and disjoint'):
             p.collect_continuation_evidence(self.root, self.root / 'nested')
 
-    def test_continuation_workflow_is_single_pinned_readonly_download_no_compile_no_ELF_upload(self):
-        text = (REPO / '.github/workflows/fts-contest-validation.yml').read_text()
+    def test_historical_fixture_continuation_workflow_is_single_pinned_readonly_download_no_compile_no_ELF_upload(self):
+        text = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text()
         self.assertEqual(text.count('    runs-on:'), 1)
         self.assertIn('actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333', text)
         for snippet in ("artifact-ids: '13621468966'", "run-id: '42486120779'", 'repository: beifeng-h/nailong-seekdb',
@@ -1844,9 +1850,9 @@ CHECKOUT_COMMITS = (
 )
 
 
-class CheckoutContracts(unittest.TestCase):
+class HistoricalFixtureCheckoutContracts(unittest.TestCase):
     def run_checkout(self, **overrides):
-        workflow = (REPO / '.github/workflows/fts-contest-validation.yml').read_text(encoding='utf-8')
+        workflow = (REPO / '.github/script/seekdb/fixtures/fts-verified-elf-continuation.yml').read_text(encoding='utf-8')
         first_step = workflow.split('    steps:\n', 1)[1].split('      - name:', 2)[1]
         script = textwrap.dedent(first_step.split('        run: |\n', 1)[1])
         with tempfile.TemporaryDirectory() as temp:

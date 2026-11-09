@@ -1,4 +1,4 @@
-name: Seekdb FTS verified ELF continuation
+name: Seekdb FTS original-A new-source-B calibration
 
 on:
   push:
@@ -20,21 +20,25 @@ jobs:
       contents: read
       actions: read
     env:
+      CARGO_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      HYBRID_KERNEL_SHA: 'c235713689325d2bb8882b86f8f89ee99ff9b43a'
       GIT_TERMINAL_PROMPT: '0'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - name: Checkout exact validation driver and separate actual A and B source objects
+      - name: Checkout exact hybrid driver, new kernel, and historical A objects
         shell: bash
         run: |
           set -euo pipefail
           printf 'PAIRED_ROOT=%s/seekdb-paired\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          [[ "$HYBRID_KERNEL_SHA" =~ ^[0-9a-f]{40}$ ]]
           git init "$GITHUB_WORKSPACE"
           git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           # Fetch all exact objects in one shallow transaction without background maintenance.
           git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
             fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
-            "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 bc4dde62eee39acb630ffe54741aecebe4ab0a2a f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65
-          for sha in "$GITHUB_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 bc4dde62eee39acb630ffe54741aecebe4ab0a2a f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65; do
+            "$GITHUB_SHA" "$HYBRID_KERNEL_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 fe876f8f805969970621a18a1cf812ff322fc78c
+          for sha in "$GITHUB_SHA" "$HYBRID_KERNEL_SHA" 5bce9e06d1281347ad61344e4b01fab9158c58a2 fe876f8f805969970621a18a1cf812ff322fc78c; do
             git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
           done
           git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
@@ -88,7 +92,7 @@ jobs:
           skip-decompress: true
           digest-mismatch: error
 
-      - name: Verify full original ZIP and relocate independent A and B ELFs without rebuilding
+      - name: Verify full original ZIP, reuse only A, and quarantine historical B without execution
         shell: bash
         run: |
           set -euo pipefail
@@ -100,8 +104,8 @@ jobs:
           test -f "${archives[0]}" && test ! -L "${archives[0]}"
           test "$(stat -c '%h' -- "${archives[0]}")" -eq 1
           test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 17179869184
-          python3 -B .github/script/seekdb/fts_paired_validation.py --phase prepare-reuse \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
+          python3 -B .github/script/seekdb/fts_source_hybrid_validation.py --phase prepare-reuse \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" \
             --artifact-zip "${archives[0]}" --execute
           { uname -srmo; nproc; free -b; df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; } \
             > "$PAIRED_ROOT/evidence/baseline/resources-before.txt"
@@ -135,13 +139,13 @@ jobs:
           cache: 'false'
           crates-mirror: 'false'
 
-      - name: Initialize unchanged original dependencies and runtime clients without a build target
+      - name: Initialize new B with unchanged original release --init configuration
         shell: bash
         run: |
           set -euo pipefail
           # --init configures the original Release profile; no compilation target is invoked.
           timeout --signal=TERM --kill-after=30s 45m ./build.sh release --init 2>&1 \
-            | tee "$PAIRED_ROOT/evidence/dependency-initialize.log"
+            | tee "$RUNNER_TEMP/seekdb-hybrid-initialize.log"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           printf '%s\n' \
@@ -149,25 +153,54 @@ jobs:
             '64e0323b385af2831c5b166a375e8320ec40e3ead0bd925295de1b8f5a2196c6  deps/3rd/u01/obclient/bin/mysqltest' \
             | sha256sum -c -
 
+      - name: Check actual original clients and baseline loaders before compiling B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py" --phase prebuild \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
+
+      - name: Build only new B once with unchanged RelWithDebInfo Unity target and two jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e build_release/src/observer/seekdb
+          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
+          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 120m "$cmake_bin" \
+            --build build_release --target seekdb -j2 2>&1 | tee "$RUNNER_TEMP/seekdb-hybrid-build.log"
+          python3 -B "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py" --phase snapshot --role candidate \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
+
+      - name: Preserve complete new B independently before any native diagnostic can fail
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py" --phase preserve-candidate \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" \
+            --out "$RUNNER_TEMP/seekdb-paired-artifact/candidate-build" --execute
+
       - name: Run all original native cases then strict separate proof and eight fresh same-host rounds
         shell: bash
         run: |
           set -euo pipefail
           test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 8589934592
-          timeout --signal=TERM --kill-after=180s 180m python3 -B "$PAIRED_ROOT/driver/fts_paired_validation.py" \
+          timeout --signal=TERM --kill-after=180s 180m python3 -B "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py" \
             --phase validate --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" \
-            --driver-sha "$GITHUB_SHA" --execute
+            --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
 
-      - name: Always print explicit final or partial continuation verdict
+      - name: Always print explicit final or partial source-hybrid verdict
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if test -f "$PAIRED_ROOT/driver/fts_paired_validation.py"; then
-            python3 -B "$PAIRED_ROOT/driver/fts_paired_validation.py" --phase finalize \
-              --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --execute
+          if test -f "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py"; then
+            python3 -B "$PAIRED_ROOT/driver/fts_source_hybrid_validation.py" --phase finalize \
+              --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" --execute
           else
-            echo 'PAIRED_NOT_STARTED: prerequisites or verification failed; no calibration claimed'
+            echo 'HYBRID_NOT_STARTED: prerequisites or verification failed; no calibration claimed'
             exit 1
           fi
 
@@ -176,15 +209,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -B .github/script/seekdb/fts_paired_validation.py --phase collect-evidence \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
-            --out "$RUNNER_TEMP/seekdb-paired-artifact"
+          if test -d "$PAIRED_ROOT/evidence/candidate"; then
+            python3 -B - "$RUNNER_TEMP" "$PAIRED_ROOT/evidence/candidate" <<'PY'
+          import hashlib, json, pathlib, sys
+          temp, out = map(pathlib.Path, sys.argv[1:])
+          for phase in ('initialize', 'build'):
+              path = temp / ('seekdb-hybrid-' + phase + '.log')
+              if path.is_file():
+                  with path.open('rb') as stream:
+                      count = path.stat().st_size
+                      stream.seek(max(0, count - 512 * 1024))
+                      raw = stream.read(512 * 1024)
+                  text = raw.decode('utf-8', 'backslashreplace').replace('\x00', '\\x00')
+                  (out / (phase + '-tail.log')).write_text(text, encoding='utf-8')
+                  (out / (phase + '-tail.json')).write_text(json.dumps(dict(originalBytes=count,
+                      selectedBytes=len(raw), tailOffset=count-len(raw), selectedRawSha256=hashlib.sha256(raw).hexdigest(),
+                      utf8Representation='backslashreplace'), indent=2)+'\n', encoding='utf-8')
+          PY
+          fi
+          python3 -B .github/script/seekdb/fts_source_hybrid_validation.py --phase collect-evidence \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" \
+            --out "$RUNNER_TEMP/seekdb-paired-artifact/evidence"
 
-      - name: Preserve new continuation proof without re-uploading unchanged giant ELFs
+      - name: Upload complete new B ELF plus bounded source-hybrid evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fts-continuation-${{ github.sha }}
+          name: fts-source-hybrid-${{ github.sha }}
           path: ${{ runner.temp }}/seekdb-paired-artifact/
           retention-days: 3
           compression-level: 6
@@ -198,17 +249,17 @@ jobs:
           set -uo pipefail
           df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
           free -b
-          python3 -B .github/script/seekdb/fts_paired_validation.py --phase present \
-            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" \
-            --summary "$GITHUB_STEP_SUMMARY"
+          python3 -B .github/script/seekdb/fts_source_hybrid_validation.py --phase present \
+            --source "$GITHUB_WORKSPACE" --root "$PAIRED_ROOT" --driver-sha "$GITHUB_SHA" --kernel-sha "$HYBRID_KERNEL_SHA" \
+            --summary "$GITHUB_STEP_SUMMARY" --execute
           if test -f "$PAIRED_ROOT/report.json"; then
             python3 -B - "$PAIRED_ROOT/report.json" <<'PY'
           import json, sys
           r = json.load(open(sys.argv[1], encoding="utf-8"))
-          print("PAIRED_VISIBLE_RESULT", json.dumps({k:r[k] for k in
+          print("HYBRID_VISIBLE_RESULT", json.dumps({k:r[k] for k in
               ("status","driverCommit","validationDriverCommit","candidateBuildCommit","mode",
                "kernelOrigin","baselineCommit","builds","caseVerdicts","supplementalCompatibility",
                "artifactReuse","roundVerdicts","sameHostPerformance","failure","formalContestRun",
-               "allOfficialInputsUnchanged","planAssertions") if k in r}, ensure_ascii=False))
+               "allOfficialInputsUnchanged","planAssertions","untimedVerdicts","historicalCandidateExecuted","baselineRebuilt") if k in r}, ensure_ascii=False))
           PY
           fi
