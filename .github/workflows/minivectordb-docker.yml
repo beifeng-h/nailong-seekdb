@@ -1,0 +1,55 @@
+name: MiniVectorDB Docker validation
+
+on:
+  push:
+    branches:
+      - codex/minivectordb-docker-validation-20261109
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minivectordb-docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  docker-validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build and check the pinned development image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="minivectordb-ci:${GITHUB_SHA}"
+          git archive --format=tar HEAD \
+            .dockerignore Dockerfile CMakeLists.txt include src tests mysqltest \
+            | docker build --no-cache --platform linux/amd64 \
+              --target development-checks --progress plain --tag "$image" -
+          docker image inspect "$image" --format '{{.Id}}'
+
+      - name: Check process-kill recovery without network access
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="minivectordb-ci:${GITHUB_SHA}"
+          docker run --rm --network none --cpus 2 --memory 2g \
+            --entrypoint /bin/sh "$image" -ec '
+              mkdir -p /data
+              python3 /source/tests/crash_recovery.py /build/storage_fault_driver \
+                --scope "development container page layer" \
+                --report /data/page-crash.json
+              python3 /source/tests/crash_recovery.py /build/database_fault_driver \
+                --sort-cleanup --scope "development container Database layer" \
+                --report /data/table-crash.json
+              python3 /source/tests/crash_recovery.py /build/sql_fault_driver \
+                --sort-cleanup --commit-returned-stage session.commit_returned \
+                --scope "development container SqlSession using typed vector bindings" \
+                --report /data/sql-crash.json
+            '

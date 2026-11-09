@@ -1,0 +1,13 @@
+**
+!CMakeLists.txt
+!Dockerfile
+!include/
+!include/**
+!src/
+!src/**
+!tests/
+!tests/**
+!mysqltest/
+!mysqltest/**
+**/__pycache__
+**/*.pyc
