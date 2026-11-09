@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "synthetic": false,
+  "scope": "MiniVectorDB learning evidence. The single student technical explanation is u4. Assistant questions, explanations and automated experiments are attributed separately.",
+  "conversations": [
+    {
+      "id": "a1",
+      "role": "assistant",
+      "content": "本题有一半分数看你的真实理解，留一个具体判断：WHERE 只允许 A 类记录，全表最近的一条却属于 B 类。你认为应该“先全表取 Top1 再过滤”，还是“先过滤出 A 类再取 Top1”？两种做法会有什么不同？用你自己的话简短说说即可，不影响我继续开发。"
+    },
+    {
+      "id": "u4",
+      "role": "user",
+      "content": "先过滤出 A 类再取 Top1  ，先top1可能拿到空结果，也就是B类，优先过滤出符合条件的结果才对"
+    },
+    {
+      "id": "a2",
+      "role": "assistant",
+      "content": "对。先全表取 Top1 会选中 B，再被 WHERE 剔除，最终得到空结果，尽管库里存在符合条件的 A。题目要求先限定 A 类集合，再从中找最近的一条。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "filter-order",
+      "date": "2026-11-09",
+      "executor": "assistant using compiled C++ test executable",
+      "dataset_kind": "synthetic deterministic development fixture, not official judge data",
+      "input": "docs 表含 id=1/tag=other/向量[0,0]，id=2/tag=target/向量[10,0]，id=3/tag=target/向量[11,0]，另有两条 tag=tie 的记录。query=[0,0]，K=1，WHERE tag=target。提问中的 A 对应 target，B 对应 other。",
+      "output": "EXPERIMENT filter_order global_top1_id=1 global_top1_tag=other after_filter_count=0 filtered_top1_id=2 filtered_distance=10",
+      "explanation": "实际全表 Top1 为 id=1/other，过滤后为0条；先过滤得到 id=2，欧氏距离10。输出来自真实运行，非预填结果。",
+      "student_involvement": "用户解释了先取全表Top1可能导致空结果，以及应先限定符合条件的集合。测试代码由Agent编写和执行，不冒称用户亲自编写或运行。",
+      "test_source_sha256": "919a4b04b31c21c96a96cbc7aa696c766436ab3ce3532ca223b77109a7dfcc91",
+      "source_commit": "d0df5deb7bcfe664b81e33248facf069e2cb51a9"
+    },
+    {
+      "id": "m6-official-samples",
+      "date": "2026-11-09",
+      "executor": "assistant using compiled C++ SqlSession driver and Python comparator",
+      "dataset_kind": "unmodified official public SQL fixtures, commit a3dba559c1e7ebdc48bc990ffb1a4c75d1c1075c",
+      "source_commit": "92bf69edf9149b794e701e4a1f6a301bbd1b2bda",
+      "input": "5 groups, 32 complete SQL statements. Every group starts in an independent empty data directory. VECTOR and L2_DISTANCE inputs use SQL string literals.",
+      "output": "PASS sql_crud statements=9\nPASS sql_comparisons statements=7\nPASS sql_ordering statements=7\nPASS sql_empty statements=4\nPASS vector_euclidean statements=5\n{\"passed\": true, \"statements\": 32, \"passed_cases\": 5, \"cases\": 5}",
+      "comparison": "Column labels, integer values and strings were compared exactly. Unordered rows retain duplicate multiplicity. Floating distances use absolute and relative tolerance 1e-5.",
+      "student_involvement": "This adaptation and verification were performed by the assistant. No additional student explanation or independent experiment is claimed."
+    },
+    {
+      "id": "m6-query-development-baseline",
+      "date": "2026-11-09",
+      "executor": "assistant using frozen M6 executables and independent NumPy integer-distance truth",
+      "dataset_kind": "synthetic deterministic development data",
+      "source_commit": "92bf69edf9149b794e701e4a1f6a301bbd1b2bda",
+      "input": "10000 rows, 128 dimensions, 500 unfiltered and 500 filtered Top10 queries. Filter predicate tag=3.",
+      "output": "All 1000 query results and 10000 returned rows matched independent exact-distance and primary-key ordering truth. Unfiltered 500 queries took 21.391870 seconds. Filtered 500 queries took 20.561191 seconds.",
+      "limits": "One Windows development run, no hard address-space limit, no operating-system cache reset. Timing includes process startup, SQL parsing, execution and file output. No official score was measured.",
+      "student_involvement": "The assistant generated the data, wrote and ran the verification. These results do not add evidence of student participation or understanding."
+    },
+    {
+      "id": "m7-positional-linux-docker",
+      "date": "2026-11-09",
+      "executor": "assistant using GitHub Actions Docker development checks",
+      "source_commit": "d033d2fd2fb74d46dcec552d25ea98e92145fc22",
+      "dataset_kind": "synthetic deterministic development data and unchanged official public SQL fixtures",
+      "input": "10000 rows, 128 dimensions, baseline-candidate-candidate-baseline, 100 Top10 queries per group, 800 total queries and 8000 returned rows",
+      "result_summary": "5 CTest programs, 32 official public SQL statements, 3 legacy schema statements and page/table/SQL process-kill groups 12/13/14 passed. Every compared query row matched independent integer-distance truth. The database hash before and after queries matched.",
+      "query_timing": "{\"unfiltered\": {\"baseline_mean_seconds\": 2.810699751999998, \"candidate_mean_seconds\": 2.216776636000006, \"speedup\": 1.2679219486324425, \"candidate_elapsed_ratio\": 0.788692080832406}, \"filtered\": {\"baseline_mean_seconds\": 2.4248533594999913, \"candidate_mean_seconds\": 1.8485013209999934, \"speedup\": 1.3117942259236286, \"candidate_elapsed_ratio\": 0.7623146833840532}}",
+      "provenance": "https://github.com/beifeng-h/nailong-seekdb/actions/runs/42600565765",
+      "limits": "Two runs per variant per group, retained operating-system cache, 2 CPUs and 2 GiB development containers. Official protocol and performance score remain pending.",
+      "student_involvement": "The assistant implemented and executed this work. It does not add evidence of student participation or understanding."
+    },
+    {
+      "id": "m7-bounded-linux",
+      "date": "2026-11-09",
+      "executor": "assistant-coordinated independent Linux consumer, reported by the coordinator",
+      "source_commit": "d033d2fd2fb74d46dcec552d25ea98e92145fc22",
+      "dataset_kind": "synthetic deterministic SQL text-vector development fixture",
+      "input": "100000 rows and 128 dimensions under a 33554432-byte RLIMIT_AS process address-space limit",
+      "result_summary": "Text SQL write, restart and all 100000 stored rows, two Top10 groups and 100000 rows in each complete distance ordering passed. GCC 14.2 strict primary-translation-unit I/O compilation and all 7 file tests passed without warning downgrades.",
+      "limits": "Coordinator-verified results. Raw logs were not materialized on the Windows workstation. RLIMIT_AS excludes operating-system page cache. This targeted run did not execute CMake or Docker.",
+      "student_involvement": "This is assistant-coordinated automated verification. No additional student experiment, explanation or mastery is claimed."
+    }
+  ],
+  "limitations": [
+    "Only the original quoted student explanation of filter-first TopK is evidence of student understanding.",
+    "Implementation, validation, bug fixes and performance experiments were performed by the assistant or coordinated automated execution.",
+    "Official process protocol, full judge driver, frozen resource limits and official acceptance remain pending.",
+    "Unrelated project conversations, account information, credentials and local absolute paths are excluded from this selected material."
+  ]
+}
