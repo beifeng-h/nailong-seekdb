@@ -1,9 +1,9 @@
-name: MiniVectorDB Docker validation
+name: MiniVectorDB positional read validation
 
 on:
   push:
     branches:
-      - codex/minivectordb-docker-validation-20261109
+      - codex/minivectordb-positional-read-m7
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Build and check the pinned development image
         shell: bash
@@ -52,4 +52,24 @@ jobs:
                 --sort-cleanup --commit-returned-stage session.commit_returned \
                 --scope "development container SqlSession using typed vector bindings" \
                 --report /data/sql-crash.json
+            '
+
+      - name: Compare exact queries against the frozen read implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="minivectordb-ci:${GITHUB_SHA}"
+          baseline="$RUNNER_TEMP/minivectordb-baseline.cpp"
+          git show 0ad0aa5b3c843e5adf05e24362915b249607aed6:src/page_store.cpp > "$baseline"
+          docker run --rm --network none --cpus 2 --memory 2g \
+            --mount "type=bind,source=$baseline,target=/baseline.cpp,readonly" \
+            --entrypoint /bin/sh "$image" -ec '
+              mkdir -p /data
+              g++ -std=gnu++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic -Werror \
+                -I/source/include /baseline.cpp /source/tests/sql_public_case_driver.cpp \
+                /build/libminivectordb.a -o /data/baseline-capture
+              python3 /source/tests/query_read_comparison.py \
+                --baseline /data/baseline-capture --candidate /build/sql_public_case_driver \
+                --output /data/read-comparison --report /data/read-comparison.json
+              cat /data/read-comparison.json
             '

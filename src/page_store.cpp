@@ -12,6 +12,10 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -68,9 +72,34 @@ class File {
   }
 
   void read(std::uint64_t offset, void* data, std::size_t length) {
-    seek(offset);
-    if (length != 0 && std::fread(data, 1, length, stream_) != length)
-      fail("Incomplete file read: " + path_.string());
+    const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    if (offset > maximum || length > maximum - offset) fail("File offset overflow");
+    auto* output = static_cast<std::byte*>(data);
+    std::size_t completed = 0;
+    // Unbuffered writes always establish their absolute position explicitly.
+#ifdef _WIN32
+    const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream_)));
+#else
+    const auto descriptor = fileno(stream_);
+#endif
+    while (completed < length) {
+      const auto position = offset + completed;
+#ifdef _WIN32
+      OVERLAPPED request{};
+      request.Offset = static_cast<DWORD>(position);
+      request.OffsetHigh = static_cast<DWORD>(position >> 32);
+      const auto count = static_cast<DWORD>(std::min<std::size_t>(length - completed, std::numeric_limits<DWORD>::max()));
+      DWORD transferred = 0;
+      if (!ReadFile(handle, output + completed, count, &transferred, &request) || transferred == 0)
+        fail("Incomplete file read: " + path_.string());
+#else
+      const auto count = std::min<std::size_t>(length - completed, std::numeric_limits<ssize_t>::max());
+      const auto transferred = pread(descriptor, output + completed, count, static_cast<off_t>(position));
+      if (transferred < 0 && errno == EINTR) continue;
+      if (transferred <= 0) fail("Incomplete file read: " + path_.string());
+#endif
+      completed += static_cast<std::size_t>(transferred);
+    }
   }
 
   void write(std::uint64_t offset, const void* data, std::size_t length) {

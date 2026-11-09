@@ -31,7 +31,7 @@ The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
 then installs build tools from the HTTPS `20261109T000000Z` Ubuntu package
 snapshot. APT archive signatures and HTTPS certificate verification remain
 enabled. The `development-checks` stage runs
-the four CTest programs, all five public fixture groups and the legacy schema
+the five CTest programs, all five public fixture groups and the legacy schema
 fixture. Installed package versions are saved inside the image at
 `/build/installed-packages.tsv`.
 
@@ -39,6 +39,16 @@ The independent Actions workflow builds from an explicit Git archive of source,
 tests and build files. It then runs process-kill recovery checks in a
 network-disabled container. The image exists on the temporary runner during
 validation.
+
+File reads use native positional operations. The file I/O tests cover short
+reads, errors, immediate reads after unbuffered writes, offsets beyond 4 GiB
+and interrupted reads on Linux. The positional-read workflow also compares
+the candidate with the frozen read implementation on one synthetic
+10,000-row, 128-dimensional database. Both variants execute 100 exact Top10
+queries per group in balanced order and check every returned row against
+independent integer-distance calculations. Its elapsed times include process
+startup, SQL parsing and result capture. The operating-system cache is retained
+between runs.
 
 ## Integration status
 

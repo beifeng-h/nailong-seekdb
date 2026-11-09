@@ -34,6 +34,8 @@ cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE
 if errorlevel 1 goto failure
 cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\tests\sql_public_case_driver.cpp" page_store.obj database.obj sql_parser.obj sql_executor.obj /Fe:sql_public_case_driver.exe
 if errorlevel 1 goto failure
+cl.exe /nologo /std:c++20 /EHsc /W4 /WX /utf-8 /O2 /I"%SOURCE%\include" "%SOURCE%\tests\file_io_tests.cpp" /Fe:file_io_tests.exe
+if errorlevel 1 goto failure
 popd
 exit /b 0
 :failure
