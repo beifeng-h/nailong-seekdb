@@ -840,6 +840,9 @@ def tokenize_preflight():
     A negative is never mixed into the 16 successful ALL-mode corpus queries.
     Source: ob_expr_tokenize.cpp parse_fulltext/try_load_dictionary_for_ik and
     ob_gen_dic_loader.cpp gen_dic_loader (only CHARSET_UTF8MB4 supports IK).
+    latin1 instead fails the earlier SQL charset lookup: the compiled registry
+    accepts binary/utf8mb4 (plus UTF8 aliases), not every ObCharsetType enum.
+    Exact latin1 bytes were observed on A in Actions run 42583955784.
     """
     sql = legacy.SESSION + (
         "SELECT 'raw_null', NULL IS NULL, CHARSET(NULL);\n"
@@ -853,7 +856,10 @@ def tokenize_preflight():
             ('binary', "CONVERT(X'616263' USING binary)", 'binary'),
             ('latin1', "CONVERT(X'616263' USING latin1)", 'latin1')):
         sql = legacy.SESSION + "SELECT TOKENIZE(%s, 'ik', '[{\"output\": \"all\"}]');\n" % expression
-        error = ('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n' % charset).encode('ascii')
+        if charset == 'latin1':
+            error = b"ERROR 1115 (42000) at line 2: Unknown character set: 'latin1'\n"
+        else:
+            error = ('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n' % charset).encode('ascii')
         result.append(('tokenize-negative-' + name, sql, 1, error))
     return tuple(result)
 

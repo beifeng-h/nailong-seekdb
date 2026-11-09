@@ -309,7 +309,9 @@ class NullableTokenizeMatrix(unittest.TestCase):
                 ('binary','binary','latin1')):
             self.assertEqual(sql,h.legacy.SESSION+"SELECT TOKENIZE(%s, 'ik', '[{\"output\": \"all\"}]');\n"%expr)
             self.assertEqual(code,1)
-            self.assertEqual(raw,('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n'%charset).encode())
+            expected=(b"ERROR 1115 (42000) at line 2: Unknown character set: 'latin1'\n" if charset=='latin1' else
+                ('ERROR 1235 (0A000) at line 2: ik with the %s charset is not supported\n'%charset).encode())
+            self.assertEqual(raw,expected)
 
     def test_five_separate_invocations_capture_exact_sql_and_raw_error_proofs(self):
         work,capture=self.run_fixture()
@@ -347,6 +349,118 @@ class NullableTokenizeMatrix(unittest.TestCase):
                 self.assertFalse(work['passed'])
                 self.assertEqual(mocked.call_count,2)
                 self.assertNotIn('canonical',work)
+
+    def test_actual_latin1_lookup_error_hash_and_ik_boundaries_are_not_interchangeable(self):
+        # Complete actual A bytes reconstructed from run42583955784/job129049151912.
+        actual=b"ERROR 1115 (42000) at line 2: Unknown character set: 'latin1'\n"
+        self.assertEqual(len(actual),62)
+        self.assertEqual(hashlib.sha256(actual).hexdigest(),
+            '36d9dcdec06c663c193169adc27258b0a68e0122278d663f1a45c8626db3ee5d')
+        specs={name:(sql,code,raw) for name,sql,code,raw in h.tokenize_preflight()}
+        self.assertEqual(specs['tokenize-negative-latin1'][2],actual)
+        for name in ('tokenize-negative-raw-null','tokenize-negative-binary'):
+            self.assertEqual(hashlib.sha256(specs[name][2]).hexdigest(),
+                'd3425c289f84acd847eb6687cf492cfa48b4b1172c22fbdc845797483c41d9c3')
+        original=self.capture_fixture
+        for name,wrong in (
+                ('tokenize-negative-latin1',b'ERROR 1235 (0A000) at line 2: ik with the latin1 charset is not supported\n'),
+                ('tokenize-negative-latin1',actual.replace(b'1115',b'1235')),
+                ('tokenize-negative-latin1',actual.replace(b"'latin1'",b"'other'")),
+                ('tokenize-negative-raw-null',actual),('tokenize-negative-binary',actual)):
+            def capture(*args,**kwargs):
+                row=original(*args,**kwargs)
+                if args[1].stem==name:
+                    args[1].write_bytes(wrong)
+                    row['outputSha256']=h.digest(args[1])
+                return row
+            with self.subTest(name=name,wrong=wrong),patch.object(h,'capture_group',side_effect=capture):
+                work=h.tokenize_work(self.args)(self.call,self.root)
+                self.assertFalse(work['passed'])
+                self.assertNotIn('canonical',work)
+        rows=self.completed_fixture()
+        self.assertTrue(h.tokenize_complete(rows,DRIVER,self.root))
+        for role_index,role in enumerate(('baseline','candidate')):
+            directory=self.root/'validation/untimed'/('tokenize-'+role)
+            for name,wrong in (('tokenize-negative-latin1',specs['tokenize-negative-binary'][2]),
+                    ('tokenize-negative-raw-null',actual),('tokenize-negative-binary',actual)):
+                path=directory/(name+'.log');before=path.read_bytes()
+                altered=copy.deepcopy(rows)
+                path.write_bytes(wrong)
+                altered[role_index]['work']['preflight'][name]['invocation']['outputSha256']=h.digest(path)
+                with self.subTest(completed_role=role,name=name):
+                    self.assertFalse(h.tokenize_complete(altered,DRIVER,self.root))
+                path.write_bytes(before)
+
+    def test_exact_compiled_charset_lookup_excludes_enum_only_latin1(self):
+        # Compile exact lookup/validity bodies with only ObString/value facades.
+        # This checks registry semantics, not a server or a production ELF build.
+        source=(REPO/'src/oblib/lib/charset/ob_charset.cpp').read_text()
+        header=(REPO/'src/oblib/lib/charset/ob_charset.h').read_text()
+        def function(marker):
+            start=source.index(marker);left=source.index('{',start);end=left+1;depth=1
+            while depth:
+                depth+=(source[end]=='{')-(source[end]=='}');end+=1
+            return source[start:end]
+        enum=re.search(r'enum ObCharsetType\s*\{.*?\n\};',header,re.S).group()
+        utf8=re.search(r'^#define OB_UTF8MB4\s+("[^"]+")',
+            (REPO/'src/oblib/lib/charset/ob_ctype.h').read_text(),re.M).group(1)
+        binary=re.search(r'ObCharsetInfo ob_charset_bin\s*=\s*\{\s*63,0,0,\s*[^,]+,\s*("[^"]+")',
+            (REPO/'src/oblib/lib/charset/ob_ctype_bin.cc').read_text()).group(1)
+        facade="""#include <cassert>
+#include <cctype>
+#include <cstdint>
+#include <string>
+struct ObString { std::string value;
+  int case_compare(const char *other) const {
+    std::string right(other),left(value);
+    for(char &c:left)c=std::tolower(static_cast<unsigned char>(c));
+    for(char &c:right)c=std::tolower(static_cast<unsigned char>(c));
+    return left.compare(right);
+  }
+};
+struct CharsetName { const char *csname; };
+"""+enum+"\nCharsetName ob_charset_utf8mb4_bin={"+utf8+"},ob_charset_bin={"+binary+"};\n"+"""
+struct ObCharset { static ObCharsetType charset_type(const ObString &);
+  static bool is_valid_charset(int64_t); };
+"""+function('ObCharsetType ObCharset::charset_type(const ObString &cs_name)')+"\n"+function(
+            'bool ObCharset::is_valid_charset(int64_t cs_type_int)')+"""
+int main() {
+  assert(ObCharset::charset_type({"utf8mb4"})==CHARSET_UTF8MB4);
+  assert(ObCharset::charset_type({"UTF8MB4"})==CHARSET_UTF8MB4);
+  assert(ObCharset::charset_type({"utf8"})==CHARSET_UTF8MB4);
+  assert(ObCharset::charset_type({"utf8mb3"})==CHARSET_UTF8MB4);
+  assert(ObCharset::charset_type({"binary"})==CHARSET_BINARY);
+  assert(ObCharset::charset_type({"latin1"})==CHARSET_INVALID);
+  assert(!ObCharset::is_valid_charset(CHARSET_LATIN1));
+  assert(ObCharset::is_valid_charset(CHARSET_BINARY));
+  assert(ObCharset::is_valid_charset(CHARSET_UTF8MB4));
+}
+"""
+        cpp=self.base/'charset-registry.cpp';binary=self.base/'charset-registry'
+        cpp.write_text(facade)
+        subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(cpp),'-o',str(binary)],
+            check=True,capture_output=True,timeout=30)
+        subprocess.run([str(binary)],check=True,capture_output=True,timeout=10)
+        self.assertIn('return CHARSET_BINARY == charset_type || CHARSET_UTF8MB4 == charset_type;',source)
+        registry=re.search(r'charset_wrap_arr_\[.*?\]\s*=\s*\{(.*?)\n\};',source,re.S).group(1)
+        self.assertEqual(re.findall(r'\{(CHARSET_\w+),',registry),['CHARSET_BINARY','CHARSET_UTF8MB4'])
+        self.assertIn('static const int64_t VALID_CHARSET_TYPES = 2;',header)
+        positive=h.tokenize_sql()
+        self.assertEqual(set(re.findall(r'USING (\w+)|CHARACTER SET (\w+)',positive)),
+            {('utf8mb4',''),('','utf8mb4')})
+        self.assertEqual(set(re.findall(r", '(ik|beng)',",positive)),{'ik','beng'})
+        self.assertEqual(set(re.findall(r'"output": "([^"\n]+)"',positive)),{'all'})
+        all_sql=positive+''.join(sql for _,sql,_,_ in h.tokenize_preflight())
+        self.assertEqual(set(re.findall(r'USING (\w+)',all_sql)),{'utf8mb4','binary','latin1'})
+        convert=(REPO/'src/sql/engine/expr/ob_expr_convert.cpp').read_text()
+        self.assertIn('charset_type = ObCharset::charset_type(cs_name.trim())',convert)
+        self.assertIn('ret = OB_ERR_UNKNOWN_CHARSET;',convert)
+        resolver=(REPO/'src/sql/resolver/expr/ob_raw_expr_resolver_impl.cpp').read_text()
+        self.assertIn('case T_CHAR_CHARSET:',resolver)
+        self.assertIn('ObCharsetType charset_type = ObCharset::charset_type(charset_str);',resolver)
+        self.assertIn('LOG_USER_ERROR(OB_ERR_UNKNOWN_CHARSET, charset_str.length(), charset_str.ptr());',resolver)
+        self.assertIn('#define ER_UNKNOWN_CHARACTER_SET 1115',
+            (REPO/'src/share/mysql_errno.h').read_text())
 
     def test_decoder_refuses_sql_null_wrong_empty_shape_and_bad_bytes(self):
         raw=self.token_rows()
@@ -407,6 +521,9 @@ class NullableTokenizeMatrix(unittest.TestCase):
     def test_null_charset_mode_signatures_are_pinned_to_real_engine_source(self):
         # Original A and archived B3 have byte-identical versions of these files.
         pins={
+            'src/oblib/lib/charset/ob_charset.cpp':'4e1749c9eacea63161553a38baac18995db8164c6b418e805e6d4e800539f75e',
+            'src/sql/engine/expr/ob_expr_convert.cpp':'cbd3724543385549650f5c4dfbf5684c8d260f46059f6004ee72e6e6c0517239',
+            'src/sql/resolver/expr/ob_raw_expr_resolver_impl.cpp':'0d227a43708cae3a874caf4ae715b153acbf2d345b4f4254dd5ef1870b784af5',
             'src/sql/engine/expr/ob_expr_tokenize.cpp':'c722685d91119a41ca1f1e5cdbd047b612c1932f26a6ff2aef25adfc9cb169af',
             'src/sql/engine/expr/ob_expr_cast.cpp':'ae09302d045cc855daa79e972ece11e57d232e909f30d427e97b3cbb03b9082e',
             'src/sql/engine/expr/ob_expr_collation.cpp':'6c0fce50d3e7632ff34a15ec8255410460f6dfb7c45c28b5748c268ac55bafde',
