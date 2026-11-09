@@ -2,6 +2,7 @@
 import argparse
 import ast
 from contextlib import ExitStack, redirect_stdout
+from collections import namedtuple
 import copy
 import hashlib
 import io
@@ -359,7 +360,8 @@ class Contracts(unittest.TestCase):
                     p.source_identity(self.source, DRIVER)
 
     def test_driver_allows_only_exact_ci_paths(self):
-        with patch.object(p, 'git', side_effect=['\n'.join(p.ALLOWED_DRIVER_PATHS).encode(), b'']):
+        with patch.object(p, 'git', side_effect=['\n'.join(p.ALLOWED_DRIVER_PATHS).encode(),
+                (REPO / p.DIAGNOSTIC_TEST).read_bytes(), b'', b'']):
             self.assertEqual(p.verify_driver(self.source, DRIVER)['kernelOrigin'], p.KERNEL)
         for forbidden in ['src/sql/executor.cpp', p.PREFIX + 'fts_contest_validation.py', p.PREFIX + 'another_test.py', 'tools/benchmark/fts_large_bench.sh']:
             with self.subTest(path=forbidden), patch.object(p, 'git', return_value=forbidden.encode()):
@@ -587,7 +589,11 @@ class Contracts(unittest.TestCase):
             p.write_json(self.root / 'runtime' / role / 'identity.json', identity)
         calls = []
         self.ports = []
-        native = SimpleNamespace(discover_cases=lambda source: [SimpleNamespace(name=n) for n in p.selected_cases('candidate')])
+        Case = namedtuple('MysqltestCase', ('name', 'test_file', 'result_file'))
+        native = SimpleNamespace(discover_cases=lambda source: [Case(n,
+            source / ('tools/deploy/mysql_test/test_suite/' + n.replace('.', '/t/') + '.test'),
+            source / ('tools/deploy/mysql_test/test_suite/' + n.replace('.', '/r/mysql/') + '.result'))
+            for n in p.selected_cases('candidate')])
         harness = Mock()
         self._fake_harness = harness
         harness.original_inputs.side_effect = inputs or (lambda source: {'official': 'fixed'})
@@ -1298,6 +1304,180 @@ except InterruptedError:
         row['validationContext'] = context
         return proof, row
 
+    def diagnostic_fixture(self):
+        source = self.root / 'sources/candidate'
+        corrected = (REPO / p.DIAGNOSTIC_TEST).read_bytes()
+        original = corrected.replace(p.DIAGNOSTIC_LITERAL, p.DIAGNOSTIC_TOKEN)
+        for path, data in ((source / p.DIAGNOSTIC_TEST, original),
+                (source / p.DIAGNOSTIC_RESULT, (REPO / p.DIAGNOSTIC_RESULT).read_bytes()),
+                (self.source / p.DIAGNOSTIC_TEST, corrected)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        Case = namedtuple('MysqltestCase', ('name', 'test_file', 'result_file'))
+        case = Case(p.DIAGNOSTIC_CASE, source / p.DIAGNOSTIC_TEST, source / p.DIAGNOSTIC_RESULT)
+        call_args = SimpleNamespace(role='candidate', source=source, expected_sha=p.CANDIDATE)
+        return case, call_args
+
+    def diagnostic_row(self):
+        proof = p.diagnostic_provenance(self.root, self.root / 'sources/candidate', self.source, DRIVER)
+        return dict(role='candidate', name=p.DIAGNOSTIC_CASE, status='passed', cleanupPassed=True,
+            work=dict(passed=True, exitCode=0, invocations=1, inputsUnchanged=True,
+                testSha256=p.DIAGNOSTIC_TEST_SHA, expectedSha256=p.DIAGNOSTIC_RESULT_SHA,
+                diagnosticInput=proof, diagnosticInputVerified=True))
+
+    def test_added_diagnostic_public_test_is_exactly_two_literal_substitutions(self):
+        case, _ = self.diagnostic_fixture()
+        raw, corrected = case.test_file.read_bytes(), (REPO / p.DIAGNOSTIC_TEST).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), p.DIAGNOSTIC_ORIGINAL_SHA)
+        self.assertEqual(hashlib.sha256(corrected).hexdigest(), p.DIAGNOSTIC_TEST_SHA)
+        self.assertEqual(raw.count(p.DIAGNOSTIC_TOKEN), 2)
+        self.assertEqual(corrected, raw.replace(p.DIAGNOSTIC_TOKEN, p.DIAGNOSTIC_LITERAL))
+        self.assertEqual(corrected.replace(p.DIAGNOSTIC_LITERAL, p.DIAGNOSTIC_TOKEN), raw)
+        self.assertEqual(raw.count(b'\n'), corrected.count(b'\n'))
+        self.assertEqual(p.digest(REPO / p.DIAGNOSTIC_RESULT), p.DIAGNOSTIC_RESULT_SHA)
+        self.assertEqual(len(p.DIAGNOSTIC_QUERY.split()), 302)
+        self.assertEqual(p.DIAGNOSTIC_QUERY.split(), [b'alpha', b'beta'] +
+                         [b'absent' + str(i).encode() for i in range(1, 301)])
+
+    def test_added_diagnostic_override_passes_owned_copy_to_unchanged_harness(self):
+        case, call_args = self.diagnostic_fixture()
+        native, harness = object(), Mock()
+        before = {path: path.read_bytes() for path in (case.test_file, case.result_file, self.source / p.DIAGNOSTIC_TEST)}
+        harness.original_case.return_value = lambda call, out: self.diagnostic_row()['work']
+        execute = p.diagnostic_case(self.args, call_args, native, case, harness)
+        used_args, used_native, used_case = harness.original_case.call_args.args
+        self.assertIs(used_args, call_args)
+        self.assertIs(used_native, native)
+        self.assertEqual(used_case, case._replace(test_file=self.root / p.DIAGNOSTIC_OWNED_TEST))
+        out = self.root / 'validation/cases/candidate' / p.DIAGNOSTIC_CASE
+        out.mkdir(parents=True)
+        row = self.diagnostic_row()
+        row['work'] = execute(object(), out)
+        self.assertTrue(p.accepted_diagnostic_input(row, DRIVER))
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        proof = json.loads((self.root / p.DIAGNOSTIC_PROVENANCE).read_bytes())
+        self.assertEqual(proof, row['work']['diagnosticInput'])
+        self.assertEqual(proof['historicalFailure']['successfulAssertions'], 60)
+        self.assertIs(proof['historicalFailure']['wideAssertionRan'], False)
+        self.assertEqual(proof['actualCandidateBuildCommit'], p.CANDIDATE)
+        with self.assertRaises(FileExistsError):
+            p.diagnostic_case(self.args, call_args, native, case, harness)
+
+    def test_added_diagnostic_override_rejects_wrong_case_role_source_or_expected(self):
+        case, call_args = self.diagnostic_fixture()
+        for bad_case, bad_args in ((case._replace(name=p.CASES[-1]), call_args),
+                (case._replace(test_file=self.source / p.DIAGNOSTIC_TEST), call_args),
+                (case._replace(result_file=self.source / p.DIAGNOSTIC_RESULT), call_args),
+                (case, SimpleNamespace(**dict(vars(call_args), role='baseline'))),
+                (case, SimpleNamespace(**dict(vars(call_args), expected_sha=DRIVER)))):
+            with self.subTest(case=bad_case, args=bad_args), self.assertRaisesRegex(RuntimeError, 'only permits'):
+                p.diagnostic_case(self.args, bad_args, object(), bad_case, Mock())
+        for path in (self.root.parent / 'elsewhere', self.root / 'sources/candidate/..'):
+            with self.assertRaisesRegex(RuntimeError, 'bounds'):
+                p.diagnostic_provenance(self.root, path, self.source, DRIVER)
+
+    def test_added_diagnostic_override_rejects_any_original_or_corrected_or_golden_byte_change(self):
+        case, call_args = self.diagnostic_fixture()
+        for path in (case.test_file, case.result_file, self.source / p.DIAGNOSTIC_TEST):
+            before = path.read_bytes()
+            for after in (before + b'\n', before.replace(b'\n', b'\r\n'), before[:-1]):
+                path.write_bytes(after)
+                with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, 'size/hash'):
+                    p.diagnostic_case(self.args, call_args, object(), case, Mock())
+            path.write_bytes(before)
+        self.assertFalse((self.root / 'diagnostic-inputs').exists())
+
+    def test_added_diagnostic_override_rejects_links_and_preexisting_owned_directory(self):
+        case, call_args = self.diagnostic_fixture()
+        for path in (case.test_file, case.result_file, self.source / p.DIAGNOSTIC_TEST):
+            alias = path.with_name('alias')
+            os.link(path, alias)
+            with self.assertRaisesRegex(RuntimeError, 'type/link'):
+                p.diagnostic_case(self.args, call_args, object(), case, Mock())
+            alias.unlink()
+            path.rename(alias)
+            path.symlink_to(alias)
+            with self.assertRaisesRegex(RuntimeError, 'Symlink'):
+                p.diagnostic_case(self.args, call_args, object(), case, Mock())
+            path.unlink()
+            alias.rename(path)
+        (self.root / 'diagnostic-inputs').symlink_to(self.source, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'Symlink'):
+            p.diagnostic_case(self.args, call_args, object(), case, Mock())
+        (self.root / 'diagnostic-inputs').unlink()
+        (self.root / 'diagnostic-inputs').mkdir()
+        with self.assertRaises(FileExistsError):
+            p.diagnostic_case(self.args, call_args, object(), case, Mock())
+
+    def test_added_diagnostic_guard_rechecks_all_inputs_provenance_and_owned_out(self):
+        for target in ('originalTest', 'correctedDriverTest', 'derivedTest', 'expectedResult', 'provenancePath', 'out'):
+            with self.subTest(target=target):
+                self.setUp()
+                case, call_args = self.diagnostic_fixture()
+                harness = Mock()
+                proof = self.diagnostic_row()['work']['diagnosticInput']
+                def mutate(call, out):
+                    path = Path(proof[target] if target == 'provenancePath' else proof[target]['path'])
+                    path.write_bytes(path.read_bytes() + b' ')
+                    return self.diagnostic_row()['work']
+                harness.original_case.return_value = mutate
+                execute = p.diagnostic_case(self.args, call_args, object(), case, harness)
+                out = self.root / 'validation/cases/candidate' / p.DIAGNOSTIC_CASE
+                out.mkdir(parents=True)
+                with self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                    execute(object(), self.root if target == 'out' else out)
+
+    def test_added_diagnostic_provenance_gate_rejects_arbitrary_pass_and_waivers(self):
+        row = self.diagnostic_row()
+        self.assertTrue(p.accepted_diagnostic_input(row, DRIVER))
+        for key, value in (('status', 'failed'), ('cleanupPassed', False), ('role', 'baseline'), ('error', 'bad')):
+            self.assertFalse(p.accepted_diagnostic_input(dict(row, **{key: value}), DRIVER))
+        for key, value in (('passed', False), ('exitCode', False), ('exitCode', 1), ('invocations', 2),
+                ('inputsUnchanged', False), ('diagnosticInputVerified', False), ('testSha256', p.DIAGNOSTIC_ORIGINAL_SHA),
+                ('expectedSha256', 'a' * 64), ('diagnosticInput', {'accepted': True}), ('timedOut', True)):
+            self.assertFalse(p.accepted_diagnostic_input(dict(row, work=dict(row['work'], **{key: value})), DRIVER))
+        for key in row['work']['diagnosticInput']:
+            changed = copy.deepcopy(row)
+            changed['work']['diagnosticInput'].pop(key)
+            self.assertFalse(p.accepted_diagnostic_input(changed, DRIVER), key)
+        for key, value in (('actualCandidateBuildCommit', DRIVER), ('validationDriverCommit', p.CANDIDATE),
+                ('source', str(self.source)), ('assertionCount', 60), ('substitutions', {'count': 1}),
+                ('queryLiteral', {'tokens': 301}), ('expectedResultUnchanged', False),
+                ('historicalFailure', {'nativeStatus': 'passed'})):
+            changed = copy.deepcopy(row)
+            changed['work']['diagnosticInput'][key] = value
+            self.assertFalse(p.accepted_diagnostic_input(changed, DRIVER), key)
+        rows = self.presentation_report()['caseVerdicts']
+        self.assertFalse(p.case_evidence_complete(rows, validation_driver=DRIVER, require_diagnostic=True))
+        rows[-1] = row
+        self.assertTrue(p.case_evidence_complete(rows, validation_driver=DRIVER, require_diagnostic=True))
+
+    def test_added_diagnostic_collector_only_selects_two_exact_owned_filenames(self):
+        case, call_args = self.diagnostic_fixture()
+        p.diagnostic_case(self.args, call_args, object(), case, Mock())
+        (self.root / 'diagnostic-inputs/unrelated.test').write_bytes(b'DO NOT COLLECT')
+        manifest = p.collect_continuation_evidence(self.root, self.root.parent / 'diagnostic-evidence')
+        self.assertEqual({row['path'] for row in manifest['files']},
+                         {p.DIAGNOSTIC_OWNED_TEST, p.DIAGNOSTIC_PROVENANCE})
+        self.assertEqual(manifest['bytes'], sum((self.root / row['path']).stat().st_size for row in manifest['files']))
+
+    def test_added_diagnostic_allowlist_requires_exact_corrected_hash_and_unchanged_result(self):
+        corrected = (REPO / p.DIAGNOSTIC_TEST).read_bytes()
+        with patch.object(p, 'git', side_effect=[p.DIAGNOSTIC_TEST.encode(), corrected, b'', b'']):
+            self.assertIn(p.DIAGNOSTIC_TEST, p.verify_driver(self.source, DRIVER)['allowedDriverChanges'])
+        for altered in (corrected + b'\n', corrected.replace(p.DIAGNOSTIC_LITERAL, p.DIAGNOSTIC_TOKEN, 1)):
+            with patch.object(p, 'git', side_effect=[p.DIAGNOSTIC_TEST.encode(), altered]):
+                with self.assertRaisesRegex(RuntimeError, 'exact two-literal'):
+                    p.verify_driver(self.source, DRIVER)
+        with patch.object(p, 'git', side_effect=[p.DIAGNOSTIC_TEST.encode(), corrected, p.DIAGNOSTIC_RESULT.encode()]):
+            with self.assertRaisesRegex(RuntimeError, 'expected result changed'):
+                p.verify_driver(self.source, DRIVER)
+        for forbidden in (p.DIAGNOSTIC_RESULT, p.DIAGNOSTIC_TEST.replace('match_filter_only_contract', 'simple_query'),
+                          p.DIAGNOSTIC_TEST.replace('match_filter_only_contract', 'tokenize_casefold_contract')):
+            self.assertNotIn(forbidden, p.ALLOWED_DRIVER_PATHS)
+            with patch.object(p, 'git', return_value=forbidden.encode()), self.assertRaises(RuntimeError):
+                p.verify_driver(self.source, DRIVER)
+
     def test_continuation_strong_proof_never_accepts_boolean_only_or_malformed_fields(self):
         proof, row = self.compatibility_record()
         self.assertTrue(p.accepted_compatibility(proof, row))
@@ -1326,6 +1506,7 @@ except InterruptedError:
         report.update(mode=p.REUSE_MODE, validationDriverCommit=DRIVER, candidateBuildCommit=p.CANDIDATE,
                       supplementalCompatibility={'candidate/' + p.CASES[-1]: proof})
         report['builds']['candidate']['sourceCommit'] = p.CANDIDATE
+        report['caseVerdicts'][-1] = self.diagnostic_row()
         report['caseVerdicts'] = [raw if row['role'] == 'candidate' and row['name'] == p.CASES[-1] else row
                                  for row in report['caseVerdicts']]
         return report
@@ -1460,6 +1641,8 @@ except InterruptedError:
     def fake_reuse_validation(self, accepted=True, cleanup=True):
         import fts_plan_compatibility as c
         plan, report, calls = self.fake_validation()
+        self.diagnostic_fixture()
+        plan['candidateSource'] = str(self.root / 'sources/candidate')
         p.write_json(self.root / 'runtime/verification.json', {'synthetic': True})
         plan.update(mode=p.REUSE_MODE, candidateBuildCommit=p.CANDIDATE,
                     artifact={'artifactId': 13621468966},
@@ -1486,6 +1669,8 @@ except InterruptedError:
         original = self._fake_harness.run_instance.side_effect
         def run(*args, **kwargs):
             row = original(*args, **kwargs)
+            if args[0].role == 'candidate' and args[2] == p.DIAGNOSTIC_CASE:
+                row['work'] = self.diagnostic_row()['work']
             if args[0].role == 'candidate' and args[2] == p.CASES[-1]:
                 row = copy.deepcopy(raw)
                 row.pop('role')

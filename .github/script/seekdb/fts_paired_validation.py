@@ -30,8 +30,19 @@ SOURCE_TREES = {'baseline': '7397f01a796c5ab1cae81c90303b22b63945d11d',
 REUSE_MODE = 'verified_elf_continuation'
 KERNEL = 'f1f4d0d4b225ec528dc3802dbfd93d9d4870aa65'
 PREFIX = '.github/script/seekdb/'
+DIAGNOSTIC_CASE = 'fts_index.match_filter_only_contract'
+DIAGNOSTIC_TEST = 'tools/deploy/mysql_test/test_suite/fts_index/t/match_filter_only_contract.test'
+DIAGNOSTIC_RESULT = 'tools/deploy/mysql_test/test_suite/fts_index/r/mysql/match_filter_only_contract.result'
+DIAGNOSTIC_ORIGINAL_SHA = 'eedfa299a351ed8180b51c82561b67514344621353390d37ceb989764861c512'
+DIAGNOSTIC_TEST_SHA = '99e6daee3e8515168d1944cc0cd3132f9e8d4375545a755802a0fbfbba83c2f7'
+DIAGNOSTIC_RESULT_SHA = '90bf4aa965edae394d4685ac2546ef658cb8164dc17fec171a7f321c7fc5a777'
+DIAGNOSTIC_TOKEN = b'AGAINST(@match_only_wide_query)'
+DIAGNOSTIC_QUERY = b'alpha beta ' + b' '.join(b'absent' + str(i).encode('ascii') for i in range(1, 301))
+DIAGNOSTIC_LITERAL = b"AGAINST('" + DIAGNOSTIC_QUERY + b"')"
+DIAGNOSTIC_OWNED_TEST = 'diagnostic-inputs/match_filter_only_contract.literal.test'
+DIAGNOSTIC_PROVENANCE = 'diagnostic-inputs/match_filter_only_contract.literal.json'
 ALLOWED_DRIVER_PATHS = frozenset((
-    '.github/workflows/fts-contest-validation.yml',
+    '.github/workflows/fts-contest-validation.yml', DIAGNOSTIC_TEST,
     PREFIX + 'fts_paired_validation.py', PREFIX + 'fts_paired_collect.py',
     PREFIX + 'test_fts_paired_validation.py', PREFIX + 'test_fts_paired_collect.py',
     PREFIX + 'fts_plan_compatibility.py', PREFIX + 'test_fts_plan_compatibility.py',
@@ -91,6 +102,12 @@ def verify_driver(source, driver_sha):
     changed = set(git(source, 'diff', '--name-only', KERNEL, driver_sha, '--').decode().splitlines())
     if not changed <= ALLOWED_DRIVER_PATHS:
         raise RuntimeError('Driver tree differs from kernel origin outside paired CI: ' + ', '.join(sorted(changed - ALLOWED_DRIVER_PATHS)))
+    if DIAGNOSTIC_TEST in changed:
+        corrected = git(source, 'show', driver_sha + ':' + DIAGNOSTIC_TEST)
+        if hashlib.sha256(corrected).hexdigest() != DIAGNOSTIC_TEST_SHA:
+            raise RuntimeError('Added diagnostic test differs from exact two-literal correction')
+    if git(source, 'diff', '--name-only', CANDIDATE, driver_sha, '--', DIAGNOSTIC_RESULT).strip():
+        raise RuntimeError('Added diagnostic expected result changed')
     # These complete build/benchmark/native input trees must also equal A.
     protected = ('build.sh', 'CMakeLists.txt', 'cmake', 'rust', 'deps',
                  '.github/actions/setup-rust', 'tools/cmake', BENCH + '.sh',
@@ -237,7 +254,119 @@ def accepted_compatibility(proof, row, validation_driver=None):
     return bool(re.fullmatch(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', str(proof.get('nativeMismatchTimestamp', ''))))
 
 
-def case_evidence_complete(rows, proofs=None, validation_driver=None):
+def diagnostic_provenance(root, source, workspace, driver):
+    """Identify a syntax-only added test input separately from the B build."""
+    root, source, workspace = map(Path, (root, source, workspace))
+    if (any(not p.is_absolute() or str(p) != os.path.abspath(p) for p in (root, source, workspace))
+            or source != root / 'sources/candidate'
+            or not re.fullmatch('[0-9a-f]{40}', str(driver))):
+        raise RuntimeError('Invalid diagnostic input source/root/driver bounds')
+    def info(path, size, sha):
+        return dict(path=str(path), bytes=size, sha256=sha)
+    return dict(scheme='ADDED_MATCH_ONLY_LITERAL_INPUT_V1', role='candidate', caseName=DIAGNOSTIC_CASE,
+        root=str(root), source=str(source), validationDriverSource=str(workspace),
+        actualCandidateBuildCommit=CANDIDATE, validationDriverCommit=driver,
+        originalTest=info(source / DIAGNOSTIC_TEST, 22594, DIAGNOSTIC_ORIGINAL_SHA),
+        correctedDriverTest=info(workspace / DIAGNOSTIC_TEST, 28358, DIAGNOSTIC_TEST_SHA),
+        derivedTest=info(root / DIAGNOSTIC_OWNED_TEST, 28358, DIAGNOSTIC_TEST_SHA),
+        expectedResult=info(source / DIAGNOSTIC_RESULT, 2116, DIAGNOSTIC_RESULT_SHA),
+        provenancePath=str(root / DIAGNOSTIC_PROVENANCE), assertionCount=61,
+        substitutions=dict(count=2, original=DIAGNOSTIC_TOKEN.decode('ascii'),
+                           replacement=DIAGNOSTIC_LITERAL.decode('ascii')),
+        queryLiteral=dict(tokens=302, bytes=2902,
+            sha256='b3684446a7b371b0b5c4eb65b75160e832f51fda636643ee7ae3a5ba5d2deabc'),
+        allOtherTestBytesUnchanged=True, expectedResultUnchanged=True,
+        historicalFailure=dict(runId=42553294539, nativeStatus='failed', sqlError=1064,
+            line=289, successfulAssertions=60, wideAssertionRan=False,
+            jobLogSha256='49947c5c4a33ec84c2029667642552d4ff7f98cf1c85e8c6e89697889fd6fccd',
+            reason='Historical parser rejects AGAINST(@match_only_wide_query); failure is not waived.'))
+
+
+def accepted_diagnostic_input(row, validation_driver=None):
+    """An arbitrary extra native PASS is insufficient for ELF continuation."""
+    if not isinstance(row, dict):
+        return False
+    work = row.get('work')
+    if not isinstance(work, dict) or not isinstance(work.get('diagnosticInput'), dict):
+        return False
+    proof = work['diagnosticInput']
+    try:
+        expected = diagnostic_provenance(proof['root'], proof['source'],
+            proof['validationDriverSource'], proof['validationDriverCommit'])
+        exact = json.dumps(proof, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+    except (KeyError, TypeError, ValueError, RuntimeError):
+        return False
+    if (not exact or (validation_driver is not None and proof['validationDriverCommit'] != validation_driver)
+            or row.get('role') != 'candidate' or row.get('name') != DIAGNOSTIC_CASE
+            or row.get('status') != 'passed' or row.get('cleanupPassed') is not True
+            or work.get('passed') is not True or type(work.get('exitCode')) is not int or work['exitCode'] != 0
+            or type(work.get('invocations')) is not int or work['invocations'] != 1
+            or work.get('inputsUnchanged') is not True or work.get('diagnosticInputVerified') is not True
+            or work.get('testSha256') != DIAGNOSTIC_TEST_SHA or work.get('expectedSha256') != DIAGNOSTIC_RESULT_SHA):
+        return False
+    return not any(record.get(key) for record in (row, work)
+        for key in ('error', 'traceback', 'timedOut', 'signal', 'cleanupError', 'failureKind', 'failureReason'))
+
+
+def diagnostic_case(args, call_args, native, case, harness):
+    """Use an owned copy of exactly two literal corrections, never mutate B."""
+    proof = diagnostic_provenance(args.root, call_args.source, args.source, args.driver_sha)
+    if (call_args.role != 'candidate' or call_args.expected_sha != CANDIDATE
+            or case.name != DIAGNOSTIC_CASE or case.test_file != call_args.source / DIAGNOSTIC_TEST
+            or case.result_file != call_args.source / DIAGNOSTIC_RESULT):
+        raise RuntimeError('Diagnostic override only permits the added candidate case')
+    def checked(info):
+        path = Path(info['path'])
+        no_symlinks(path)
+        st = path.stat()
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size != info['bytes']
+                or digest(path) != info['sha256']):
+            raise RuntimeError('Diagnostic input type/link/size/hash mismatch: ' + str(path))
+        return path.read_bytes()
+    raw = checked(proof['originalTest'])
+    expected = checked(proof['expectedResult'])
+    corrected = checked(proof['correctedDriverTest'])
+    if (raw.count(DIAGNOSTIC_TOKEN) != 2 or raw.replace(DIAGNOSTIC_TOKEN, DIAGNOSTIC_LITERAL) != corrected
+            or corrected.count(DIAGNOSTIC_LITERAL) != 2 or DIAGNOSTIC_TOKEN in corrected
+            or len(DIAGNOSTIC_QUERY.split()) != 302
+            or hashlib.sha256(DIAGNOSTIC_QUERY).hexdigest() != proof['queryLiteral']['sha256']
+            or expected.splitlines().count(b'1') != 61):
+        raise RuntimeError('Diagnostic correction is not exactly two syntax-only substitutions')
+    owned, provenance = Path(proof['derivedTest']['path']), Path(proof['provenancePath'])
+    no_symlinks(owned)
+    no_symlinks(provenance)
+    owned.parent.mkdir(exist_ok=False)
+    with owned.open('xb') as stream:
+        stream.write(corrected)
+    write_json(provenance, proof)
+    provenance_bytes = (json.dumps(proof, indent=2, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
+    def guard():
+        for key in ('originalTest', 'expectedResult', 'correctedDriverTest', 'derivedTest'):
+            checked(proof[key])
+        no_symlinks(provenance)
+        st = provenance.stat()
+        if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 32 * 1024
+                or provenance.read_bytes() != provenance_bytes):
+            raise RuntimeError('Diagnostic provenance changed')
+    guard()
+    original = harness.original_case(call_args, native, case._replace(test_file=owned))
+    def guard_out(out):
+        no_symlinks(out)
+        if out != args.root / 'validation/cases/candidate' / DIAGNOSTIC_CASE or not out.is_dir():
+            raise RuntimeError('Diagnostic native output is not the owned case directory')
+    def execute(call, out):
+        guard_out(out)
+        guard()
+        try:
+            result = original(call, out)
+        finally:
+            guard()
+            guard_out(out)
+        return dict(result, diagnosticInput=proof, diagnosticInputVerified=True)
+    return execute
+
+
+def case_evidence_complete(rows, proofs=None, validation_driver=None, require_diagnostic=True):
     expected = {(role, name) for role in ('baseline', 'candidate') for name in selected_cases(role)}
     if (not isinstance(rows, list) or len(rows) != len(expected)
             or any(not isinstance(row, dict) for row in rows)
@@ -247,6 +376,9 @@ def case_evidence_complete(rows, proofs=None, validation_driver=None):
     if set(proofs) - {'candidate/' + CASES[-1]}:
         return False
     for row in rows:
+        if (require_diagnostic and row.get('role') == 'candidate' and row.get('name') == DIAGNOSTIC_CASE
+                and not accepted_diagnostic_input(row, validation_driver)):
+            return False
         if row.get('status') == 'passed' and row.get('cleanupPassed') is True:
             if row['role'] + '/' + row['name'] in proofs:
                 return False
@@ -870,7 +1002,7 @@ def presentation_lines(report):
              and (report.get('mode') != REUSE_MODE or (report.get('validationDriverCommit') == report.get('driverCommit')
                   and report.get('candidateBuildCommit') == CANDIDATE))
              and bool(re.fullmatch('[0-9a-f]{40}', str(report.get('driverCommit', ''))))
-             and case_evidence_complete(cases, report.get('supplementalCompatibility'), report.get('driverCommit')) and complete(rounds, expected_rounds) and plans_valid
+             and case_evidence_complete(cases, report.get('supplementalCompatibility'), report.get('driverCommit'), report.get('mode') == REUSE_MODE) and complete(rounds, expected_rounds) and plans_valid
              and perf.get('classification') in ('improvement_established', 'regression', 'inconclusive')
              and [(mapping(row).get('baseline'), mapping(row).get('candidate')) for row in pairs] == list(PAIRS))
     interval = sequence(perf.get('descriptive95PercentInterval'))
@@ -905,6 +1037,16 @@ def presentation_lines(report):
     add('A actual source: ' + str(mapping(builds.get('baseline')).get('sourceCommit', report.get('baselineCommit', 'unavailable'))))
     add('B actual build source: ' + str(mapping(builds.get('candidate')).get('sourceCommit', 'unavailable')))
     add('B kernel origin: ' + str(report.get('kernelOrigin', 'unavailable')) + '; driver source: ' + str(report.get('driverCommit', 'unavailable')))
+    if report.get('mode') == REUSE_MODE:
+        diagnostic = [mapping(row) for row in cases if mapping(row).get('role') == 'candidate'
+                      and mapping(row).get('name') == DIAGNOSTIC_CASE]
+        row = diagnostic[0] if len(diagnostic) == 1 else {}
+        proof = mapping(mapping(row.get('work')).get('diagnosticInput'))
+        add('Added match-only diagnostic exact input/native full-pass proof: ' + str(accepted_diagnostic_input(row, report.get('driverCommit'))))
+        if proof:
+            add('Added diagnostic original B test SHA256: ' + str(mapping(proof.get('originalTest')).get('sha256')))
+            add('Added diagnostic corrected/owned test SHA256: ' + str(mapping(proof.get('derivedTest')).get('sha256')) + '; expected result unchanged; two SQL literal substitutions, 302 tokens.')
+            add('Historical run 42553294539 remains FAIL: SQL1064 at line 289 after 60 successful assertions; wide assertion never ran. No failure waiver.')
     for role in ('baseline', 'candidate'):
         total = len(selected_cases(role))
         selected = [mapping(row) for row in cases if mapping(row).get('role') == role]
@@ -912,7 +1054,7 @@ def presentation_lines(report):
             originals = [row for row in selected if row.get('name') in CASES]
             extras = [row for row in selected if row.get('name') in REGRESSIONS]
             compatible = sum(accepted_compatibility(mapping(report.get('supplementalCompatibility')).get('candidate/' + row.get('name', '')), row, report.get('driverCommit')) for row in originals)
-            add('Correctness candidate originals raw: %d/5 native passes; plan-compatible: %d/1; extra regressions: %d/2 native passes (61 new assertions). No native 5/5 or 7/7 claim.' % (sum(row.get('status') == 'passed' for row in originals), compatible, sum(row.get('status') == 'passed' for row in extras)))
+            add('Correctness candidate originals raw: %d/5 native passes; plan-compatible: %d/1; extra regressions: %d/2 native passes (61 new assertions expected). No native 5/5 or 7/7 claim.' % (sum(row.get('status') == 'passed' for row in originals), compatible, sum(row.get('status') == 'passed' for row in extras)))
             simple = [row for row in originals if row.get('name') == CASES[-1]]
             add('Candidate simple_query raw native status: ' + str(simple[0].get('status') if len(simple) == 1 else 'unavailable') + '; supplemental compatibility never changes a native FAIL.')
         else:
@@ -1124,8 +1266,11 @@ def validate(args, plan, report):
         if any(name not in available for name in selected):
             raise RuntimeError('Required native case unavailable/excluded')
         for name in selected:
-            run(role, name, harness.original_case(call_args, native, available[name]), cases=True)
-    if not case_evidence_complete(report['caseVerdicts'], report.get('supplementalCompatibility'), args.driver_sha):
+            work = (diagnostic_case(args, call_args, native, available[name], harness)
+                    if reuse and role == 'candidate' and name == DIAGNOSTIC_CASE
+                    else harness.original_case(call_args, native, available[name]))
+            run(role, name, work, cases=True)
+    if not case_evidence_complete(report['caseVerdicts'], report.get('supplementalCompatibility'), args.driver_sha, reuse):
         raise RuntimeError('Complete native cases and strict supplemental proof required')
     time.sleep(30)
     for name, role in SCHEDULE:
@@ -1167,6 +1312,8 @@ def collect_continuation_evidence(root, out):
         selected.append((path, info, digest(path)))
     for name in ('plan.json', 'report.json'):
         select(root / name, 8 * 1024 ** 2)
+    for name in (DIAGNOSTIC_OWNED_TEST, DIAGNOSTIC_PROVENANCE):
+        select(root / name)
     for name in ('manifest.original.json', 'plan.original.json', 'verification.json', 'verification.failed.json'):
         select(root / 'runtime' / name, 8 * 1024 ** 2)
     for role in ('baseline', 'candidate'):
