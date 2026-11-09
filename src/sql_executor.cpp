@@ -261,7 +261,7 @@ BoundSelect bind_select(Database& database, const SelectStatement& statement,
 }
 
 SqlResult execute_select(Database& database, const BoundSelect& statement,
-                          const SqlSink& sink, std::size_t budget) {
+                          const SqlSink& sink, std::size_t budget, SearchMode mode) {
   SqlResult result;
   result.is_query = true;
   for (const auto& projection : statement.projections) result.columns.push_back(projection.output);
@@ -300,7 +300,7 @@ SqlResult execute_select(Database& database, const BoundSelect& statement,
   } else if (statement.order->query) {
     database.scan_distance_ordered(statement.schema.name, *statement.order->query,
       statement.descending, statement.limit, predicate,
-      [&](const Neighbor& neighbor) { return emit(neighbor.row); }, budget);
+      [&](const Neighbor& neighbor) { return emit(neighbor.row); }, budget, mode);
   } else {
     database.scan_ordered(statement.schema.name, predicate, statement.order->column,
                           statement.descending, statement.limit, emit, budget);
@@ -310,8 +310,9 @@ SqlResult execute_select(Database& database, const BoundSelect& statement,
 
 class Executor {
  public:
-  Executor(Database& database, std::span<const Value> parameters, const SqlSink& sink, std::size_t budget)
-      : database_(database), parameters_(parameters), sink_(sink), budget_(budget) {}
+  Executor(Database& database, std::span<const Value> parameters, const SqlSink& sink,
+           std::size_t budget, SearchMode mode)
+      : database_(database), parameters_(parameters), sink_(sink), budget_(budget), mode_(mode) {}
 
   SqlResult operator()(const CreateTableStatement& statement) const {
     try {
@@ -356,7 +357,17 @@ class Executor {
 
   SqlResult operator()(const SelectStatement& statement) const {
     const auto bound = bind_select(database_, statement, parameters_);
-    return execute_select(database_, bound, sink_, budget_);
+    return execute_select(database_, bound, sink_, budget_, mode_);
+  }
+
+  SqlResult operator()(const CreateVectorIndexStatement& statement) const {
+    const auto schema = bind_table(database_, statement.table);
+    const auto column = bind_column(schema, statement.column);
+    if (schema.columns[column].type != Type::vector) {
+      binding("Vector index requires a VECTOR column", statement.column.offset);
+    }
+    database_.create_vector_index(schema.name, statement.name.name, column);
+    return {};
   }
 
   SqlResult operator()(const UpdateStatement& statement) const {
@@ -392,6 +403,7 @@ class Executor {
   std::span<const Value> parameters_;
   const SqlSink& sink_;
   std::size_t budget_;
+  SearchMode mode_;
 };
 
 }  // namespace
@@ -400,6 +412,9 @@ SqlSession::SqlSession(Database& database, std::size_t query_working_bytes)
     : database_(database), query_working_bytes_(query_working_bytes) {
   if (query_working_bytes == 0) throw std::invalid_argument("SQL query working budget must be positive");
 }
+
+void SqlSession::set_search_mode(SearchMode mode) noexcept { search_mode_ = mode; }
+SearchMode SqlSession::search_mode() const noexcept { return search_mode_; }
 
 SqlResult SqlSession::execute(std::string_view source, std::span<const Value> parameters, const SqlSink& sink) {
   return execute(parse_sql(source), parameters, sink);
@@ -410,7 +425,7 @@ SqlResult SqlSession::execute(const ParsedStatement& statement, std::span<const 
   if (!statement.impl_) binding("Cannot execute a moved-from SQL statement");
   if (statement.parameter_count() != parameters.size()) binding("SQL parameter count mismatch");
   try {
-    return std::visit(Executor(database_, parameters, sink, query_working_bytes_), statement.impl_->statement);
+    return std::visit(Executor(database_, parameters, sink, query_working_bytes_, search_mode_), statement.impl_->statement);
   } catch (const SqlError&) {
     throw;
   } catch (const std::runtime_error& error) {

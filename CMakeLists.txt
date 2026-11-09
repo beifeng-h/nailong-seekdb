@@ -32,6 +32,9 @@ target_link_libraries(sql_reference_tests PRIVATE minivectordb)
 add_test(NAME sql_reference_contracts COMMAND sql_reference_tests)
 add_executable(sql_public_case_driver tests/sql_public_case_driver.cpp)
 target_link_libraries(sql_public_case_driver PRIVATE minivectordb)
+add_executable(vector_index_tests tests/vector_index_tests.cpp)
+target_link_libraries(vector_index_tests PRIVATE minivectordb)
+add_test(NAME vector_index_contracts COMMAND vector_index_tests)
 
 # Keep internal definitions in the test's primary translation unit for GCC.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/page_store.cpp tests/file_io_tests.cpp)

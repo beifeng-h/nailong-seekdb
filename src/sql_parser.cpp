@@ -172,7 +172,10 @@ class Parser {
 
   Statement parse() {
     Statement statement;
-    if (take_word("CREATE")) statement = create_table();
+    if (take_word("CREATE")) {
+      if (take_word("VECTOR")) statement = create_vector_index();
+      else statement = create_table();
+    }
     else if (take_word("INSERT")) statement = insert();
     else if (take_word("SELECT")) statement = select();
     else if (take_word("UPDATE")) statement = update();
@@ -257,6 +260,18 @@ class Parser {
     }
     advance();
     return value;
+  }
+
+  CreateVectorIndexStatement create_vector_index() {
+    expect_word("INDEX");
+    CreateVectorIndexStatement statement;
+    statement.name = identifier();
+    expect_word("ON");
+    statement.table = identifier();
+    expect_symbol("(");
+    statement.column = identifier();
+    expect_symbol(")");
+    return statement;
   }
 
   CreateTableStatement create_table() {

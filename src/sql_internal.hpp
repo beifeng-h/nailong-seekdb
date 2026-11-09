@@ -76,10 +76,15 @@ struct DeleteStatement {
 struct BeginStatement {};
 struct CommitStatement {};
 struct RollbackStatement {};
+struct CreateVectorIndexStatement {
+  Identifier name;
+  Identifier table;
+  Identifier column;
+};
 
 using Statement = std::variant<CreateTableStatement, InsertStatement, SelectStatement,
                                UpdateStatement, DeleteStatement, BeginStatement,
-                               CommitStatement, RollbackStatement>;
+                               CommitStatement, RollbackStatement, CreateVectorIndexStatement>;
 
 }  // namespace minivectordb::detail
 

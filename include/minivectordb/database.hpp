@@ -29,6 +29,7 @@ struct Neighbor { std::int64_t primary_key; double distance; Row row; };
 using NeighborVisitor = std::function<bool(const Neighbor&)>;
 enum class Relation { equal, less, less_equal, greater, greater_equal };
 struct Filter { std::size_t column; Relation relation; Value value; };
+enum class SearchMode { exact, ann };
 
 Vector make_vector(std::span<const double> input);
 void validate_schema(const Schema& schema);
@@ -51,6 +52,7 @@ class Database {
   void commit();
   void rollback();
   void create_table(const Schema& schema);
+  void create_vector_index(const std::string& table, const std::string& name, std::size_t column);
   Schema schema(const std::string& table);
   std::uint64_t count(const std::string& table);
   std::optional<Row> get(const std::string& table, std::int64_t primary_key);
@@ -66,11 +68,13 @@ class Database {
                              std::size_t k, const Predicate& predicate = {});
   void scan_topk(const std::string& table, const Vector& query, std::uint64_t k,
                  const Predicate& predicate, const NeighborVisitor& visitor,
-                 std::size_t working_budget_bytes = 1024 * 1024);
+                 std::size_t working_budget_bytes = 1024 * 1024,
+                 SearchMode mode = SearchMode::exact);
   void scan_distance_ordered(const std::string& table, const Vector& query, bool descending,
                              std::optional<std::uint64_t> limit, const Predicate& predicate,
                              const NeighborVisitor& visitor,
-                             std::size_t working_budget_bytes = 1024 * 1024);
+                             std::size_t working_budget_bytes = 1024 * 1024,
+                             SearchMode mode = SearchMode::exact);
 
  private:
   struct Impl;

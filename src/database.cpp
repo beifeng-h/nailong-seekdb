@@ -107,6 +107,7 @@ Row decode_row(const Schema& schema, const std::vector<std::byte>& bytes) {
 
 struct Table {
   std::uint64_t id = 0, schema_blob = 0, next = 0, directory = 0, buckets = 0, rows = 0, height = 1;
+  std::uint64_t vector_index = 0;
   Schema schema;
 };
 constexpr std::size_t bucket_capacity = (page_size - 16) / 16;
@@ -260,6 +261,13 @@ double squared_distance(const Vector& vector, const Vector& query) {
     const double delta = double(vector[i]) - double(query[i]); distance += delta * delta;
   }
   return distance;
+}
+
+std::size_t vector_column(const Schema& schema) {
+  for (std::size_t i = 0; i < schema.columns.size(); ++i) {
+    if (schema.columns[i].type == Type::vector) return i;
+  }
+  invalid("Table has no vector column");
 }
 
 }  // namespace
@@ -430,7 +438,7 @@ struct Database::Impl {
     Table table; table.id = id; table.schema_blob = get64(page.data() + 8);
     table.next = get64(page.data() + 16); table.directory = get64(page.data() + 24);
     table.buckets = get64(page.data() + 32); table.rows = get64(page.data() + 40);
-    table.height = get64(page.data() + 48);
+    table.height = get64(page.data() + 48); table.vector_index = get64(page.data() + 56);
     const auto bytes = blob(table.schema_blob); Decoder input{bytes};
     table.schema.name = input.string(); table.schema.primary_key = input.u32(); const auto count = input.u32();
     for (std::uint32_t i = 0; i < count; ++i)
@@ -447,7 +455,8 @@ struct Database::Impl {
     Page page{}; std::memcpy(page.data(), "MVDBTB01", 8);
     put64(page.data() + 8, table.schema_blob); put64(page.data() + 16, table.next);
     put64(page.data() + 24, table.directory); put64(page.data() + 32, table.buckets);
-    put64(page.data() + 40, table.rows); put64(page.data() + 48, table.height); pages.write(table.id, page);
+    put64(page.data() + 40, table.rows); put64(page.data() + 48, table.height);
+    put64(page.data() + 56, table.vector_index); pages.write(table.id, page);
   }
 
   Table table(const std::string& name) {
@@ -578,6 +587,66 @@ struct Database::Impl {
     each_entry(old, [&](std::int64_t key, std::uint64_t record) { index_put(table, key, record); return true; });
     write_table(table); release_directory(old.directory, old.height);
   }
+
+  Table make_table(const Schema& schema) {
+    std::vector<std::byte> bytes; append_string(bytes, schema.name); append32(bytes, schema.primary_key);
+    append32(bytes, static_cast<std::uint32_t>(schema.columns.size()));
+    for (const auto& column : schema.columns) {
+      append_string(bytes, column.name); append32(bytes, static_cast<std::uint32_t>(column.type)); append32(bytes, column.extent);
+    }
+    if (std::any_of(schema.columns.begin(), schema.columns.end(), [](const Column& column) { return !column.display_name.empty(); })) {
+      append32(bytes, schema_labels_tag);
+      for (const auto& column : schema.columns) append_string(bytes, column.display_name);
+    }
+    Table table; table.schema = schema; table.schema_blob = store_blob(bytes); table.id = allocate();
+    new_directory(table, 16);
+    return table;
+  }
+
+  std::optional<Table> vector_index(const Table& table) {
+    if (table.vector_index == 0) return {};
+    return read_table(table.vector_index);
+  }
+
+  // The auxiliary table has one live (key, record page, float32 vector) row per key.
+  // It stays outside the user table list and shares the owner's page transaction.
+  void put_vector(Table& index, std::int64_t key, std::uint64_t record, const Vector& vector) {
+    const auto old = lookup(index, key);
+    if (old == 0) grow(index, index.rows + 1);
+    const Row entry{key, std::bit_cast<std::int64_t>(record), vector};
+    const auto replacement = store_blob(encode_row(entry));
+    index_put(index, key, replacement);
+    if (old != 0) release_blob(old);
+    else ++index.rows;
+  }
+
+  void erase_vector(Table& index, std::int64_t key) {
+    const auto record = lookup(index, key);
+    if (record == 0) invalid("Missing vector index entry");
+    index_put(index, key, 0); release_blob(record); --index.rows;
+  }
+
+  template<class Function>
+  void each_vector(const Table& table, SearchMode mode, const Predicate& predicate, Function function) {
+    if (mode == SearchMode::exact) {
+      const auto column = vector_column(table.schema);
+      each_entry(table, [&](std::int64_t key, std::uint64_t record) {
+        const auto row = decode_row(table.schema, blob(record));
+        if (predicate && !predicate(row)) return true;
+        return function(key, record, std::get<Vector>(row[column]));
+      });
+      return;
+    }
+    const auto index = vector_index(table);
+    if (!index) invalid("ANN mode requires a vector index");
+    // Exhaustive flat-index search returns exact results using bounded query memory.
+    each_entry(*index, [&](std::int64_t key, std::uint64_t entry) {
+      const auto row = decode_row(index->schema, blob(entry));
+      const auto record = std::bit_cast<std::uint64_t>(std::get<std::int64_t>(row[1]));
+      if (predicate && !predicate(decode_row(table.schema, blob(record)))) return true;
+      return function(key, record, std::get<Vector>(row[2]));
+    });
+  }
 };
 
 Database::Database(const std::filesystem::path& path, PageStore::FaultHook hook)
@@ -615,19 +684,32 @@ void Database::create_table(const Schema& schema) {
   auto& s = *impl_;
   s.statement([&] {
     if (s.exists(schema.name)) invalid("Duplicate table");
-    std::vector<std::byte> bytes; append_string(bytes, schema.name); append32(bytes, schema.primary_key);
-    append32(bytes, static_cast<std::uint32_t>(schema.columns.size()));
-    for (const auto& column : schema.columns) {
-      append_string(bytes, column.name); append32(bytes, static_cast<std::uint32_t>(column.type)); append32(bytes, column.extent);
-    }
-    if (std::any_of(schema.columns.begin(), schema.columns.end(), [](const Column& column) { return !column.display_name.empty(); })) {
-      append32(bytes, schema_labels_tag);
-      for (const auto& column : schema.columns) append_string(bytes, column.display_name);
-    }
-    Table table; table.schema = schema; table.schema_blob = s.store_blob(bytes); table.id = s.allocate();
-    s.new_directory(table, 16); auto root = s.pages.read(0);
+    auto table = s.make_table(schema); auto root = s.pages.read(0);
     table.next = get64(root.data() + 8); s.write_table(table);
     put64(root.data() + 8, table.id); s.pages.write(0, root);
+  });
+}
+
+void Database::create_vector_index(const std::string& name, const std::string& index_name,
+                                   std::size_t column) {
+  if (index_name.empty()) invalid("Vector index name must not be empty");
+  unicode_length(index_name);
+  auto& s = *impl_;
+  s.statement([&] {
+    auto table = s.table(name);
+    if (column >= table.schema.columns.size() || table.schema.columns[column].type != Type::vector) {
+      invalid("Vector index requires a VECTOR column");
+    }
+    if (table.vector_index != 0) invalid("Vector column already has an index");
+    const Schema schema{index_name, {{"key", Type::bigint}, {"record", Type::bigint},
+                                   {"vector", Type::vector, table.schema.columns[column].extent}}, 0};
+    auto index = s.make_table(schema);
+    s.each_entry(table, [&](std::int64_t key, std::uint64_t record) {
+      const auto row = decode_row(table.schema, s.blob(record));
+      s.put_vector(index, key, record, std::get<Vector>(row[column]));
+      return true;
+    });
+    s.write_table(index); table.vector_index = index.id; s.write_table(table);
   });
 }
 
@@ -641,10 +723,14 @@ void Database::insert(const std::string& name, std::span<const Row> rows) {
     }
     if (rows.size() > std::numeric_limits<std::uint64_t>::max() - table.rows) invalid("Row count overflow");
     s.grow(table, table.rows + rows.size());
+    auto index = s.vector_index(table);
     for (const auto& row : rows) {
       const auto record = s.store_blob(encode_row(row));
-      s.index_put(table, std::get<std::int64_t>(row[table.schema.primary_key]), record); ++table.rows;
+      const auto key = std::get<std::int64_t>(row[table.schema.primary_key]);
+      s.index_put(table, key, record); ++table.rows;
+      if (index) s.put_vector(*index, key, record, std::get<Vector>(row[vector_column(table.schema)]));
     }
+    if (index) s.write_table(*index);
     s.write_table(table);
   });
 }
@@ -659,13 +745,16 @@ std::uint64_t Database::update(const std::string& name, const Predicate& predica
           !fields.insert(assignment.column).second) invalid("Invalid assignment or primary-key update");
       check_value(table.schema.columns[assignment.column], assignment.value);
     }
+    auto index = s.vector_index(table);
     s.each_entry(table, [&](std::int64_t key, std::uint64_t record) {
       auto row = decode_row(table.schema, s.blob(record));
       if (predicate && !predicate(row)) return true;
       for (const auto& assignment : assignments) row[assignment.column] = assignment.value;
       const auto replacement = s.store_blob(encode_row(row));
+      if (index) s.put_vector(*index, key, replacement, std::get<Vector>(row[vector_column(table.schema)]));
       s.index_put(table, key, replacement); s.release_blob(record); ++changed; return true;
     });
+    if (index) s.write_table(*index);
   });
   return changed;
 }
@@ -674,11 +763,14 @@ std::uint64_t Database::erase(const std::string& name, const Predicate& predicat
   auto& s = *impl_; std::uint64_t changed = 0;
   s.statement([&] {
     auto table = s.table(name);
+    auto index = s.vector_index(table);
     s.each_entry(table, [&](std::int64_t key, std::uint64_t record) {
       const auto row = decode_row(table.schema, s.blob(record));
       if (predicate && !predicate(row)) return true;
+      if (index) s.erase_vector(*index, key);
       s.index_put(table, key, 0); s.release_blob(record); ++changed; return true;
     });
+    if (index) s.write_table(*index);
     table.rows -= changed; s.write_table(table);
   });
   return changed;
@@ -717,12 +809,10 @@ std::vector<Neighbor> Database::topk(const std::string& name, const Vector& quer
 }
 
 void Database::scan_topk(const std::string& name, const Vector& query, std::uint64_t k,
-                          const Predicate& predicate, const NeighborVisitor& visitor, std::size_t budget) {
-  auto& s = *impl_; const auto table = s.table(name); std::size_t vector_column = table.schema.columns.size();
-  for (std::size_t i = 0; i < table.schema.columns.size(); ++i)
-    if (table.schema.columns[i].type == Type::vector) vector_column = i;
-  if (vector_column == table.schema.columns.size()) invalid("Table has no vector column");
-  check_value(table.schema.columns[vector_column], query);
+                          const Predicate& predicate, const NeighborVisitor& visitor, std::size_t budget,
+                          SearchMode mode) {
+  auto& s = *impl_; const auto table = s.table(name); const auto column = vector_column(table.schema);
+  check_value(table.schema.columns[column], query);
   if (budget == 0) invalid("TopK working budget must be positive");
   if (k == 0) return;
   struct Candidate {
@@ -733,23 +823,25 @@ void Database::scan_topk(const std::string& name, const Vector& query, std::uint
   };
   if (k > budget / (4 * sizeof(Candidate))) {
     const auto before = [&](const Row& a, const Row& b) {
-      const auto da = squared_distance(std::get<Vector>(a[vector_column]), query);
-      const auto db = squared_distance(std::get<Vector>(b[vector_column]), query);
+      const auto da = squared_distance(std::get<Vector>(a[column]), query);
+      const auto db = squared_distance(std::get<Vector>(b[column]), query);
       if (da != db) return da < db;
       return std::get<std::int64_t>(a[table.schema.primary_key]) < std::get<std::int64_t>(b[table.schema.primary_key]);
     };
-    external_sort(s.directory, table.schema, [&](const Visitor& emit) { scan(name, predicate, emit); }, before, k,
+    external_sort(s.directory, table.schema, [&](const Visitor& emit) {
+      s.each_vector(table, mode, predicate, [&](std::int64_t, std::uint64_t record, const Vector&) {
+        return emit(decode_row(table.schema, s.blob(record)));
+      });
+    }, before, k,
       [&](const Row& row) {
         return visitor({std::get<std::int64_t>(row[table.schema.primary_key]),
-                        l2_distance(std::get<Vector>(row[vector_column]), query), row});
+                        l2_distance(std::get<Vector>(row[column]), query), row});
       }, budget);
     return;
   }
   std::priority_queue<Candidate> best;
-  s.each_entry(table, [&](std::int64_t key, std::uint64_t record) {
-    const auto row = decode_row(table.schema, s.blob(record));
-    if (predicate && !predicate(row)) return true;
-    const double distance = squared_distance(std::get<Vector>(row[vector_column]), query);
+  s.each_vector(table, mode, predicate, [&](std::int64_t key, std::uint64_t record, const Vector& vector) {
+    const double distance = squared_distance(vector, query);
     Candidate candidate{distance, key, record};
     if (best.size() < k) best.push(candidate);
     else if (candidate < best.top()) { best.pop(); best.push(candidate); }
@@ -766,17 +858,15 @@ void Database::scan_topk(const std::string& name, const Vector& query, std::uint
 
 void Database::scan_distance_ordered(const std::string& name, const Vector& query, bool descending,
                                      std::optional<std::uint64_t> limit, const Predicate& predicate,
-                                     const NeighborVisitor& visitor, std::size_t budget) {
+                                     const NeighborVisitor& visitor, std::size_t budget, SearchMode mode) {
   if (!descending) {
     scan_topk(name, query, limit.value_or(std::numeric_limits<std::uint64_t>::max()),
-              predicate, visitor, budget);
+              predicate, visitor, budget, mode);
     return;
   }
   auto& s = *impl_;
   const auto table = s.table(name);
-  std::size_t column = 0;
-  while (column < table.schema.columns.size() && table.schema.columns[column].type != Type::vector) ++column;
-  if (column == table.schema.columns.size()) invalid("Table has no vector column");
+  const auto column = vector_column(table.schema);
   check_value(table.schema.columns[column], query);
   if (budget == 0) invalid("Distance sort working budget must be positive");
   if (limit && *limit == 0) return;
@@ -786,7 +876,11 @@ void Database::scan_distance_ordered(const std::string& name, const Vector& quer
     if (da != db) return da > db;
     return std::get<std::int64_t>(a[table.schema.primary_key]) < std::get<std::int64_t>(b[table.schema.primary_key]);
   };
-  external_sort(s.directory, table.schema, [&](const Visitor& emit) { scan(name, predicate, emit); },
+  external_sort(s.directory, table.schema, [&](const Visitor& emit) {
+    s.each_vector(table, mode, predicate, [&](std::int64_t, std::uint64_t record, const Vector&) {
+      return emit(decode_row(table.schema, s.blob(record)));
+    });
+  },
     before, limit, [&](const Row& row) {
       return visitor({std::get<std::int64_t>(row[table.schema.primary_key]),
                       l2_distance(std::get<Vector>(row[column]), query), row});

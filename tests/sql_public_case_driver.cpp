@@ -63,7 +63,16 @@ int main(int argc, char** argv) {
     unsigned statements = 0;
     while (std::getline(input, sql)) {
       if (!sql.empty() && sql.back() == '\r') sql.pop_back();
-      if (sql.empty()) continue;
+      const auto first = sql.find_first_not_of(" \t");
+      if (first == std::string::npos) continue;
+      const auto command = std::string_view(sql).substr(first, sql.find_last_not_of(" \t") - first + 1);
+      if (command == "--mode ann" || command == "--mode exact") {
+        session.set_search_mode(command == "--mode ann" ? SearchMode::ann : SearchMode::exact);
+        continue;
+      }
+      if (command.starts_with("--")) {
+        throw std::runtime_error("Unsupported driver directive. Use public_samples.py for process restarts");
+      }
       if (statements++ != 0) output << ',';
       std::vector<std::vector<SqlValue>> rows;
       try {

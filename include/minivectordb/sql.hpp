@@ -22,7 +22,8 @@ class SqlError : public std::runtime_error {
   std::size_t offset_;
 };
 
-enum class StatementKind { create_table, insert, select, update, erase, begin, commit, rollback };
+enum class StatementKind { create_table, insert, select, update, erase, begin, commit, rollback,
+                           create_vector_index };
 
 class ParsedStatement {
  public:
@@ -72,6 +73,9 @@ class SqlSession {
  public:
   explicit SqlSession(Database& database, std::size_t query_working_bytes = 1024 * 1024);
 
+  void set_search_mode(SearchMode mode) noexcept;
+  SearchMode search_mode() const noexcept;
+
   SqlResult execute(std::string_view source, std::span<const Value> parameters = {},
                     const SqlSink& sink = {});
   SqlResult execute(const ParsedStatement& statement, std::span<const Value> parameters = {},
@@ -80,6 +84,7 @@ class SqlSession {
  private:
   Database& database_;
   std::size_t query_working_bytes_;
+  SearchMode search_mode_ = SearchMode::exact;
 };
 
 }  // namespace minivectordb

@@ -1,9 +1,9 @@
-name: MiniVectorDB positional read validation
+name: MiniVectorDB v4 vector index validation
 
 on:
   push:
     branches:
-      - codex/minivectordb-positional-read-m7
+      - codex/minivectordb-public-v4-followup-20261109
 
 permissions:
   contents: read
@@ -34,6 +34,25 @@ jobs:
               --target development-checks --progress plain --tag "$image" -
           docker image inspect "$image" --format '{{.Id}}'
 
+      - name: Inspect the default development image and closed-input startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="minivectordb-default:${GITHUB_SHA}"
+          git archive --format=tar HEAD \
+            .dockerignore Dockerfile CMakeLists.txt include src tests mysqltest \
+            | docker build --platform linux/amd64 --progress plain --tag "$image" -
+          docker image inspect "$image" --format \
+            'DEFAULT_CONFIG Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}} WorkingDir={{json .Config.WorkingDir}} Labels={{json .Config.Labels}}'
+          status=0
+          docker run --rm --network none --cpus 2 --memory 2g "$image" \
+            > "$RUNNER_TEMP/minivectordb-default.stdout" \
+            2> "$RUNNER_TEMP/minivectordb-default.stderr" || status=$?
+          printf 'DEFAULT_CLOSED_INPUT_EXIT %s\n' "$status"
+          wc -c "$RUNNER_TEMP/minivectordb-default.stdout" "$RUNNER_TEMP/minivectordb-default.stderr"
+          cat "$RUNNER_TEMP/minivectordb-default.stdout" "$RUNNER_TEMP/minivectordb-default.stderr"
+          test "$status" -eq 0
+
       - name: Check process-kill recovery without network access
         shell: bash
         run: |
@@ -50,26 +69,21 @@ jobs:
                 --report /data/table-crash.json
               python3 /source/tests/crash_recovery.py /build/sql_fault_driver \
                 --sort-cleanup --commit-returned-stage session.commit_returned \
-                --scope "development container SqlSession using typed vector bindings" \
+                --scope "development container SqlSession with persistent vector index maintenance" \
                 --report /data/sql-crash.json
+              python3 /source/tests/index_build_recovery.py /build/sql_fault_driver \
+                --report /data/index-build-crash.json
             '
 
-      - name: Compare exact queries against the frozen read implementation
+      - name: Check persistent vector index beyond the process address-space cap
         shell: bash
         run: |
           set -euo pipefail
           image="minivectordb-ci:${GITHUB_SHA}"
-          baseline="$RUNNER_TEMP/minivectordb-baseline.cpp"
-          git show 0ad0aa5b3c843e5adf05e24362915b249607aed6:src/page_store.cpp > "$baseline"
           docker run --rm --network none --cpus 2 --memory 2g \
-            --mount "type=bind,source=$baseline,target=/baseline.cpp,readonly" \
             --entrypoint /bin/sh "$image" -ec '
               mkdir -p /data
-              g++ -std=gnu++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic -Werror \
-                -I/source/include /baseline.cpp /source/tests/sql_public_case_driver.cpp \
-                /build/libminivectordb.a -o /data/baseline-capture
-              python3 /source/tests/query_read_comparison.py \
-                --baseline /data/baseline-capture --candidate /build/sql_public_case_driver \
-                --output /data/read-comparison --report /data/read-comparison.json
-              cat /data/read-comparison.json
+              python3 /source/tests/table_scale.py /build/database_fault_driver \
+                --vector-index --rows 100000 --address-space-mib 32 \
+                --report /data/index-scale.json
             '

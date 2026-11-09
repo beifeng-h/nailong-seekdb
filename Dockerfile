@@ -45,3 +45,5 @@ RUN ctest --test-dir /build --output-on-failure \
        --report /build/public-samples.json \
     && python3 /source/tests/legacy_schema.py /build/sql_public_case_driver \
        --report /build/legacy-schema.json
+RUN python3 /source/tests/legacy_schema.py /build/sql_public_case_driver \
+       --vector-index --report /build/legacy-index-schema.json

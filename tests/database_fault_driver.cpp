@@ -26,9 +26,11 @@ int main(int argc, char** argv) {
       for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
     };
     Database db(argv[2], hook);
-    if (mode == "scale-write") {
+    const bool indexed = mode == "index-scale-write" || mode == "index-scale-read";
+    if (mode == "scale-write" || mode == "index-scale-write") {
       const auto count = static_cast<std::int64_t>(std::stoll(stage));
       db.create_table({"docs", {{"id", Type::bigint}, {"tag", Type::varchar, 8}, {"v", Type::vector, 128}}, 0});
+      if (indexed) db.create_vector_index("docs", "docs_vec", 2);
       for (std::int64_t start = 0; start < count; start += 100) {
         std::vector<Row> rows;
         for (auto id = start; id < std::min(start + 100, count); ++id)
@@ -37,7 +39,7 @@ int main(int argc, char** argv) {
       }
       std::cout << "SCALE rows=" << count << " logical_record_bytes=" << count * 525
                 << " physical_data_bytes=" << std::filesystem::file_size(std::filesystem::path(argv[2]) / "pages.bin") << '\n';
-    } else if (mode == "scale-read") {
+    } else if (mode == "scale-read" || mode == "index-scale-read") {
       const auto count = static_cast<std::int64_t>(std::stoll(stage));
       if (db.count("docs") != static_cast<std::uint64_t>(count)) throw std::runtime_error("Scale count mismatch");
       for (std::int64_t id = 0; id < count; ++id) {
@@ -45,8 +47,17 @@ int main(int argc, char** argv) {
         const Row expected{id, std::to_string(id % 7), scale_vector(id)};
         if (!actual || *actual != expected) throw std::runtime_error("Scale primary-key row mismatch");
       }
-      const auto query = scale_vector(17); const auto all = db.topk("docs", query, 10);
-      const auto filtered = db.topk("docs", query, 10, [](const Row& row) { return std::get<std::string>(row[1]) == "3"; });
+      const auto query = scale_vector(17);
+      const auto search_mode = indexed ? SearchMode::ann : SearchMode::exact;
+      const auto neighbors = [&](const Predicate& predicate) {
+        std::vector<Neighbor> result;
+        db.scan_topk("docs", query, 10, predicate, [&](const Neighbor& neighbor) {
+          result.push_back(neighbor); return true;
+        }, 32768, search_mode);
+        return result;
+      };
+      const auto all = neighbors({});
+      const auto filtered = neighbors([](const Row& row) { return std::get<std::string>(row[1]) == "3"; });
       if (all.size() != 10 || filtered.size() != 10) throw std::runtime_error("Scale TopK count mismatch");
       for (std::int64_t i = 0; i < 10; ++i)
         if (all[static_cast<std::size_t>(i)].primary_key != 17 + 1009 * i ||
@@ -59,7 +70,7 @@ int main(int argc, char** argv) {
             (value.distance == previous_distance && value.primary_key <= previous_key))
           throw std::runtime_error("Full-K output is not a strictly ordered set");
         previous_distance = value.distance; previous_key = value.primary_key; ++seen; return true;
-      }, 32768);
+      }, 32768, search_mode);
       if (seen != static_cast<std::uint64_t>(count)) throw std::runtime_error("Full-K count mismatch");
       std::cout << "SCALE verified_rows=" << count << " topk_groups=2 topk_rows=20 streamed_full_k_rows=" << seen << '\n';
     } else if (mode == "seed") {
