@@ -127,7 +127,7 @@ def prepare(args):
     plan.update(equivalence=proof, driverFiles={})
     for relative in ('driver', 'sources', 'historical', 'runtime/candidate',
                      'evidence/baseline', 'evidence/candidate', 'validation/cases/baseline',
-                     'validation/cases/candidate', 'validation/rounds'):
+                     'validation/cases/candidate', 'validation/untimed', 'validation/rounds'):
         (root / relative).mkdir(parents=True, exist_ok=True)
     for name in DRIVER_FILES:
         path = source / PREFIX / name

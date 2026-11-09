@@ -243,6 +243,166 @@ class HybridContracts(unittest.TestCase):
         self.assertIn(('Generic multilingual 中文 ABC123 alpha-beta. '*512).encode().hex(),sql)
 
 
+class HybridPreparationFilesystem(unittest.TestCase):
+    """Exercise prepare's real directories with the unchanged native mkdir contract."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.source, self.root = self.base / 'source', self.base / 'root'
+        scripts = self.source / h.PREFIX
+        scripts.mkdir(parents=True)
+        for name in h.DRIVER_FILES:
+            shutil.copyfile(REPO / h.PREFIX / name, scripts / name)
+        self.args = argparse.Namespace(source=self.source, root=self.root, driver_sha=DRIVER,
+            kernel_sha=h.PRODUCTION_KERNEL, artifact_zip=self.base / 'never-opened.zip')
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.verify = stack.enter_context(patch.object(h, 'verify_driver', return_value={}))
+        stack.enter_context(patch.object(h, 'source_identity',
+            return_value=dict(tree=h.SOURCE_TREES['baseline'])))
+        self.git = stack.enter_context(patch.object(h, 'git', side_effect=self.stub_git))
+        self.loader = stack.enter_context(patch.object(h, 'prepare_verified_runtime',
+            side_effect=self.stub_runtime))
+
+    def stub_git(self, source, *arguments):
+        self.assertEqual(source, self.source)
+        if arguments[0] == 'show':
+            commit, relative = arguments[1].split(':', 1)
+            self.assertEqual(commit, DRIVER)
+            return (source / relative).read_bytes()
+        self.assertEqual(arguments, ('worktree', 'add', '--detach',
+            str(self.args.root / 'sources/baseline'), h.BASELINE))
+        (self.args.root / 'sources/baseline').mkdir()
+        return b''
+
+    def stub_runtime(self, archive, destination):
+        self.assertEqual(archive, self.args.artifact_zip)
+        self.assertFalse(archive.exists())
+        binary = destination / 'candidate/seekdb'
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b'synthetic static evidence, never executed')
+        record = dict(artifact={}, roles=dict(candidate=dict(binary=str(binary))))
+        h.write_json(destination / 'verification.json', record)
+        return record
+
+    def harness_args(self):
+        return argparse.Namespace(out=self.root / 'validation/untimed', source=self.source,
+            binary=self.base / 'never-executed', obclient=self.base / 'never-used-client',
+            mysqltest=self.base / 'never-used-mysqltest')
+
+    def test_prepared_topology_allows_both_untimed_native_output_directories(self):
+        h.prepare(self.args)
+        harness = h.load_module('hybrid_prepared_filesystem_harness',
+            self.root / 'driver/fts_contest_validation.py')
+        args = self.harness_args()
+        # Keep run_instance and its exclusive out.mkdir real. Stop at its first
+        # command boundary, before any process, database, native init or SQL.
+        with patch.object(harness.socket, 'socket'), \
+                patch.object(harness, 'capture', return_value=dict(exitCode=1)) as start, \
+                patch.object(harness, 'show_log'), patch.object(harness, 'emit'):
+            for role in ('baseline', 'candidate'):
+                name = 'tokenize-' + role
+                self.assertFalse((args.out / name).exists())
+                row = harness.run_instance(args, None, name, 7300,
+                    lambda *_: self.fail('Untimed work must not execute in an offline test'))
+                self.assertEqual(row['error'], 'Owned database start failed')
+                self.assertTrue((args.out / name / 'result.json').is_file())
+                self.assertFalse((args.out / name / 'database').exists())
+            self.assertEqual(start.call_count, 2)
+        self.loader.assert_called_once()
+
+    def test_prepare_rejects_existing_directory_or_file_without_overwrite(self):
+        for directory in (True, False):
+            with self.subTest(directory=directory):
+                if directory:
+                    self.root.mkdir()
+                    marker = self.root / 'keep'
+                else:
+                    marker = self.root
+                marker.write_bytes(b'preserve existing bytes')
+                with self.assertRaisesRegex(RuntimeError, 'fresh root'):
+                    h.prepare(self.args)
+                self.assertEqual(marker.read_bytes(), b'preserve existing bytes')
+                marker.unlink()
+                if directory:
+                    self.root.rmdir()
+        self.verify.assert_not_called()
+        self.git.assert_not_called()
+        self.loader.assert_not_called()
+
+    def test_prepare_rejects_symlink_root_and_ancestor_before_writes(self):
+        target = self.base / 'target'
+        target.mkdir()
+        marker = target / 'keep'
+        marker.write_bytes(b'preserve target')
+        self.root.symlink_to(target, target_is_directory=True)
+        for root in (self.root, self.root / 'nested'):
+            with self.subTest(root=root), self.assertRaisesRegex(RuntimeError, 'Symlink path forbidden'):
+                self.args.root = root
+                h.prepare(self.args)
+        self.assertEqual(list(target.iterdir()), [marker])
+        self.assertEqual(marker.read_bytes(), b'preserve target')
+        self.verify.assert_not_called()
+        self.git.assert_not_called()
+        self.loader.assert_not_called()
+
+    def test_prepare_file_ancestor_fails_without_git_or_runtime_loading(self):
+        blocker = self.base / 'file'
+        blocker.write_bytes(b'not a directory')
+        self.args.root = blocker / 'root'
+        with self.assertRaises(NotADirectoryError):
+            h.prepare(self.args)
+        self.assertEqual(blocker.read_bytes(), b'not a directory')
+        self.git.assert_not_called()
+        self.loader.assert_not_called()
+
+    def test_native_untimed_outputs_still_reject_existing_directory_file_or_symlink(self):
+        h.prepare(self.args)
+        harness = h.load_module('hybrid_fresh_filesystem_harness',
+            self.root / 'driver/fts_contest_validation.py')
+        args = self.harness_args()
+        target = self.base / 'target'
+        target.write_bytes(b'preserve target')
+        with patch.object(harness, 'capture') as start:
+            for kind in ('directory', 'file', 'symlink'):
+                for role in ('baseline', 'candidate'):
+                    name = 'tokenize-' + role
+                    out = args.out / name
+                    if kind == 'directory':
+                        out.mkdir()
+                        (out / 'keep').write_bytes(b'preserve output')
+                    elif kind == 'file':
+                        out.write_bytes(b'preserve output')
+                    else:
+                        out.symlink_to(target)
+                    with self.subTest(kind=kind, role=role), self.assertRaises(FileExistsError):
+                        harness.run_instance(args, None, name, 7300, None)
+                    if kind == 'directory':
+                        self.assertEqual((out / 'keep').read_bytes(), b'preserve output')
+                        (out / 'keep').unlink()
+                        out.rmdir()
+                    else:
+                        self.assertEqual(out.read_bytes(), b'preserve target' if kind == 'symlink' else b'preserve output')
+                        out.unlink()
+            start.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'preserve target')
+
+    def test_native_untimed_parent_file_conflict_fails_before_commands(self):
+        h.prepare(self.args)
+        harness = h.load_module('hybrid_conflict_filesystem_harness',
+            self.root / 'driver/fts_contest_validation.py')
+        args = self.harness_args()
+        args.out.rmdir()
+        args.out.write_bytes(b'preserve conflicting file')
+        with patch.object(harness, 'capture') as start:
+            for role in ('baseline', 'candidate'):
+                with self.subTest(role=role), self.assertRaises(NotADirectoryError):
+                    harness.run_instance(args, None, 'tokenize-' + role, 7300, None)
+            start.assert_not_called()
+        self.assertEqual(args.out.read_bytes(), b'preserve conflicting file')
+
+
 class HybridWorkflowContracts(unittest.TestCase):
     def workflow(self, text=None):
         # A strict projection of this workflow's indentation/schema, not a
