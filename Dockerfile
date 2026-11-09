@@ -1,8 +1,26 @@
 # Development build stages for the frozen kernel and SQL implementation.
 FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS build
 
-RUN apt-get update --snapshot=20261109T000000Z \
-    && apt-get install --yes --no-install-recommends --snapshot=20261109T000000Z \
+RUN printf '%s\n' \
+      'Types: deb' \
+      'URIs: http://archive.ubuntu.com/ubuntu/' \
+      'Suites: noble' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/ubuntu.sources \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get update --error-on=any \
+    && apt-get install --yes --no-install-recommends ca-certificates=20240203 \
+    && printf '%s\n' \
+      'Types: deb' \
+      'URIs: https://snapshot.ubuntu.com/ubuntu/20261109T000000Z/' \
+      'Suites: noble noble-updates noble-security' \
+      'Components: main universe' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/ubuntu.sources \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get update --error-on=any \
+    && apt-get install --yes --no-install-recommends \
        g++ cmake make python3 \
     && rm -rf /var/lib/apt/lists/*
 

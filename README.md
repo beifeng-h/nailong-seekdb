@@ -26,8 +26,11 @@ python3 tests/legacy_schema.py build/sql_public_case_driver --report legacy-sche
 docker build --platform linux/amd64 --target development-checks -t minivectordb-development .
 ```
 
-The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest and the
-`20261109T000000Z` Ubuntu package snapshot. The `development-checks` stage runs
+The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
+`ca-certificates=20240203` through the signed Ubuntu noble release repository,
+then installs build tools from the HTTPS `20261109T000000Z` Ubuntu package
+snapshot. APT archive signatures and HTTPS certificate verification remain
+enabled. The `development-checks` stage runs
 the four CTest programs, all five public fixture groups and the legacy schema
 fixture. Installed package versions are saved inside the image at
 `/build/installed-packages.tsv`.
