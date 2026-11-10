@@ -9,5 +9,7 @@
 !tests/**
 !mysqltest/
 !mysqltest/**
+!protocol_check/
+!protocol_check/**
 **/__pycache__
 **/*.pyc

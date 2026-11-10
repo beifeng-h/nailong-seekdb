@@ -7,8 +7,10 @@ visibility as ordinary record access.
 
 The public SQL fixtures in `mysqltest/` are unchanged from the official
 `2026-competition-round2` commit
-`9f6df2ba5acf871376e22b64a3d0724e4b575044` (public v4, 20 groups and 95 SQL statements).
-[Official fixture description](https://github.com/oceanbase/seekdb/blob/9f6df2ba5acf871376e22b64a3d0724e4b575044/mysqltest/README.md)
+`f4d4e26653af823a7601668802f80e374ad6643c` (public v4, 20 groups and 95 SQL statements).
+The same commit publishes `STDIO_PROTOCOL.md` and the `protocol_check/` driver,
+which are included unchanged.
+[Official fixture description](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/mysqltest/README.md)
 
 ## Build and check
 
@@ -24,6 +26,9 @@ python3 tests/crash_recovery.py build/sql_fault_driver --sort-cleanup \
 python3 tests/index_build_recovery.py build/sql_fault_driver --report index-build-crash.json
 python3 tests/development_protocol_test.py --driver build/minivectordb_development_server \
   --report development-pipes.json
+python3 tests/public_protocol_check.py \
+  --driver build/minivectordb_development_server \
+  --report public-protocol-report.json
 ```
 
 The public-sample runner waits for the capture process to exit at every
@@ -32,6 +37,12 @@ The public-sample runner waits for the capture process to exit at every
 captured and subsequent statements continue. Until the official semantic error
 mapping is frozen, expected-error assertions check a nonempty internal error
 message and its category. Capture JSON is a development test artifact.
+
+The public protocol check drives the executable over the published JSONL
+contract and compares the responses with the unchanged public fixtures. It
+uses the assertion semantics of `protocol_check/_assertions.py`. The
+organizer's own `protocol_check/run.py` checks the same fixtures against a
+built image on POSIX hosts.
 
 ## Vector index
 
@@ -62,11 +73,60 @@ page reuse. The SQL crash driver checks both exact and index queries after
 forced termination. The index-build crash test also checks the atomic
 publication of a newly built index and record changes.
 
+## Contest JSONL protocol
+
+The published contest contract in `STDIO_PROTOCOL.md` is implemented as
+`--development-protocol mvdb-judge-json-v1`. It is the container default, so
+the image starts in the required mode without judge-side arguments.
+
+After storage recovery the process writes one line and flushes it before it
+reads any request:
+
+```json
+{"type":"ready"}
+```
+
+Each stdin line is one JSON request and produces exactly one stdout line.
+The response echoes the request `id` with its original JSON type and carries
+a boolean `ok`.
+
+| Request | Response |
+| --- | --- |
+| `{"id":N,"op":"execute","sql":"...","search_mode":"exact"}` on a query | `{"id":N,"ok":true,"columns":[...],"rows":[...]}` |
+| `{"id":N,"op":"execute","sql":"...","search_mode":"exact"}` on INSERT, UPDATE or DELETE | `{"id":N,"ok":true,"affected_rows":N}` |
+| `{"id":N,"op":"execute",...}` on table or transaction control | `{"id":N,"ok":true}` |
+| `{"id":N,"op":"execute",...}` that fails | `{"id":N,"ok":false,"error":{"code":"...","message":"..."}}` |
+| `{"id":N,"op":"shutdown"}` | `{"id":N,"ok":true}` and exit code 0 |
+
+`search_mode` selects `exact` or `ann` for that request. `columns` keeps the
+projection order, `rows` is a two-dimensional array and an empty result still
+reports its column names. BIGINT cells are JSON integers, vector cells are
+JSON arrays of finite float32 values, and the process never writes NaN or
+Infinity. A failed statement answers with its error and never terminates the
+process, so later requests are still served.
+
+The framing follows the published rules: one complete JSON object per line,
+terminated by a newline, flushed after every response, with all diagnostics on
+stderr. After the shutdown response the process writes nothing more and exits
+with code 0. The data directory is the `--data` argument, `/data` in the
+container.
+
+`src/judge_protocol.cpp` holds the framing, the restricted JSON reader for
+the request envelope and the response writer. The SQL engine is unchanged:
+the protocol classifies the statement with `parse_sql` and reuses the
+existing sink, so the published statement semantics and the development
+protocol stay identical.
+
 ## Development process protocol
 
+The container entry uses the published contest protocol described in
+`STDIO_PROTOCOL.md`; see [Contest JSONL protocol](#contest-jsonl-protocol)
+below. The development framing in this section is still available under an
+explicit flag and keeps the team's own regression coverage.
+
 The executable requires `--development-protocol mvdb-dev-jsonl-v1 --data DIRECTORY`.
-This is an explicitly versioned development contract. Official process
-compatibility remains pending the organizer's driver.
+This is an explicitly versioned development contract for the team's own
+regression suite. It is not the contest framing.
 
 Input is UTF-8 with one complete SQL statement per line. Empty lines are
 ignored. `@mode exact` and `@mode ann` change the session mode. EOF and `@quit`
@@ -88,8 +148,8 @@ stderr. The process opens no network listeners.
 | error for a command | `kind: "command"` and `message`, leaves the process running |
 
 The development SQL categories are 0 for syntax, 1 for binding and 2 for
-execution. These numbers describe the implementation's internal enum. Official
-error-code mapping remains pending. If execution fails after some rows have
+execution. These numbers describe the implementation's internal enum and are
+not the contest error codes. If execution fails after some rows have
 been emitted, the client discards those frames when it receives `error`.
 The executable retains the current SQL input line and serializes each output
 row directly. It does not accumulate the query result set. JSON integers
@@ -112,15 +172,29 @@ Unicode paths and UTF-8 pipe data.
 docker build --platform linux/amd64 --target development-checks -t minivectordb-development .
 mkdir -p demo-data
 printf '%s\n' \
-  'CREATE TABLE docs(id BIGINT PRIMARY KEY, content VARCHAR(16));' \
-  "INSERT INTO docs VALUES(1, 'saved');" \
-  'BEGIN;' 'DELETE FROM docs;' 'ROLLBACK;' \
-  'SELECT * FROM docs;' '@quit' \
+  '{"id":1,"op":"execute","sql":"CREATE TABLE docs(id BIGINT PRIMARY KEY, content VARCHAR(16));","search_mode":"exact"}' \
+  '{"id":2,"op":"execute","sql":"INSERT INTO docs VALUES(1, '"'"'saved'"'"');","search_mode":"exact"}' \
+  '{"id":3,"op":"execute","sql":"BEGIN;","search_mode":"exact"}' \
+  '{"id":4,"op":"execute","sql":"DELETE FROM docs;","search_mode":"exact"}' \
+  '{"id":5,"op":"execute","sql":"ROLLBACK;","search_mode":"exact"}' \
+  '{"id":6,"op":"execute","sql":"SELECT * FROM docs;","search_mode":"exact"}' \
+  '{"id":7,"op":"shutdown"}' \
   | docker run --rm -i --network none \
       --mount "type=bind,source=$PWD/demo-data,target=/data" minivectordb-development
-printf '%s\n' 'SELECT * FROM docs;' \
+printf '%s\n' \
+  '{"id":1,"op":"execute","sql":"SELECT * FROM docs;","search_mode":"exact"}' \
+  '{"id":2,"op":"shutdown"}' \
   | docker run --rm -i --network none \
       --mount "type=bind,source=$PWD/demo-data,target=/data" minivectordb-development
+```
+
+The organizer's own check runs against the same image:
+
+```sh
+python3 protocol_check/run.py --image minivectordb-development \
+  --handshake-only --output "protocol-results/handshake-$(date +%Y%m%d-%H%M%S)"
+python3 protocol_check/run.py --image minivectordb-development \
+  --output "protocol-results/public-$(date +%Y%m%d-%H%M%S)"
 ```
 
 The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
@@ -128,8 +202,9 @@ The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
 then installs build tools from the HTTPS `20261109T000000Z` Ubuntu package
 snapshot. APT archive signatures and HTTPS certificate verification remain
 enabled. The `development-checks` stage runs
-the seven CTest programs, all 20 public fixture groups and the legacy schema
-fixture. Installed package versions are saved inside the image at
+the eight CTest programs, all 20 public fixture groups, the legacy schema
+fixture and the public protocol check over the contest framing. Installed
+package versions are saved inside the image at
 `/build/installed-packages.tsv`.
 
 The frozen M9 Actions workflow builds the default image from an explicit Git
@@ -152,9 +227,9 @@ container has a separate 2 GiB memory limit. Formal resource scoring remains
 unverified.
 
 The default image starts `/build/minivectordb_development_server` with the
-explicit development protocol and `/data`. Its `formal-ready` label remains
-`false`. That M9 workflow builds without `--target`, inspects the actual final
-configuration, and exercises default startup without overriding the entrypoint.
+published contest protocol and `/data`. That M9 workflow builds without
+`--target`, inspects the actual final configuration, and exercises default
+startup without overriding the entrypoint.
 
 ## Numeric serialization comparison
 
@@ -176,7 +251,16 @@ require their own measurements.
 
 ## Integration status
 
-The contest stdin/stdout process contract and full driver remain pending.
-The current Docker stages and process tests validate the development contract.
-Official framing, results, readiness, mode commands, shutdown, error codes and
-resource acceptance still require the frozen protocol and container requirements.
+The published contest contract in `STDIO_PROTOCOL.md` and the public driver
+under `protocol_check/` are implemented and checked against the unchanged
+public fixtures. The container starts in the published mode, writes the ready
+object before reading, answers one JSON line per request, keeps the request
+identifier type, reports a boolean `ok` and exits cleanly after shutdown.
+
+The published error-code mapping is still empty in `protocol_check/config.json`,
+so the response only needs a nonempty code. This implementation reports the
+semantic names that the public fixtures use, such as `duplicate_key`,
+`unsupported_sql` and `dimension_mismatch`.
+
+The hidden cases, the formal resource budget and the performance ranking are
+not available locally and remain unverified.

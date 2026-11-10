@@ -3,3 +3,5 @@
 *.exe
 *.pdb
 __pycache__/
+/protocol-results/
+/protocol_check/__pycache__/

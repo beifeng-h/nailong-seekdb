@@ -30,6 +30,7 @@ COPY include/ include/
 COPY src/ src/
 COPY tests/ tests/
 COPY mysqltest/ mysqltest/
+COPY protocol_check/ protocol_check/
 
 RUN cmake -S /source -B /build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /build --parallel 2 \
@@ -37,8 +38,8 @@ RUN cmake -S /source -B /build -DCMAKE_BUILD_TYPE=Release \
 
 FROM build AS development-checks
 LABEL org.opencontainers.image.title="MiniVectorDB development checks" \
-      minivectordb.phase="development-protocol-v1" \
-      minivectordb.formal-ready="false"
+      minivectordb.phase="judge-protocol-v1" \
+      minivectordb.formal-ready="true"
 
 RUN ctest --test-dir /build --output-on-failure \
     && python3 /source/tests/public_samples.py /build/sql_public_case_driver \
@@ -47,6 +48,12 @@ RUN ctest --test-dir /build --output-on-failure \
        --report /build/legacy-schema.json
 RUN python3 /source/tests/legacy_schema.py /build/sql_public_case_driver \
        --vector-index --report /build/legacy-index-schema.json
+RUN python3 /source/protocol_check/run.py \
+       --command '["/build/minivectordb_development_server","--development-protocol","mvdb-judge-json-v1","--data","{data_dir}"]' \
+       --output /build/protocol-results
+RUN python3 /source/tests/public_protocol_check.py \
+       --driver /build/minivectordb_development_server \
+       --report /build/public-protocol-report.json
 
 ENTRYPOINT ["/build/minivectordb_development_server"]
-CMD ["--development-protocol", "mvdb-dev-jsonl-v1", "--data", "/data"]
+CMD ["--development-protocol", "mvdb-judge-json-v1", "--data", "/data"]
