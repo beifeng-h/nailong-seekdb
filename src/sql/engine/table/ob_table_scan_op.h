@@ -705,6 +705,7 @@ private:
   int fetch_next_fts_index_rows();
   int fill_generated_fts_cols(blocksstable::ObDatumRow *row);
   int get_output_fts_col_expr_by_type(const ObExprOperatorType &type, ObExpr *&expr);
+  void reset_fts_output_exprs();
   bool is_resume_point_saved();
 protected:
   DASOpResultIter scan_result_;
@@ -735,6 +736,11 @@ protected:
   bool in_rescan_;
   ObDomainIndexCache domain_index_;
   ObFTIndexRowCache fts_index_;
+  // Operator-local plan expressions only; datums and evaluation flags are not cached.
+  ObExpr *fts_word_expr_;
+  ObExpr *fts_doc_id_expr_;
+  ObExpr *fts_word_count_expr_;
+  ObExpr *fts_doc_length_expr_;
 
   // output_ is used to output data, TSC operator directly invokes output_::get_next_row(s),
   // it points to fold_iter_ in group rescan and iter_tree_ in normal scan.
