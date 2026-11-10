@@ -5,9 +5,14 @@
 !include/**
 !src/
 !src/**
+!third_party/
+!third_party/**
 !tests/
 !tests/**
 !mysqltest/
 !mysqltest/**
+!protocol_check/
+!protocol_check/**
+!STDIO_PROTOCOL.md
 **/__pycache__
 **/*.pyc

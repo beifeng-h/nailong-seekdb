@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 project(minivectordb LANGUAGES CXX)
 
 add_library(minivectordb src/page_store.cpp src/database.cpp src/sql_parser.cpp src/sql_executor.cpp
-                        src/development_protocol.cpp)
+                        src/development_protocol.cpp src/stdio_protocol.cpp)
 target_include_directories(minivectordb PUBLIC include)
+target_include_directories(minivectordb SYSTEM PRIVATE third_party)
 target_compile_features(minivectordb PUBLIC cxx_std_20)
 if(MSVC)
   target_compile_options(minivectordb PRIVATE /W4 /WX)
@@ -14,6 +15,8 @@ endif()
 
 add_executable(minivectordb_development_server src/development_main.cpp)
 target_link_libraries(minivectordb_development_server PRIVATE minivectordb)
+add_executable(minivectordb_server src/stdio_main.cpp)
+target_link_libraries(minivectordb_server PRIVATE minivectordb)
 
 enable_testing()
 add_executable(serialization_tests tests/serialization_tests.cpp)

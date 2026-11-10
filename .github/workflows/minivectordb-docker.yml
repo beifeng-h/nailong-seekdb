@@ -1,19 +1,19 @@
-name: MiniVectorDB numeric serialization comparison
+name: MiniVectorDB official stdio protocol validation
 
 on:
   push:
     branches:
-      - codex/minivectordb-number-format-m10
+      - codex/minivectordb-official-protocol-m11-20261110
 
 permissions:
   contents: read
 
 concurrency:
-  group: minivectordb-format-${{ github.ref }}
+  group: minivectordb-stdio-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  serialization-validation:
+  protocol-validation:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -21,46 +21,34 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          fetch-depth: 0
 
-      - name: Build frozen M9 and the candidate with the same installed compiler
+      - name: Build the default database image from the source whitelist
         shell: bash
         run: |
           set -euo pipefail
-          cmake --version
-          c++ --version
-          baseline="$RUNNER_TEMP/minivectordb-m9-source"
-          mkdir -p "$baseline"
-          git archive 01689695d05e7f8b2ecbd35dfb684983a2c20a66 \
-            CMakeLists.txt include src tests mysqltest | tar -x -C "$baseline"
-          cmake -S "$baseline" -B "$RUNNER_TEMP/minivectordb-m9-build" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/minivectordb-m9-build" --parallel 2 \
-            --target minivectordb_development_server
-          cmake -S . -B "$RUNNER_TEMP/minivectordb-m10-build" -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/minivectordb-m10-build" --parallel 2 \
-            --target minivectordb_development_server serialization_tests
+          context="$RUNNER_TEMP/minivectordb-context"
+          mkdir -p "$context"
+          git archive HEAD CMakeLists.txt Dockerfile .dockerignore include src third_party \
+            tests mysqltest protocol_check STDIO_PROTOCOL.md | tar -x -C "$context"
+          docker build --platform linux/amd64 --tag minivectordb-m11 "$context"
+          docker image inspect minivectordb-m11 \
+            --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}} {{json .Config.Labels}}'
 
-      - name: Check floating-point bytes and the existing process contract
+      - name: Check native protocol edge cases
         shell: bash
         run: |
           set -euo pipefail
-          ctest --test-dir "$RUNNER_TEMP/minivectordb-m10-build" \
-            -R '^serialization_contracts$' -V
-          python3 tests/development_protocol_test.py \
-            --driver "$RUNNER_TEMP/minivectordb-m10-build/minivectordb_development_server" \
-            --report "$RUNNER_TEMP/m10-process.json"
+          docker run --rm --network none --entrypoint python3 minivectordb-m11 \
+            /source/tests/stdio_protocol_test.py --driver /build/minivectordb_server \
+            --edges-only --report /tmp/m11-native-edges.json
 
-      - name: Measure same-program noise and balanced vector output
+      - name: Run the unchanged official handshake and public driver on the default image
         shell: bash
         run: |
           set -euo pipefail
-          baseline="$RUNNER_TEMP/minivectordb-m9-build/minivectordb_development_server"
-          candidate="$RUNNER_TEMP/minivectordb-m10-build/minivectordb_development_server"
-          python3 tests/serialization_comparison.py \
-            --baseline "$baseline" --candidate "$baseline" --blocks 1 \
-            --output "$RUNNER_TEMP/m10-same-program" --report "$RUNNER_TEMP/m10-aa.json"
-          cat "$RUNNER_TEMP/m10-aa.json"
-          python3 tests/serialization_comparison.py \
-            --baseline "$baseline" --candidate "$candidate" --blocks 3 \
-            --output "$RUNNER_TEMP/m10-format-comparison" --report "$RUNNER_TEMP/m10-ab.json"
-          cat "$RUNNER_TEMP/m10-ab.json"
+          python3 protocol_check/run.py --image minivectordb-m11 --handshake-only \
+            --output "$RUNNER_TEMP/m11-handshake"
+          cat "$RUNNER_TEMP/m11-handshake/result.json"
+          python3 protocol_check/run.py --image minivectordb-m11 \
+            --output "$RUNNER_TEMP/m11-official-public"
+          cat "$RUNNER_TEMP/m11-official-public/result.json"

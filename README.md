@@ -1,4 +1,4 @@
-# MiniVectorDB development build
+# MiniVectorDB
 
 This C++20 implementation provides disk-backed tables, BIGINT primary keys,
 Unicode VARCHAR values, float32 vectors, exact filtered L2 TopK, persistent flat
@@ -10,12 +10,20 @@ The public SQL fixtures in `mysqltest/` are unchanged from the official
 `9f6df2ba5acf871376e22b64a3d0724e4b575044` (public v4, 20 groups and 95 SQL statements).
 [Official fixture description](https://github.com/oceanbase/seekdb/blob/9f6df2ba5acf871376e22b64a3d0724e4b575044/mysqltest/README.md)
 
+The standard-input/output contract and `protocol_check/` are copied byte-for-byte
+from official commit `f4d4e26653af823a7601668802f80e374ad6643c`.
+[Official process contract](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md)
+
 ## Build and check
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
+python3 protocol_check/run.py \
+  --command '["build/minivectordb_server","--data","{data_dir}"]' \
+  --output protocol-results/public
+python3 tests/stdio_protocol_test.py --driver build/minivectordb_server --report stdio-native.json
 python3 tests/public_samples.py build/sql_public_case_driver --report public-samples.json
 python3 tests/legacy_schema.py build/sql_public_case_driver --report legacy-schema.json
 python3 tests/legacy_schema.py build/sql_public_case_driver --vector-index --report legacy-index-schema.json
@@ -106,6 +114,36 @@ The file-capture test driver shares the same scalar and vector serialization.
 Windows uses wide command-line arguments and binary standard streams for
 Unicode paths and UTF-8 pipe data.
 
+## Standard-input/output protocol
+
+`minivectordb_server --data DIRECTORY` implements the official JSONL contract.
+The default directory is `/data`. After recovery it actively sends the exact
+`{"type":"ready"}` object. Each `execute` request supplies `id`, `sql`, and
+`search_mode` and receives one response with the same JSON identifier and a
+boolean `ok`. BIGINT values retain signed 64-bit precision. Query responses
+contain ordered `columns` and `rows`, and modification responses contain
+`affected_rows`.
+
+Each query writes its rows incrementally to the reserved
+`/data/.minivectordb-response.tmp` workspace. Successful execution publishes one
+JSON response through a 64 KiB copy buffer. Failed execution discards the
+workspace and returns an error response. The workspace is removed after the
+request and on recovery. SQL parsing, transaction visibility, and numeric
+serialization reuse the existing engine.
+
+`shutdown` closes the database, rolls back uncommitted changes, acknowledges
+the request, flushes, and exits with code zero. EOF also closes the database.
+Expected SQL errors and invalid requests return nonempty string codes and
+leave the process available for subsequent requests. The published
+`error_codes` configuration is empty, so this adapter uses `syntax_error`,
+`binding_error`, `execution_error`, and `invalid_request`. Error diagnostics
+containing invalid UTF-8 bytes use replacement characters in the JSON response.
+
+JSON parsing uses the vendored nlohmann/json 3.12.0 single header under its MIT
+license in `third_party/nlohmann/`. The runtime uses local files and standard
+streams. The official driver uses POSIX pipe selectors. Windows native checks
+use reader threads and the unchanged official result assertions.
+
 ## Docker validation
 
 ```sh
@@ -151,10 +189,14 @@ This cap excludes filesystem page-cache memory. The enclosing development
 container has a separate 2 GiB memory limit. Formal resource scoring remains
 unverified.
 
-The default image starts `/build/minivectordb_development_server` with the
-explicit development protocol and `/data`. Its `formal-ready` label remains
-`false`. That M9 workflow builds without `--target`, inspects the actual final
-configuration, and exercises default startup without overriding the entrypoint.
+The default image starts `/build/minivectordb_server --data /data`. The
+`development-checks` target retains the versioned development process.
+The M11 workflow builds the default image from a source whitelist, runs native
+edge checks, and runs the unchanged official handshake and all public cases
+against the default entrypoint. The official driver applies its published
+2 CPU, 2 GiB and 128 PID limits, a read-only root filesystem, a writable
+data volume, dropped capabilities, and disabled networking. Its response
+limit is 16 MiB. The `formal-ready` label remains `false` pending formal admission.
 
 ## Numeric serialization comparison
 
@@ -176,7 +218,6 @@ require their own measurements.
 
 ## Integration status
 
-The contest stdin/stdout process contract and full driver remain pending.
-The current Docker stages and process tests validate the development contract.
-Official framing, results, readiness, mode commands, shutdown, error codes and
-resource acceptance still require the frozen protocol and container requirements.
+The published process contract is implemented and the official public driver
+is included unchanged. Formal 29-case admission, complete semantic error-code
+mapping, performance scoring, and Agent scoring require platform validation.
