@@ -25,7 +25,7 @@ import fts_b3_reuse_validation as reuse
 
 
 REPO = Path(__file__).resolve().parents[3]
-WORKFLOW = REPO / '.github/workflows/fts-contest-validation.yml'
+WORKFLOW = REPO / '.github/script/seekdb/fixtures/fts-exact-b3-c146-validation.yml'
 D = 'a' * 40
 B3 = 'b3eed52688fc1b178632a9dbb38aabb32f805c5d'
 C235 = 'c235713689325d2bb8882b86f8f89ee99ff9b43a'
