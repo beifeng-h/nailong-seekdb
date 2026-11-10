@@ -1,0 +1,22 @@
+# Regression: grouping must retain the last collation-equivalent token,
+# accumulate its frequency and preserve document length. Membership checks
+# ignore hash iteration order; binary controls keep distinct tokens apart.
+--disable_query_log
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"café":2}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 2 AS general_ci_accent_forward_keeps_last_word;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 'café cafe' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'café cafe' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"cafe":2}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 'café cafe' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 2 AS general_ci_accent_reverse_keeps_last_word;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"café":4}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe café' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 4 AS general_ci_accent_repeated_frequency;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"𠀀":2}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 2 AS general_ci_supplementary_forward_keeps_last_word;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 '𠀀 🙂' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 '𠀀 🙂' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"🙂":2}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 '𠀀 🙂' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 2 AS general_ci_supplementary_reverse_keeps_last_word;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens')) = 1 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"𠀀":4}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂 𠀀' COLLATE utf8mb4_general_ci, 'beng', '[{"output":"all"}]'), '$.doc_len') = 4 AS general_ci_supplementary_repeated_frequency;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens')) = 2 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"cafe":2}') AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"café":1}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 'cafe café cafe' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.doc_len') = 3 AS bin_accent_representatives_stay_distinct;
+
+SELECT JSON_LENGTH(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens')) = 2 AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"🙂":2}') AND JSON_CONTAINS(JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.tokens'), '{"𠀀":1}') AND JSON_EXTRACT(TOKENIZE(_utf8mb4 '🙂 𠀀 🙂' COLLATE utf8mb4_bin, 'beng', '[{"output":"all"}]'), '$.doc_len') = 3 AS bin_supplementary_representatives_stay_distinct;
+
+--enable_query_log

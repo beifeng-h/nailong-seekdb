@@ -1,0 +1,16 @@
+general_ci_accent_forward_keeps_last_word
+1
+general_ci_accent_reverse_keeps_last_word
+1
+general_ci_accent_repeated_frequency
+1
+general_ci_supplementary_forward_keeps_last_word
+1
+general_ci_supplementary_reverse_keeps_last_word
+1
+general_ci_supplementary_repeated_frequency
+1
+bin_accent_representatives_stay_distinct
+1
+bin_supplementary_representatives_stay_distinct
+1

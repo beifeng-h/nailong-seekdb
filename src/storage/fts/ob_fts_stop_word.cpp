@@ -245,17 +245,20 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 
 namespace
 {
-// Adds the frequency of one occurrence to the counter of a word that is
-// already present in the word map.
+// Preserves the last collation-equivalent word as the representative and
+// adds its frequency, matching the original overwrite semantics.
 class FTWordCountUpdater final
 {
 public:
-  explicit FTWordCountUpdater(const int64_t word_freq) : word_freq_(word_freq) {}
+  FTWordCountUpdater(const ObFTWord &word, const int64_t word_freq)
+    : word_(word), word_freq_(word_freq) {}
   void operator()(common::hash::HashMapPair<ObFTWord, int64_t> &word_count) const
   {
+    word_count.first = word_;
     word_count.second += word_freq_;
   }
 private:
+  const ObFTWord &word_;
   int64_t word_freq_;
 };
 } // end anonymous namespace
@@ -270,9 +273,9 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
     }
   } else {
     // One hash lookup instead of two: set_or_update() inserts the word with a
-    // count of one when it is new and hands the counter of an already known
-    // word to the callback otherwise.
-    FTWordCountUpdater updater(word_freq);
+    // count of one when it is new and hands an existing word/count pair to
+    // the callback otherwise.
+    FTWordCountUpdater updater(word, word_freq);
     if (OB_FAIL(word_map_.set_or_update(word, 1/*word count of a new word*/, updater))) {
     }
   }
