@@ -679,6 +679,10 @@ ObTableScanOp::ObTableScanOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOp
     in_rescan_(false),
     domain_index_(),
     fts_index_(),
+    fts_word_expr_(nullptr),
+    fts_doc_id_expr_(nullptr),
+    fts_word_count_expr_(nullptr),
+    fts_doc_length_expr_(nullptr),
     output_   (nullptr),
     fold_iter_(nullptr),
     iter_tree_(nullptr),
@@ -1429,6 +1433,7 @@ int ObTableScanOp::set_need_check_outrow_lob()
 int ObTableScanOp::inner_open()
 {
   int ret = OB_SUCCESS;
+  reset_fts_output_exprs();
   DASTableLocList &table_locs = ctx_.get_das_ctx().get_table_loc_list();
   ObSQLSessionInfo *my_session = NULL;
   cur_trace_id_ = ObCurTraceId::get();
@@ -1504,6 +1509,7 @@ int ObTableScanOp::inner_open()
 int ObTableScanOp::inner_close()
 {
   int ret = OB_SUCCESS;
+  reset_fts_output_exprs();
   if (OB_NOT_NULL(scan_iter_)) {
     if (scan_iter_->has_task()) {
       int tmp_ret = fill_storage_feedback_info();
@@ -1556,6 +1562,7 @@ int ObTableScanOp::do_init_before_get_row()
 
 void ObTableScanOp::destroy()
 {
+  reset_fts_output_exprs();
   tsc_rtdef_.~ObTableScanRtDef();
   ObOperator::destroy();
   if (OB_NOT_NULL(iter_tree_)) {
@@ -1647,6 +1654,7 @@ int ObTableScanOp::fill_storage_feedback_info()
 int ObTableScanOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
+  reset_fts_output_exprs();
   in_rescan_ = true;
   if (OB_FAIL(try_check_status())) {
   } else if (OB_FAIL(ObOperator::inner_rescan())) {
@@ -3710,43 +3718,66 @@ int ObTableScanOp::fill_generated_fts_cols(blocksstable::ObDatumRow *row)
   return ret;
 }
 
+void ObTableScanOp::reset_fts_output_exprs()
+{
+  fts_word_expr_ = nullptr;
+  fts_doc_id_expr_ = nullptr;
+  fts_word_count_expr_ = nullptr;
+  fts_doc_length_expr_ = nullptr;
+}
+
 int ObTableScanOp::get_output_fts_col_expr_by_type(
     const ObExprOperatorType &type,
     ObExpr *&expr)
 {
   int ret = OB_SUCCESS;
+  ObExpr **cached_expr = nullptr;
   expr = nullptr;
-  if (OB_UNLIKELY(T_FUN_SYS_WORD_SEGMENT != type
-               && T_FUN_SYS_DOC_ID != type
-               && T_FUN_SYS_WORD_COUNT != type
-               && T_FUN_SYS_DOC_LENGTH != type)) {
-    ret = OB_INVALID_ARGUMENT;
+  if (T_FUN_SYS_WORD_SEGMENT == type) {
+    cached_expr = &fts_word_expr_;
   } else if (T_FUN_SYS_DOC_ID == type) {
-    for (int64_t i = 0; OB_SUCC(ret) && OB_ISNULL(expr) && i < MY_SPEC.output_.count(); ++i) {
-      ObExpr *tmp_expr = MY_SPEC.output_.at(i);
-      if (OB_ISNULL(tmp_expr)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (T_FUN_SYS_WORD_SEGMENT == tmp_expr->type_) {
-        const int64_t idx = MY_SPEC.is_fts_index_aux_ ? i+1 : i-1;
-        if (OB_UNLIKELY(idx < 0 || idx >= MY_SPEC.output_.count())) {
+    cached_expr = &fts_doc_id_expr_;
+  } else if (T_FUN_SYS_WORD_COUNT == type) {
+    cached_expr = &fts_word_count_expr_;
+  } else if (T_FUN_SYS_DOC_LENGTH == type) {
+    cached_expr = &fts_doc_length_expr_;
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_NOT_NULL(*cached_expr)) {
+    expr = *cached_expr;
+  } else {
+    if (T_FUN_SYS_DOC_ID == type) {
+      for (int64_t i = 0; OB_SUCC(ret) && OB_ISNULL(expr) && i < MY_SPEC.output_.count(); ++i) {
+        ObExpr *tmp_expr = MY_SPEC.output_.at(i);
+        if (OB_ISNULL(tmp_expr)) {
           ret = OB_ERR_UNEXPECTED;
-        } else {
-          expr = MY_SPEC.output_.at(idx);
+        } else if (T_FUN_SYS_WORD_SEGMENT == tmp_expr->type_) {
+          const int64_t idx = MY_SPEC.is_fts_index_aux_ ? i+1 : i-1;
+          if (OB_UNLIKELY(idx < 0 || idx >= MY_SPEC.output_.count())) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            expr = MY_SPEC.output_.at(idx);
+          }
+        }
+      }
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && OB_ISNULL(expr) && i < MY_SPEC.output_.count(); ++i) {
+        ObExpr *tmp_expr = MY_SPEC.output_.at(i);
+        if (OB_ISNULL(tmp_expr)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (type == tmp_expr->type_) {
+          expr = tmp_expr;
         }
       }
     }
-  } else {
-    for (int64_t i = 0; OB_SUCC(ret) && OB_ISNULL(expr) && i < MY_SPEC.output_.count(); ++i) {
-      ObExpr *tmp_expr = MY_SPEC.output_.at(i);
-      if (OB_ISNULL(tmp_expr)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (type == tmp_expr->type_) {
-        expr = tmp_expr;
-      }
+    if (OB_SUCC(ret) && OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
     }
-  }
-  if (OB_SUCC(ret) && OB_ISNULL(expr)) {
-    ret = OB_ERR_UNEXPECTED;
+    if (OB_SUCC(ret)) {
+      *cached_expr = expr;
+    }
   }
   return ret;
 }
