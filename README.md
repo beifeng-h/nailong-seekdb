@@ -1,4 +1,4 @@
-# MiniVectorDB development build
+# MiniVectorDB
 
 This C++20 implementation provides disk-backed tables, BIGINT primary keys,
 Unicode VARCHAR values, float32 vectors, exact filtered L2 TopK, persistent flat
@@ -8,9 +8,9 @@ visibility as ordinary record access.
 The public SQL fixtures in `mysqltest/` are unchanged from the official
 `2026-competition-round2` commit
 `f4d4e26653af823a7601668802f80e374ad6643c` (public v4, 20 groups and 95 SQL statements).
-The same commit publishes `STDIO_PROTOCOL.md` and the `protocol_check/` driver,
-which are included unchanged.
-[Official fixture description](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/mysqltest/README.md)
+The same commit supplies the unchanged `STDIO_PROTOCOL.md` and `protocol_check/` driver.
+[Official fixture description](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/mysqltest/README.md),
+[official process contract](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md)
 
 ## Build and check
 
@@ -18,6 +18,10 @@ which are included unchanged.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
+python3 protocol_check/run.py \
+  --command '["build/minivectordb_server","--data","{data_dir}"]' \
+  --output protocol-results/public
+python3 tests/stdio_protocol_test.py --driver build/minivectordb_server --report stdio-native.json
 python3 tests/public_samples.py build/sql_public_case_driver --report public-samples.json
 python3 tests/legacy_schema.py build/sql_public_case_driver --report legacy-schema.json
 python3 tests/legacy_schema.py build/sql_public_case_driver --vector-index --report legacy-index-schema.json
@@ -73,11 +77,12 @@ page reuse. The SQL crash driver checks both exact and index queries after
 forced termination. The index-build crash test also checks the atomic
 publication of a newly built index and record changes.
 
-## Contest JSONL protocol
+## Existing judge protocol interface
 
-The published contest contract in `STDIO_PROTOCOL.md` is implemented as
-`--development-protocol mvdb-judge-json-v1`. It is the container default, so
-the image starts in the required mode without judge-side arguments.
+`minivectordb_development_server` accepts
+`--development-protocol mvdb-judge-json-v1 --data DIRECTORY` for existing callers.
+Its session API, semantic error names and regression tests are retained.
+The `development-checks` Docker target starts this interface.
 
 After storage recovery the process writes one line and flushes it before it
 reads any request:
@@ -87,8 +92,7 @@ reads any request:
 ```
 
 Each stdin line is one JSON request and produces exactly one stdout line.
-The response echoes the request `id` with its original JSON type and carries
-a boolean `ok`.
+The existing protocol tests cover integer and string identifiers and boolean `ok`.
 
 | Request | Response |
 | --- | --- |
@@ -119,14 +123,12 @@ protocol stay identical.
 
 ## Development process protocol
 
-The container entry uses the published contest protocol described in
-`STDIO_PROTOCOL.md`; see [Contest JSONL protocol](#contest-jsonl-protocol)
-below. The development framing in this section is still available under an
-explicit flag and keeps the team's own regression coverage.
+The default container entry is described in
+[Standard-input/output protocol](#standard-inputoutput-protocol).
+The development framing in this section supports the team's original regressions.
 
 The executable requires `--development-protocol mvdb-dev-jsonl-v1 --data DIRECTORY`.
-This is an explicitly versioned development contract for the team's own
-regression suite. It is not the contest framing.
+This is an explicitly versioned development contract for the team's regression suite.
 
 Input is UTF-8 with one complete SQL statement per line. Empty lines are
 ignored. `@mode exact` and `@mode ann` change the session mode. EOF and `@quit`
@@ -165,6 +167,41 @@ The SQL engine exposes its existing sink interface and explicit mode setter.
 The file-capture test driver shares the same scalar and vector serialization.
 Windows uses wide command-line arguments and binary standard streams for
 Unicode paths and UTF-8 pipe data.
+
+## Standard-input/output protocol
+
+`minivectordb_server --data DIRECTORY` implements the official JSONL contract.
+The default directory is `/data`. After recovery it actively sends the exact
+`{"type":"ready"}` object. Each `execute` request supplies `id`, `sql`, and
+`search_mode` and receives one response with the same JSON identifier and a
+boolean `ok`. BIGINT values retain signed 64-bit precision. Query responses
+contain ordered `columns` and `rows`, and modification responses contain
+`affected_rows`.
+
+The validated request identifier is echoed from its original JSON span,
+including integer identifiers beyond uint64 and nested identifier values.
+Duplicate object keys are rejected before SQL execution. Identifier extraction
+uses the validated envelope and preserves JSON string escapes and number spelling.
+
+Each query writes its rows incrementally to the reserved
+`/data/.minivectordb-response.tmp` workspace. Successful execution publishes one
+JSON response through a 64 KiB copy buffer. Failed execution discards the
+workspace and returns an error response. The workspace is removed after the
+request and on recovery. SQL parsing, transaction visibility, and numeric
+serialization reuse the existing engine.
+
+`shutdown` closes the database, rolls back uncommitted changes, acknowledges
+the request, flushes, and exits with code zero. EOF also closes the database.
+Expected SQL errors and invalid requests return nonempty string codes and
+leave the process available for subsequent requests. The published
+`error_codes` configuration is empty, so this adapter uses `syntax_error`,
+`binding_error`, `execution_error`, and `invalid_request`. Error diagnostics
+containing invalid UTF-8 bytes use replacement characters in the JSON response.
+
+JSON parsing uses the vendored nlohmann/json 3.12.0 single header under its MIT
+license in `third_party/nlohmann/`. The runtime uses local files and standard
+streams. The official driver uses POSIX pipe selectors. Windows native checks
+use reader threads and the unchanged official result assertions.
 
 ## Docker validation
 
@@ -226,10 +263,14 @@ This cap excludes filesystem page-cache memory. The enclosing development
 container has a separate 2 GiB memory limit. Formal resource scoring remains
 unverified.
 
-The default image starts `/build/minivectordb_development_server` with the
-published contest protocol and `/data`. That M9 workflow builds without
-`--target`, inspects the actual final configuration, and exercises default
-startup without overriding the entrypoint.
+The default image starts `/build/minivectordb_server --data /data`. The
+`development-checks` target retains `mvdb-judge-json-v1` and its existing checks.
+The workflow builds the default image from a source whitelist, runs native
+edge checks, and runs the unchanged official handshake and all public cases
+against the default entrypoint. The official driver applies its published
+2 CPU, 2 GiB and 128 PID limits, a read-only root filesystem, a writable
+data volume, dropped capabilities, and disabled networking. Its response
+limit is 16 MiB. The `formal-ready` label remains `false` pending formal admission.
 
 ## Numeric serialization comparison
 
@@ -251,16 +292,6 @@ require their own measurements.
 
 ## Integration status
 
-The published contest contract in `STDIO_PROTOCOL.md` and the public driver
-under `protocol_check/` are implemented and checked against the unchanged
-public fixtures. The container starts in the published mode, writes the ready
-object before reading, answers one JSON line per request, keeps the request
-identifier type, reports a boolean `ok` and exits cleanly after shutdown.
-
-The published error-code mapping is still empty in `protocol_check/config.json`,
-so the response only needs a nonempty code. This implementation reports the
-semantic names that the public fixtures use, such as `duplicate_key`,
-`unsupported_sql` and `dimension_mismatch`.
-
-The hidden cases, the formal resource budget and the performance ranking are
-not available locally and remain unverified.
+The published process contract is implemented and the official public driver
+is included unchanged. Formal 29-case admission, complete semantic error-code
+mapping, performance scoring, and Agent scoring require platform validation.

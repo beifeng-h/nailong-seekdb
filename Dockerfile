@@ -1,4 +1,4 @@
-# Development build stages for the frozen kernel and SQL implementation.
+# Build the database and its protocol checks from pinned source.
 FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS build
 
 RUN printf '%s\n' \
@@ -28,9 +28,11 @@ WORKDIR /source
 COPY CMakeLists.txt ./
 COPY include/ include/
 COPY src/ src/
+COPY third_party/ third_party/
 COPY tests/ tests/
 COPY mysqltest/ mysqltest/
 COPY protocol_check/ protocol_check/
+COPY STDIO_PROTOCOL.md ./
 
 RUN cmake -S /source -B /build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /build --parallel 2 \
@@ -57,3 +59,11 @@ RUN python3 /source/tests/public_protocol_check.py \
 
 ENTRYPOINT ["/build/minivectordb_development_server"]
 CMD ["--development-protocol", "mvdb-judge-json-v1", "--data", "/data"]
+
+FROM build AS database
+LABEL org.opencontainers.image.title="MiniVectorDB" \
+      minivectordb.phase="official-stdio-protocol" \
+      minivectordb.formal-ready="false"
+
+ENTRYPOINT ["/build/minivectordb_server"]
+CMD ["--data", "/data"]
