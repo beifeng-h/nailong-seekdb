@@ -1,0 +1,243 @@
+name: Seekdb FTS expression-cache native validation
+
+on:
+  push:
+    branches: [perf/fts-expr-cache-validation-20261110]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seekdb-fts-free-linux-validation
+  cancel-in-progress: false
+
+jobs:
+  native-cache:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      GIT_TERMINAL_PROMPT: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Fetch only exact candidate, kernel, b147 baseline and original input objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'EXPR_ROOT=%s/seekdb-expr-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
+            fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
+            "$GITHUB_SHA" afa3e3540c5830555d59bf7fe871bf361536a441 \
+            b14755bed10d1399cf7d1dca6444cfa757727b21 5bce9e06d1281347ad61344e4b01fab9158c58a2
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Check isolated driver contracts and exact two-file source and immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/script/seekdb -p test_fts_expr_cache_validation.py -v
+          python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase proof \
+            --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA"
+
+      - name: Reclaim only disposable image tools and admit unchanged build and database limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image_tool in /usr/local/lib/android /usr/share/dotnet /opt/ghc; do
+            if test -e "$image_tool"; then
+              resolved=$(realpath -- "$image_tool")
+              test "$resolved" = "$image_tool"
+              case "$resolved" in
+                /usr/local/lib/android|/usr/share/dotnet|/opt/ghc) sudo rm -rf -- "$resolved" ;;
+                *) exit 2 ;;
+              esac
+            fi
+          done
+          uname -srmo
+          getconf GNU_LIBC_VERSION
+          nproc
+          free -b
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n1 | tr -d ' ')" -ge 48318382080
+          mkdir -m 0700 "$RUNNER_TEMP/seekdb-b147-artifact"
+
+      - name: Install original documented host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git wget curl rpm rpm2cpio cpio make build-essential binutils m4 file python3 libtool-bin libaio1t64
+
+      - name: Download immutable b147 complete artifact through official same-repository route
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: '13757273442'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42797329842'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/seekdb-b147-artifact
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Verify ZIP tar ELF identity and prepare b147 baseline without building it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t archives < <(find "$RUNNER_TEMP/seekdb-b147-artifact" -mindepth 1 -maxdepth 1 -print0)
+          test "${#archives[@]}" -eq 1
+          test -f "${archives[0]}" && test ! -L "${archives[0]}"
+          test "$(stat -c '%h' -- "${archives[0]}")" -eq 1
+          python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase prepare \
+            --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA" --artifact-zip "${archives[0]}"
+
+      - name: Preserve original dependency profile using HTTPS-only mirror transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/seekdb-https-tools"
+          mkdir -p "$tools"
+          cat > "$tools/wget" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          for value in "$@"; do
+            case "$value" in
+              http://mirrors.oceanbase.com/*) value="https://mirrors.oceanbase.com/${value#http://mirrors.oceanbase.com/}" ;;
+              https://mirrors.oceanbase.com/*) ;;
+              http://*|https://*) echo 'Unexpected dependency download host' >&2; exit 93 ;;
+            esac
+            args+=("$value")
+          done
+          exec /usr/bin/wget --https-only --timeout=30 --tries=1 "${args[@]}"
+          SH
+          chmod 0755 "$tools/wget"
+          printf '%s\n' "$tools" >> "$GITHUB_PATH"
+
+      - name: Set up unchanged pinned Rust without cache writes
+        uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+          crates-mirror: 'false'
+
+      - name: Initialize one candidate with original release init configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 45m ./build.sh release --init 2>&1 | tee "$RUNNER_TEMP/seekdb-expr-initialize.log"
+          python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase prebuild \
+            --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA"
+
+      - name: Compile affected native SQL target first with original Unity profile and two jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
+          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 120m "$cmake_bin" \
+            --build build_release --target ob_sql -j2 2>&1 | tee "$RUNNER_TEMP/seekdb-expr-sql-build.log"
+          python3 -B - "$EXPR_ROOT/evidence/candidate/affected-object.json" <<'PY'
+          import hashlib,json,pathlib,sys
+          root=pathlib.Path('build_release/src/sql/CMakeFiles/ob_sql.dir/Unity')
+          found=[p for p in root.glob('*.cxx') if 'ob_table_scan_op.cpp' in p.read_text()]
+          if len(found)!=1: raise RuntimeError('Expected exactly one unchanged-profile affected Unity TU')
+          obj=pathlib.Path(str(found[0])+'.o')
+          if not obj.is_file(): raise RuntimeError('Affected native object was not compiled')
+          info=dict(path=str(obj),bytes=obj.stat().st_size,mtimeNs=obj.stat().st_mtime_ns,
+              sha256=hashlib.sha256(obj.read_bytes()).hexdigest(),unity=str(found[0]))
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(info,indent=2)+'\n')
+          print('EXPR_CACHE_AFFECTED_NATIVE_OBJECT',json.dumps(info))
+          PY
+
+      - name: Complete seekdb incrementally without recompiling the affected object
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e build_release/src/observer/seekdb
+          cmake_bin="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin/cmake"
+          /usr/bin/time -v timeout --signal=TERM --kill-after=30s 120m "$cmake_bin" \
+            --build build_release --target seekdb -j2 2>&1 | tee "$RUNNER_TEMP/seekdb-expr-build.log"
+          python3 -B - "$EXPR_ROOT/evidence/candidate/affected-object.json" <<'PY'
+          import hashlib,json,pathlib,sys
+          r=json.loads(pathlib.Path(sys.argv[1]).read_text()); p=pathlib.Path(r['path'])
+          if (p.stat().st_size,p.stat().st_mtime_ns,hashlib.sha256(p.read_bytes()).hexdigest()) != (r['bytes'],r['mtimeNs'],r['sha256']):
+              raise RuntimeError('Affected native object changed instead of incremental reuse')
+          print('EXPR_CACHE_AFFECTED_OBJECT_REUSED',r['sha256'])
+          PY
+          python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase snapshot \
+            --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA"
+          python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase preserve \
+            --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/seekdb-expr-candidate"
+
+      - name: Preserve full new candidate before any SQL diagnostic
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fts-expr-cache-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/seekdb-expr-candidate/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+          include-hidden-files: false
+
+      - name: Run selected unchanged native cases new targeted parity then one bounded ABBA
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=180s 150m python3 -B .github/script/seekdb/fts_expr_cache_validation.py \
+            --phase validate --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA"
+
+      - name: Collect explicit bounded evidence and raw native FAIL without relabeling historical results
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d "$EXPR_ROOT/evidence/candidate"; then
+            for name in initialize sql-build build; do
+              p="$RUNNER_TEMP/seekdb-expr-$name.log"
+              if test -f "$p"; then tail -c 524288 "$p" > "$EXPR_ROOT/evidence/candidate/$name-tail.log"; fi
+            done
+            python3 -B .github/script/seekdb/fts_expr_cache_validation.py --phase collect \
+              --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA" \
+              --out "$RUNNER_TEMP/seekdb-expr-evidence"
+          else
+            echo 'Native validation not prepared; no correctness or performance claim.'
+          fi
+
+      - name: Upload bounded new evidence separately from complete candidate ELF
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fts-expr-cache-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/seekdb-expr-evidence/
+          retention-days: 3
+          compression-level: 6
+          if-no-files-found: warn
+          include-hidden-files: false
+
+      - name: Publish explicit result or blocker without formal performance claims
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          free -b
+          python3 -B - "$EXPR_ROOT/report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json,pathlib,sys
+          p=pathlib.Path(sys.argv[1])
+          r=json.loads(p.read_text()) if p.is_file() else dict(status='not_prepared')
+          visible={k:r[k] for k in ('status','failurePhase','error','correctnessPassed','meansSeconds',
+              'formalContestRun','speedupClaimed','baselineRebuilt','limitations') if k in r}
+          print('EXPR_CACHE_VISIBLE_RESULT',json.dumps(visible))
+          with open(sys.argv[2],'a') as f:
+              f.write('Native FTS expression-cache development validation. Not a formal contest submission.\n\n')
+              f.write('Status: '+r['status']+'\n\n')
+              f.write(json.dumps(visible,indent=2)+'\n')
+          PY
