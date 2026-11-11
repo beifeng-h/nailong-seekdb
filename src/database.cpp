@@ -97,8 +97,15 @@ Row decode_row(const Schema& schema, const std::vector<std::byte>& bytes) {
     if (column.type == Type::bigint) row.emplace_back(std::bit_cast<std::int64_t>(input.u64()));
     else if (column.type == Type::varchar) row.emplace_back(input.string());
     else {
-      Vector vector; vector.reserve(column.extent);
-      for (std::uint32_t i = 0; i < column.extent; ++i) vector.push_back(std::bit_cast<float>(input.u32()));
+      const auto length = std::size_t(column.extent) * sizeof(float);
+      input.need(length);
+      Vector vector(column.extent);
+      if constexpr (std::endian::native == std::endian::little) {
+        std::memcpy(vector.data(), input.data.data() + input.offset, length);
+        input.offset += length;
+      } else {
+        for (auto& number : vector) number = std::bit_cast<float>(input.u32());
+      }
       row.emplace_back(std::move(vector));
     }
   }
