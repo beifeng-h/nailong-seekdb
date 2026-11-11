@@ -24,6 +24,36 @@ class ValidationContractTests(unittest.TestCase):
         self.assertEqual(proof['baselineCommit'],'b14755bed10d1399cf7d1dca6444cfa757727b21')
         self.assertEqual(len(proof['caseInputs']),9)
 
+    def test_canonical_diff_ignores_abbreviation_and_rendering_defaults(self):
+        source=Path(__file__).resolve().parents[3]
+        expected=driver.canonical_patch(source)
+        self.assertEqual(driver.sha(expected),driver.CANONICAL_PATCH_SHA)
+        self.assertEqual(driver.PATCH_SHA,'12b654df178f5d13bfb22507ccc35ab7957384bb295712c9f15e0d75ad8ec55e')
+        for abbrev in (7,8,12):
+            command=['git','-C',str(source),'-c','core.abbrev='+str(abbrev),
+                '-c','color.ui=always','-c','diff.noprefix=true','-c','diff.context=0',
+                '-c','diff.algorithm=histogram','diff',*driver.CANONICAL_DIFF_FLAGS,driver.BASE,driver.KERNEL,'--']
+            self.assertEqual(subprocess.check_output(command),expected)
+        indexes=[line for line in expected.decode().splitlines() if line.startswith('index ')]
+        self.assertEqual(indexes,[
+            'index 1a9cea5806d7b490c6a8b1fb604cf61d6d87e1c8..20f8f167dcc1902a5c6c527c4a4820f698274cab 100644',
+            'index c81c665c97353c6c503711b41c34dd2388f994a5..93d3e8548e77d86883fada10bd21f65b0f6aa6bd 100644'])
+
+    def test_canonical_diff_with_shallow_exact_object_fetch(self):
+        source=Path(__file__).resolve().parents[3]
+        with tempfile.TemporaryDirectory() as tmp:
+            shallow=Path(tmp)/'shallow'; shallow.mkdir()
+            subprocess.run(['git','-C',str(shallow),'init','--quiet'],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            subprocess.run(['git','-C',str(shallow),'fetch','--quiet','--no-tags','--depth=1',
+                source.as_uri(),driver.BASE,driver.KERNEL],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            self.assertEqual(subprocess.check_output(['git','-C',str(shallow),'rev-parse','--is-shallow-repository']).strip(),b'true')
+            expected=driver.canonical_patch(source)
+            for abbrev in (7,8,12):
+                actual=subprocess.check_output(['git','-C',str(shallow),'-c','core.abbrev='+str(abbrev),
+                    'diff',*driver.CANONICAL_DIFF_FLAGS,driver.BASE,driver.KERNEL,'--'])
+                self.assertEqual(actual,expected)
+            self.assertEqual(driver.sha(expected),driver.CANONICAL_PATCH_SHA)
+
     def test_abba_only(self):
         self.assertEqual(driver.SCHEDULE,(('A1','baseline'),('B1','candidate'),('B2','candidate'),('A2','baseline')))
         self.assertEqual([x[0] for x in driver.DDL],['build_ik_all','build_ik_content','build_beng_en'])

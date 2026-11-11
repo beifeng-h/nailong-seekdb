@@ -30,6 +30,10 @@ BASE_TREE = 'e7ef67d5fc1b15cbdd15f893fe3ff19c476a98bd'
 KERNEL = 'afa3e3540c5830555d59bf7fe871bf361536a441'
 KERNEL_TREE = '2933c65f932a10beb1b509fab2e36587d611a287'
 PATCH_SHA = '12b654df178f5d13bfb22507ccc35ab7957384bb295712c9f15e0d75ad8ec55e'
+CANONICAL_PATCH_SHA = '9e2998fedde18d9fa4a5bc04572f3ba4d0bfb1bae8a0267f22738964e3c9c863'
+CANONICAL_DIFF_FLAGS = ('--no-color','--no-ext-diff','--no-textconv','--no-renames',
+    '--src-prefix=a/','--dst-prefix=b/','--diff-algorithm=myers','--unified=3',
+    '--indent-heuristic','--full-index')
 INVENTORY = 'f36e2d1c8aaabd3e9ffc4f8e3635defca6dc3046e3d575e6e73165fa8d80a135'
 BASE_ZIP_SHA = '02799ccf9fe5ff358cb6cb2403442ce1f3626dce80d211044636256c94140e96'
 BASE_TAR_SHA = '964858da1ad7bcc70fbfff20a9ac2df8ea758512a123c6f7d492d73138fcddf0'
@@ -88,6 +92,11 @@ def git_identity(source, commit):
     return raw.decode('utf-8')
 
 
+def canonical_patch(source):
+    # Full object IDs and explicit rendering avoid repository-size/config defaults.
+    return common.git(source,'diff',*CANONICAL_DIFF_FLAGS,BASE,KERNEL,'--')
+
+
 def source_proof(args):
     source, driver = args.source, args.driver_sha
     require(re.fullmatch('[0-9a-f]{40}', driver) is not None, 'Full driver SHA required')
@@ -96,7 +105,7 @@ def source_proof(args):
     require(common.git(source, 'rev-parse', KERNEL+'^{tree}').decode().strip() == KERNEL_TREE, 'Kernel tree mismatch')
     changed = lambda a, b: set(common.git(source, 'diff', '--name-only', a, b, '--').decode().splitlines())
     require(changed(BASE, KERNEL) == PRODUCT, 'Kernel must change exactly two approved product files')
-    require(sha(common.git(source, 'diff', BASE, KERNEL, '--')) == PATCH_SHA, 'Kernel patch byte mismatch')
+    require(sha(canonical_patch(source)) == CANONICAL_PATCH_SHA, 'Canonical kernel patch byte mismatch')
     ci = changed(KERNEL, driver)
     require(ci <= ALLOWED_CI, 'Unexpected CI changes: '+repr(sorted(ci-ALLOWED_CI)))
     require(not common.git(source, 'diff', '--name-only', BASE, driver, '--', *PROTECTED).strip(),
@@ -104,7 +113,7 @@ def source_proof(args):
     require(not common.git(source, 'diff', '--name-only', KERNEL, driver, '--', 'src').strip(),
             'CI driver changes production source')
     topics={KERNEL:'perf(fts): cache operator-local expression resolution',
-        driver:'ci(fts): preflight baseline SQL and retain full server logs [dedicated-native-validation]'}
+        driver:'ci(fts): normalize source proof Git diff [dedicated-native-validation]'}
     for commit,title in topics.items():
         require(common.git(source,'show','-s','--format=%s',commit).decode().strip()==title,
             'New publication topic differs from reviewed neutral title')
@@ -124,7 +133,8 @@ def source_proof(args):
             require(common.git(source, 'show', BASE+':'+rel) == (p/path).read_bytes(), 'Selected native input changed')
     return dict(baselineCommit=BASE, baselineTree=BASE_TREE, kernelCommit=KERNEL, kernelTree=KERNEL_TREE,
         driverCommit=driver, driverTree=identity['tree'], productChanges=sorted(PRODUCT),
-        ciChanges=sorted(ci), patchSha256=PATCH_SHA, originalInputCount=75,
+        ciChanges=sorted(ci), patchSha256=PATCH_SHA, canonicalFullIndexPatchSha256=CANONICAL_PATCH_SHA,
+        canonicalDiffOptions=list(CANONICAL_DIFF_FLAGS), originalInputCount=75,
         originalInputInventorySha256=INVENTORY, originalInputHashes=hashes, caseInputs=case_inputs,
         commitObjects={KERNEL:git_identity(source,KERNEL),driver:git_identity(source,driver)})
 
