@@ -236,13 +236,16 @@ python3 protocol_check/run.py --image minivectordb-development \
 
 The Dockerfile pins the Ubuntu 24.04 amd64 base-image digest. It bootstraps
 `ca-certificates=20240203` through the signed Ubuntu noble release repository,
-then installs build tools from the HTTPS `20261109T000000Z` Ubuntu package
-snapshot. APT archive signatures and HTTPS certificate verification remain
-enabled. The `development-checks` stage runs
+then installs the 173 exact binary-package versions recorded in
+`ubuntu-packages.lock` from the official HTTPS Ubuntu archive and security
+repositories. The lock file is a byte-for-byte copy of the complete package
+list from the successful `029b884bd` Linux image. APT verifies archive
+signatures and HTTPS certificates. After compiling, the image saves
+`dpkg-query -W` output to `/build/installed-packages.tsv` and requires an exact
+match with the lock file, including package names and versions.
+The `development-checks` stage runs
 the eight CTest programs, all 20 public fixture groups, the legacy schema
-fixture and the public protocol check over the contest framing. Installed
-package versions are saved inside the image at
-`/build/installed-packages.tsv`.
+fixture and the public protocol check over the contest framing.
 
 The frozen M9 Actions workflow builds the default image from an explicit Git
 archive of source, tests and build files. It then runs the 95 public SQL

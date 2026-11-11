@@ -1,6 +1,7 @@
 **
 !CMakeLists.txt
 !Dockerfile
+!ubuntu-packages.lock
 !include/
 !include/**
 !src/

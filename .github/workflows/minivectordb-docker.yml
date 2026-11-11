@@ -49,9 +49,10 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             > "$evidence_dir/workflow-identity.txt"
           cp Dockerfile "$evidence_dir/Dockerfile"
+          cp ubuntu-packages.lock "$evidence_dir/ubuntu-packages.lock"
           cp protocol_check/config.json "$evidence_dir/protocol-config.json"
-          git archive HEAD CMakeLists.txt Dockerfile .dockerignore include src third_party \
-            tests mysqltest protocol_check STDIO_PROTOCOL.md | tar -x -C "$context"
+          git archive HEAD CMakeLists.txt Dockerfile .dockerignore ubuntu-packages.lock \
+            include src third_party tests mysqltest protocol_check STDIO_PROTOCOL.md | tar -x -C "$context"
           docker build --progress=plain --platform linux/amd64 --tag minivectordb-m11 "$context" \
             2>&1 | tee "$evidence_dir/docker-build.log"
           docker image inspect minivectordb-m11 > "$evidence_dir/image-inspect.json"
