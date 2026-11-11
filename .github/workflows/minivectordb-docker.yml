@@ -25,6 +25,17 @@ jobs:
           ref: ${{ env.SOURCE_REVISION }}
           persist-credentials: false
 
+      - name: Check the locked learning-material input and digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
+          mkdir -p "$evidence_dir"
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          python3 tests/learning_material_check.py --material agent/conversation.json \
+            --source-revision "$SOURCE_REVISION" \
+            --report "$evidence_dir/learning-material-input.json"
+
       - name: Build the default database image from the source whitelist
         shell: bash
         run: |
@@ -47,18 +58,28 @@ jobs:
           docker image inspect minivectordb-m11 \
             --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}} {{json .Config.Labels}}'
           test "$(docker image inspect minivectordb-m11 --format '{{json .Config.Entrypoint}}')" \
-            = '["/build/minivectordb_development_server"]'
+            = '["/build/minivectordb_server"]'
           test "$(docker image inspect minivectordb-m11 --format '{{json .Config.Cmd}}')" \
-            = '["--development-protocol","mvdb-judge-json-v1","--data","/data"]'
+            = '["--data","/data"]'
 
       - name: Check native protocol edge cases
         shell: bash
         run: |
           set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
+          docker run --rm --network none --entrypoint ctest minivectordb-m11 \
+            --test-dir /build --output-on-failure 2>&1 | tee "$evidence_dir/native-ctest.log"
           docker run --rm --network none --entrypoint /build/judge_protocol_tests minivectordb-m11
-          docker run --rm --network none --entrypoint python3 minivectordb-m11 \
+          docker run --rm --network none \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --entrypoint python3 minivectordb-m11 \
             /source/tests/stdio_protocol_test.py --driver /build/minivectordb_server \
-            --edges-only --report /tmp/m11-native-edges.json
+            --edges-only --report /evidence/native-stdio-edges.json
+          docker run --rm --network none \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --entrypoint python3 minivectordb-m11 \
+            /source/tests/legacy_schema.py /build/sql_public_case_driver \
+            --vector-index --report /evidence/legacy-index-schema.json
 
       - name: Run the unchanged official handshake and public driver on the default image
         shell: bash
@@ -83,14 +104,12 @@ jobs:
             export_container="$(docker create minivectordb-m11)"
             trap 'docker rm "$export_container" >/dev/null' EXIT
             mkdir -p "$evidence_dir/bin"
+            docker cp "$export_container:/build/minivectordb_server" \
+              "$evidence_dir/bin/minivectordb_server"
             docker cp "$export_container:/build/minivectordb_development_server" \
               "$evidence_dir/bin/minivectordb_development_server"
             docker cp "$export_container:/build/installed-packages.tsv" \
               "$evidence_dir/installed-packages.tsv"
-            docker cp "$export_container:/build/protocol-results" \
-              "$evidence_dir/build-public-protocol"
-            docker cp "$export_container:/build/public-protocol-report.json" \
-              "$evidence_dir/build-public-protocol-report.json"
             docker rm "$export_container" >/dev/null
             trap - EXIT
           fi
@@ -112,7 +131,7 @@ jobs:
                   files.append({"path": str(path.relative_to(root)), "bytes": len(content),
                                 "sha256": hashlib.sha256(content).hexdigest()})
           (root / "manifest.json").write_text(json.dumps({"files": files}, indent=2) + "\n")
-          executable = root / "bin/minivectordb_development_server"
+          executable = root / "bin/minivectordb_server"
           if executable.exists():
               content = executable.read_bytes()
               assert content[:4] == b"\x7fELF"

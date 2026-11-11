@@ -19,7 +19,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 python3 protocol_check/run.py \
-  --command '["build/minivectordb_development_server","--development-protocol","mvdb-judge-json-v1","--data","{data_dir}"]' \
+  --command '["build/minivectordb_server","--data","{data_dir}"]' \
   --output protocol-results/public
 python3 tests/stdio_protocol_test.py --driver build/minivectordb_server --report stdio-native.json
 python3 tests/public_samples.py build/sql_public_case_driver --report public-samples.json
@@ -77,13 +77,12 @@ page reuse. The SQL crash driver checks both exact and index queries after
 forced termination. The index-build crash test also checks the atomic
 publication of a newly built index and record changes.
 
-## Default contest protocol
+## Existing judge protocol interface
 
-The default database image starts `minivectordb_development_server` with
-`--development-protocol mvdb-judge-json-v1 --data /data`. The final Docker stage
-inherits the entrypoint and checks from `development-checks`.
-The parser accepts signed 64-bit integer or string request identifiers.
-Query rows are collected in memory before the single response is written.
+`minivectordb_development_server` accepts
+`--development-protocol mvdb-judge-json-v1 --data DIRECTORY` for existing callers.
+Its session API, semantic error names and regression tests are retained.
+The `development-checks` Docker target starts this interface.
 
 After storage recovery the process writes one line and flushes it before it
 reads any request:
@@ -125,7 +124,7 @@ protocol stay identical.
 ## Development process protocol
 
 The default container entry is described in
-[Default contest protocol](#default-contest-protocol).
+[Standard-input/output protocol](#standard-inputoutput-protocol).
 The development framing in this section supports the team's original regressions.
 
 The executable requires `--development-protocol mvdb-dev-jsonl-v1 --data DIRECTORY`.
@@ -169,10 +168,9 @@ The file-capture test driver shares the same scalar and vector serialization.
 Windows uses wide command-line arguments and binary standard streams for
 Unicode paths and UTF-8 pipe data.
 
-## Additional standard-input/output executable
+## Standard-input/output protocol
 
 `minivectordb_server --data DIRECTORY` implements the official JSONL contract.
-Call this executable directly or select it with Docker's `--entrypoint` option.
 The default directory is `/data`. After recovery it actively sends the exact
 `{"type":"ready"}` object. Each `execute` request supplies `id`, `sql`, and
 `search_mode` and receives one response with the same JSON identifier and a
@@ -265,16 +263,19 @@ This cap excludes filesystem page-cache memory. The enclosing development
 container has a separate 2 GiB memory limit. Formal resource scoring remains
 unverified.
 
-The default image starts `/build/minivectordb_development_server
---development-protocol mvdb-judge-json-v1 --data /data` through the
-`development-checks` stage.
+The default image starts `/build/minivectordb_server --data /data`. The
+`development-checks` target retains `mvdb-judge-json-v1` and its existing checks.
 The workflow builds the default image from a source whitelist, runs native
 edge checks, and runs the unchanged official handshake and all public cases
 against the default entrypoint. The official driver applies its published
 2 CPU, 2 GiB and 128 PID limits, a read-only root filesystem, a writable
 data volume, dropped capabilities, and disabled networking. Its response
-limit is 16 MiB. The final image inherits the judge-protocol labels from
-`development-checks`.
+limit is 16 MiB. The `formal-ready` label remains `false` pending formal admission.
+
+The workflow checks `agent/conversation.json` from the checked-out commit before
+building the image. It saves the material byte length and SHA256 in
+`learning-material-input.json`. Run `python3 tests/learning_material_check.py`
+to perform the same input check locally. The platform performs the Agent assessment.
 
 ## Numeric serialization comparison
 
