@@ -146,6 +146,8 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   if (pthread_mutex_lock(&h->search_mutex) != 0) return 1;
   int rc = 0;
   int unlock_rc = 0;
+  int stream_ready = 0;
+  cudaStream_t stream = 0;
   size_t query_bytes = 0, neighbor_bytes = 0, distance_bytes = 0;
   float* qd = 0; unsigned* nd = 0; float* dd = 0; cuvsCagraSearchParams_t sp = 0;
   cudaError_t copy_error = cudaSuccess;
@@ -153,13 +155,17 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   if (sk_cuvs_tensor_bytes(nq, h->dim, sizeof(float), &query_bytes)) { rc=10; goto done; }
   if (sk_cuvs_tensor_bytes(nq, topk, sizeof(unsigned), &neighbor_bytes)) { rc=11; goto done; }
   if (sk_cuvs_tensor_bytes(nq, topk, sizeof(float), &distance_bytes)) { rc=12; goto done; }
+  if (cuvsStreamGet(h->res, &stream) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("search stream"); rc=20; goto done;
+  }
+  stream_ready = 1;
   if (sk_cuvs_reserve(h, &h->query_workspace, &h->query_capacity, query_bytes)) { rc=10; goto done; }
   if (sk_cuvs_reserve(h, &h->neighbor_workspace, &h->neighbor_capacity, neighbor_bytes)) { rc=11; goto done; }
   if (sk_cuvs_reserve(h, &h->distance_workspace, &h->distance_capacity, distance_bytes)) { rc=12; goto done; }
   qd = (float*)h->query_workspace;
   nd = (unsigned*)h->neighbor_workspace;
   dd = (float*)h->distance_workspace;
-  copy_error = cudaMemcpy(qd, query, query_bytes, cudaMemcpyDefault);
+  copy_error = cudaMemcpyAsync(qd, query, query_bytes, cudaMemcpyDefault, stream);
   if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("query H2D", copy_error); rc=13; goto done; }
   {
     DLManagedTensor qt, nt, dt; long qs[2]={nq,h->dim}, nsh[2]={nq,topk}, dsh[2]={nq,topk};
@@ -177,14 +183,20 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { sk_cuvs_report_error("CAGRA search"); rc=15; goto done; }
-    copy_error = cudaMemcpy(out_ids, nd, neighbor_bytes, cudaMemcpyDefault);
+    copy_error = cudaMemcpyAsync(out_ids, nd, neighbor_bytes, cudaMemcpyDefault, stream);
     if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("IDs D2H", copy_error); rc=16; goto done; }
     if (out_dist) {
-      copy_error = cudaMemcpy(out_dist, dd, distance_bytes, cudaMemcpyDefault);
+      copy_error = cudaMemcpyAsync(out_dist, dd, distance_bytes, cudaMemcpyDefault, stream);
       if (copy_error != cudaSuccess) { sk_cuvs_report_copy_error("distances D2H", copy_error); rc=18; goto done; }
     }
   }
 done:
+  /* The caller owns host buffers only until return; drain even error exits. */
+  if (stream_ready && cuvsStreamSync(h->res) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("search stream completion");
+    h->workspace_failed = 1;
+    if (rc == 0) rc = 21;
+  }
   if (sp) cuvsCagraSearchParamsDestroy(sp);
   unlock_rc = pthread_mutex_unlock(&h->search_mutex);
   if (unlock_rc != 0) {
@@ -199,12 +211,20 @@ void seekdb_cuvs_free(void* handle)
 {
   sk_cuvs_index* h = (sk_cuvs_index*)handle;
   if (!h) return;
+  if (cuvsStreamSync(h->res) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("free pending work");
+    fprintf(stderr, "[seekdb_cuvs] stream completion unknown; cleanup is best effort\n");
+  }
   sk_cuvs_release(h, h->distance_workspace, h->distance_capacity);
   sk_cuvs_release(h, h->neighbor_workspace, h->neighbor_capacity);
   sk_cuvs_release(h, h->query_workspace, h->query_capacity);
-  cuvsCagraIndexDestroy(h->idx);
-  cuvsCagraIndexParamsDestroy(h->ip);
-  cuvsResourcesDestroy(h->res);
+  if (cuvsCagraIndexDestroy(h->idx) != CUVS_SUCCESS) sk_cuvs_report_error("free index");
+  if (cuvsCagraIndexParamsDestroy(h->ip) != CUVS_SUCCESS) sk_cuvs_report_error("free params");
+  if (cuvsStreamSync(h->res) != CUVS_SUCCESS) {
+    sk_cuvs_report_error("free stream completion");
+    fprintf(stderr, "[seekdb_cuvs] device memory reclamation unknown\n");
+  }
+  if (cuvsResourcesDestroy(h->res) != CUVS_SUCCESS) sk_cuvs_report_error("free resources");
   sk_cuvs_destroy_search_mutex(h);
   free(h);
 }

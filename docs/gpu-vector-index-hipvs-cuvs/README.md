@@ -148,6 +148,11 @@ The no-GPU DDL contract remains covered by
 - Query workspaces are retained per handle under a mutex. This candidate does
   not optimize the first allocation or graph construction, and has no measured
   GPU speedup yet.
+- Query input, CAGRA search and result copies use the handle's resource stream.
+  Search waits for completion before destroying parameters or unlocking, including
+  error exits after work was queued. A failed wait disables further use of the
+  handle. Teardown waits before cleanup and again before destroying the resource;
+  failures retain diagnostics and leave device reclamation unconfirmed.
 - The explicit batch API rebuilds its CAGRA index per call.
 - GPU validation is manual because upstream CI has no compatible GPU runner.
 - Multi-GPU and long-duration coverage remain pending. Host test doubles do not

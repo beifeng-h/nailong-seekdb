@@ -20,9 +20,13 @@ int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
  *  - seekdb_cuvs_free: releases the handle.
  * Search workspace is retained by the handle and reused across calls. Searches
  * on the same handle are serialized; callers must stop using it before free.
- * Serialize requires no concurrent search. A failed workspace release disables
+ * Query copies and search use the handle's resource stream. Successful search
+ * returns only after that stream completes, including host output copies.
+ * Serialize requires no concurrent search. A failed release or stream wait disables
  * search and serialize until the handle is freed and rebuilt. An ambiguous
  * failed free is never retried; complete resource recovery is not guaranteed.
+ * Free waits for queued work and releases before destroying the resource;
+ * synchronization failures are reported and cleanup then remains best effort.
  * All ROCm/cuVS state lives inside the .so; seekdb only ever sees these C symbols. */
 void* seekdb_cuvs_build(const float* base, long n, long dim);
 int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,

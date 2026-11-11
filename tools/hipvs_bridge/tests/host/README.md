@@ -37,6 +37,14 @@ The isolated `--release-failure-before` and `--release-failure-after` modes run 
 
 `--copy-serialize-diagnostics` isolates nine runtime-copy diagnostic cases and three serialize cases. The full suite includes them. The production runtime helper uses `cudaError_t` and `cudaGetErrorString`, mapped by the fixed hipVS compatibility header to `hipError_t` and `hipGetErrorString`; the host declarations are test doubles only.
 
+`--stream-ordering` runs the resource-stream regression. The fake asynchronous copy API only appends work to a per-resource FIFO. Search also appends work after asynchronous copying has selected that resource's stream. The fixture executes those copies and search operations when `cuvsStreamSync` drains the FIFO. A direct control checks that host and device buffers retain their old contents before Sync and receive the expected values after Sync.
+
+The stream cases check nq 1/64/1 with Top10/100, growth and retained allocations, cold/warm StreamGet failure with return 20, Sync failure with return 21 and a disabled handle, preservation of earlier returns 10/13/14/15/16/18 when Sync also fails, search-parameter lifetime, and mutex coverage through pending IDs and distance copies. Teardown checks a pre-cleanup Sync, queued model frees, index/parameter destruction, a final Sync, and resource destruction. The full `--require-reuse` suite includes these cases.
+
+Failed Sync controls record the queued work as unknown and discard the fixture's callbacks. This bookkeeping does not establish cancellation or completion of real device work. Failed teardown synchronization is tested as best effort. The post-cleanup failure case reports three unresolved model allocations before disposing fixture-owned backing storage. Successful host cleanup in other cases only describes this model.
+
+For a red control, compile the fixture against the exact previous bridge at `441750e0fa911ba6a8dbc81553614c168331308c` and run `--stream-ordering`. The queue control must pass. The bridge contract check must then fail with resource StreamGet, Sync and asynchronous-copy counts all zero. Retain this failure log separately from the candidate log. The synchronous `cudaMemcpy` double remains available for that previous source and frozen V5 comparisons.
+
 ## Frozen comparison
 
 The frozen V5 bridge at commit `634888d9b037153fa143d2c913ba4b25503e1d62` has SHA256 `296fafff4bd8d86ff2222840d44a23f56ba687acd1393879c8a0e922e7620b3e`. Compile that exact source with this fixture and run without arguments for common plumbing checks. `--require-reuse` must fail specifically because its second same-size query performs three further allocations; any build failure or unrelated runtime failure is not an accepted red result.

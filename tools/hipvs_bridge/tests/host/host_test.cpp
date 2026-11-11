@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -16,12 +18,23 @@
 #include <vector>
 #include <io.h>
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(std::string(__func__)+": "+#x); } while (0)
-struct FakeResource {};
+struct PendingWork {
+ enum class Kind { Copy, Search, Free };
+ Kind kind;
+ void* referenced_object;
+ std::function<void(std::unique_lock<std::mutex>&)> execute;
+};
+struct FakeStream {
+ std::deque<PendingWork> pending;
+ bool async_used=false;
+};
+struct FakeResource { FakeStream stream; };
 struct FakeIndex { int64_t n=0, dim=0; };
 struct FakeMutex { std::mutex value; };
 struct Block { std::unique_ptr<unsigned char[]> bytes; size_t size; bool live=true; };
-enum class ApiFailure { None, Resource, Params, Index, Build, Deserialize, Size, Dims, Serialize };
+enum class ApiFailure { None, Resource, Params, Index, Build, Deserialize, Size, Dims, Serialize, SearchParams, Search };
 enum class Cleanup { Index, Params, Resource, Mutex };
+enum class StreamEvent { Sync, Free, Index, Params, Resource };
 struct State {
  std::mutex mu; std::condition_variable cv;
  std::map<void*,Block> blocks;
@@ -40,6 +53,13 @@ struct State {
  int copy_calls=0, copy_fail_at=0, copy_error=701, runtime_error_queries=0, last_runtime_code=0;
  int runtime_text_mode=0;
  std::thread::id owner;
+ std::vector<FakeResource*> active_resources;
+ std::vector<StreamEvent> stream_events;
+ int stream_get_calls=0, stream_get_fail_at=0, stream_sync_calls=0, stream_sync_fail_at=0;
+ int async_copy_calls=0, completed_work=0, unknown_work=0;
+ int unlock_with_pending=0, params_destroyed_with_pending=0;
+ size_t pending_at_gate=0;
+ bool defer_frees=false;
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
 static thread_local const char* sdk_error=nullptr;
@@ -55,6 +75,8 @@ static const char* failure_text(ApiFailure failure) {
   case ApiFailure::Size: return "FIRST_SIZE_ERROR";
   case ApiFailure::Dims: return "FIRST_DIMS_ERROR";
   case ApiFailure::Serialize: return "FIRST_SERIALIZE_ERROR";
+  case ApiFailure::SearchParams: return "FIRST_SEARCH_PARAMS_ERROR";
+  case ApiFailure::Search: return "FIRST_SEARCH_ERROR";
   default: return "UNEXPECTED_FAILURE";
  }
 }
@@ -72,6 +94,11 @@ static bool device_range(const void* p,size_t n) {
 }
 static void api_entry() { if(S.gate && S.entered && !S.release && std::this_thread::get_id()!=S.owner) ++S.cross_thread_api; }
 static size_t live_blocks() { size_t n=0; for(auto& b:S.blocks) n+=b.second.live; return n; }
+static size_t pending_work() {
+ size_t count=0;
+ for(auto* resource:S.active_resources) count+=resource->stream.pending.size();
+ return count;
+}
 static void clean_state() {
  std::lock_guard<std::mutex> lk(S.mu);
  CHECK(live_blocks()==0); CHECK(S.resources==0); CHECK(S.indexes==0); CHECK(S.index_params==0); CHECK(S.search_params==0); CHECK(S.mutexes==0);
@@ -83,35 +110,88 @@ static void clean_state() {
  S.api_failure=ApiFailure::None; S.error_text_mode=0; S.cleanup.clear(); sdk_error=nullptr;
  S.copy_calls=S.copy_fail_at=S.runtime_error_queries=S.last_runtime_code=0;
  S.copy_error=701; S.runtime_text_mode=0;
+ CHECK(S.active_resources.empty());
+ S.stream_events.clear();
+ S.stream_get_calls=S.stream_get_fail_at=S.stream_sync_calls=S.stream_sync_fail_at=0;
+ S.async_copy_calls=S.completed_work=S.unknown_work=0;
+ S.unlock_with_pending=S.params_destroyed_with_pending=0;
+ S.pending_at_gate=0; S.defer_frees=false;
 }
-int cuvsResourcesCreate(cuvsResources_t* p) { if(inject_failure(ApiFailure::Resource)) return CUVS_ERROR; *p=new FakeResource; ++S.resources; return api_ok(); }
-int cuvsResourcesDestroy(cuvsResources_t p) { S.cleanup.push_back(Cleanup::Resource); delete p; --S.resources; return api_ok(); }
+int cuvsResourcesCreate(cuvsResources_t* p) { if(inject_failure(ApiFailure::Resource)) return CUVS_ERROR; *p=new FakeResource; S.active_resources.push_back(*p); ++S.resources; return api_ok(); }
+int cuvsResourcesDestroy(cuvsResources_t p) {
+ CHECK(p->stream.pending.empty());
+ S.stream_events.push_back(StreamEvent::Resource);
+ S.active_resources.erase(std::find(S.active_resources.begin(),S.active_resources.end(),p));
+ S.cleanup.push_back(Cleanup::Resource); delete p; --S.resources; return api_ok();
+}
+int cuvsStreamGet(cuvsResources_t resource,cudaStream_t* stream) {
+ std::lock_guard<std::mutex> lock(S.mu); api_entry();
+ if(++S.stream_get_calls==S.stream_get_fail_at) return api_error("FIRST_STREAM_GET_ERROR");
+ CHECK(resource); *stream=&resource->stream; return api_ok();
+}
+int cuvsStreamSync(cuvsResources_t resource) {
+ std::unique_lock<std::mutex> lock(S.mu); api_entry(); CHECK(resource);
+ S.stream_events.push_back(StreamEvent::Sync);
+ if(++S.stream_sync_calls==S.stream_sync_fail_at) {
+  // Failed synchronization leaves execution unknown. Discard model callbacks
+  // without claiming that a real runtime cancels device work or frees memory.
+  S.unknown_work+=static_cast<int>(resource->stream.pending.size());
+  resource->stream.pending.clear();
+  return api_error("FIRST_STREAM_SYNC_ERROR");
+ }
+ while(!resource->stream.pending.empty()) {
+  auto work=std::move(resource->stream.pending.front());
+  resource->stream.pending.pop_front();
+  work.execute(lock); ++S.completed_work;
+ }
+ return api_ok();
+}
 int cuvsCagraIndexParamsCreate(cuvsCagraIndexParams_t* p) { if(inject_failure(ApiFailure::Params)) return CUVS_ERROR; *p=new FakeIndexParams{}; ++S.index_params; return api_ok(); }
-int cuvsCagraIndexParamsDestroy(cuvsCagraIndexParams_t p) { S.cleanup.push_back(Cleanup::Params); delete p; --S.index_params; return api_ok(); }
+int cuvsCagraIndexParamsDestroy(cuvsCagraIndexParams_t p) { S.stream_events.push_back(StreamEvent::Params); S.cleanup.push_back(Cleanup::Params); delete p; --S.index_params; return api_ok(); }
 int cuvsCagraIndexCreate(cuvsCagraIndex_t* p) { if(inject_failure(ApiFailure::Index)) return CUVS_ERROR; *p=new FakeIndex; ++S.indexes; return api_ok(); }
-int cuvsCagraIndexDestroy(cuvsCagraIndex_t p) { S.cleanup.push_back(Cleanup::Index); delete p; --S.indexes; return api_ok(); }
+int cuvsCagraIndexDestroy(cuvsCagraIndex_t p) { S.stream_events.push_back(StreamEvent::Index); S.cleanup.push_back(Cleanup::Index); delete p; --S.indexes; return api_ok(); }
 int cuvsCagraBuild(cuvsResources_t,cuvsCagraIndexParams_t p,DLManagedTensor* t,cuvsCagraIndex_t i) {
  CHECK(p->build_algo==NN_DESCENT); CHECK(p->graph_degree==128); CHECK(p->intermediate_graph_degree==256); CHECK(p->nn_descent_niter==100);
  if(inject_failure(ApiFailure::Build)) return CUVS_ERROR;
  i->n=t->dl_tensor.shape[0]; i->dim=t->dl_tensor.shape[1]; return api_ok();
 }
-int cuvsCagraSearchParamsCreate(cuvsCagraSearchParams_t* p) { *p=new FakeSearchParams{64,1}; std::lock_guard<std::mutex> lk(S.mu); ++S.search_params; return 0; }
-int cuvsCagraSearchParamsDestroy(cuvsCagraSearchParams_t p) { delete p; std::lock_guard<std::mutex> lk(S.mu); --S.search_params; return 0; }
+int cuvsCagraSearchParamsCreate(cuvsCagraSearchParams_t* p) { if(inject_failure(ApiFailure::SearchParams)) return CUVS_ERROR; *p=new FakeSearchParams{64,1}; std::lock_guard<std::mutex> lk(S.mu); ++S.search_params; return 0; }
+int cuvsCagraSearchParamsDestroy(cuvsCagraSearchParams_t p) {
+ std::lock_guard<std::mutex> lock(S.mu);
+ for(auto* resource:S.active_resources) for(const auto& work:resource->stream.pending)
+  if(work.kind==PendingWork::Kind::Search && work.referenced_object==p) ++S.params_destroyed_with_pending;
+ delete p; --S.search_params; return 0;
+}
 int cuvsRMMAlloc(cuvsResources_t,void** p,size_t n) {
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); ++S.alloc_calls;
  if(S.alloc_calls==S.fail_at) { *p=nullptr; return api_error("host-test controlled allocation error"); }
  Block b{std::make_unique<unsigned char[]>(n),n,true}; *p=b.bytes.get(); S.blocks.emplace(*p,std::move(b)); return 0;
 }
-int cuvsRMMFree(cuvsResources_t,void* p,size_t n) {
+int cuvsRMMFree(cuvsResources_t resource,void* p,size_t n) {
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); auto it=S.blocks.find(p);
  CHECK(it!=S.blocks.end()); CHECK(++S.free_attempts[p]==1);
  CHECK(it->second.live); CHECK(it->second.size==n);
+ S.stream_events.push_back(StreamEvent::Free);
  if(++S.free_calls==S.free_fail_at) {
   S.failed_free=p; S.failed_free_bytes=n;
   if(S.free_after_release) it->second.live=false;
   return api_error("host-test controlled release error");
  }
- it->second.live=false; return 0;
+ if(S.defer_frees) {
+  resource->stream.pending.push_back({PendingWork::Kind::Free,p,[p](std::unique_lock<std::mutex>&) {
+   auto block=S.blocks.find(p); CHECK(block!=S.blocks.end()); CHECK(block->second.live);
+   block->second.live=false;
+  }});
+ } else it->second.live=false;
+ return 0;
+}
+static void copy_bytes(void* dst,const void* src,size_t n,bool src_device,std::unique_lock<std::mutex>& lock) {
+ CHECK(device_range(src,n)==src_device); CHECK(device_range(dst,n)!=src_device);
+ if(S.gate && src_device && !S.entered) {
+  S.entered=true; S.owner=std::this_thread::get_id(); S.pending_at_gate=pending_work()+1; S.cv.notify_all();
+  CHECK(S.cv.wait_for(lock,std::chrono::seconds(8),[]{return S.release;}));
+ }
+ std::memcpy(dst,src,n);
 }
 cudaError_t cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
  std::unique_lock<std::mutex> lk(S.mu); api_entry(); CHECK(kind==cudaMemcpyDefault);
@@ -119,25 +199,41 @@ cudaError_t cudaMemcpy(void* dst,const void* src,size_t n,int kind) {
  CHECK(src_device!=dst_device);
  if(++S.copy_calls==S.copy_fail_at) return S.copy_error;
  if(S.fail_distance_copy && src_device && ++S.d2h_copy_count==2) return 1;
- if(S.gate && src_device && !S.entered) {
-  S.entered=true; S.owner=std::this_thread::get_id(); S.cv.notify_all();
-  CHECK(S.cv.wait_for(lk,std::chrono::seconds(8),[]{return S.release;}));
- }
- std::memcpy(dst,src,n); return cudaSuccess;
+ copy_bytes(dst,src,n,src_device,lk); return cudaSuccess;
+}
+cudaError_t cudaMemcpyAsync(void* dst,const void* src,size_t n,int kind,cudaStream_t stream) {
+ std::lock_guard<std::mutex> lock(S.mu); api_entry(); CHECK(kind==cudaMemcpyDefault); CHECK(stream);
+ const bool src_device=device_range(src,n), dst_device=device_range(dst,n);
+ CHECK(src_device!=dst_device);
+ CHECK(std::any_of(S.active_resources.begin(),S.active_resources.end(),[stream](FakeResource* resource){return &resource->stream==stream;}));
+ ++S.async_copy_calls;
+ if(++S.copy_calls==S.copy_fail_at) return S.copy_error;
+ if(S.fail_distance_copy && src_device && ++S.d2h_copy_count==2) return 1;
+ stream->async_used=true;
+ stream->pending.push_back({PendingWork::Kind::Copy,nullptr,[dst,src,n,src_device](std::unique_lock<std::mutex>& queue_lock) {
+  copy_bytes(dst,src,n,src_device,queue_lock);
+ }});
+ return cudaSuccess;
 }
 const char* cudaGetErrorString(cudaError_t error) {
  std::lock_guard<std::mutex> lk(S.mu); ++S.runtime_error_queries; S.last_runtime_code=error;
  return S.runtime_text_mode==1?nullptr:S.runtime_text_mode==2?"":"HOST_RUNTIME_COPY_ERROR";
 }
-int cuvsCagraSearch(cuvsResources_t,cuvsCagraSearchParams_t p,cuvsCagraIndex_t idx,DLManagedTensor* q,DLManagedTensor* n,DLManagedTensor* d,cuvsFilter f) {
+int cuvsCagraSearch(cuvsResources_t resource,cuvsCagraSearchParams_t p,cuvsCagraIndex_t idx,DLManagedTensor* q,DLManagedTensor* n,DLManagedTensor* d,cuvsFilter f) {
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); ++S.searches;
  const long nq=q->dl_tensor.shape[0], dim=q->dl_tensor.shape[1], topk=n->dl_tensor.shape[1];
  CHECK(dim==idx->dim); CHECK(n->dl_tensor.shape[0]==nq); CHECK(d->dl_tensor.shape[0]==nq); CHECK(d->dl_tensor.shape[1]==topk);
  CHECK(p->itopk_size==std::max<size_t>(512,static_cast<size_t>(topk)*4)); CHECK(p->search_width==4); CHECK(f.type==NO_FILTER); CHECK(f.addr==0);
  CHECK(device_range(q->dl_tensor.data,sizeof(float)*nq*dim)); CHECK(device_range(n->dl_tensor.data,sizeof(unsigned)*nq*topk)); CHECK(device_range(d->dl_tensor.data,sizeof(float)*nq*topk));
+ if(inject_failure(ApiFailure::Search)) return CUVS_ERROR;
  auto* queries=static_cast<float*>(q->dl_tensor.data); auto* ids=static_cast<unsigned*>(n->dl_tensor.data); auto* dist=static_cast<float*>(d->dl_tensor.data);
  // Deliberate fake protocol, NOT a simulated ANN/Recall implementation.
- for(long a=0;a<nq;++a) for(long b=0;b<topk;++b) { ids[a*topk+b]=static_cast<unsigned>(queries[a*dim])*10+static_cast<unsigned>(b); dist[a*topk+b]=queries[a*dim]+0.25f*b; }
+ const auto execute=[queries,ids,dist,nq,dim,topk](std::unique_lock<std::mutex>&) {
+  CHECK(device_range(queries,sizeof(float)*nq*dim)); CHECK(device_range(ids,sizeof(unsigned)*nq*topk)); CHECK(device_range(dist,sizeof(float)*nq*topk));
+  for(long a=0;a<nq;++a) for(long b=0;b<topk;++b) { ids[a*topk+b]=static_cast<unsigned>(queries[a*dim])*10+static_cast<unsigned>(b); dist[a*topk+b]=queries[a*dim]+0.25f*b; }
+ };
+ if(resource->stream.async_used) resource->stream.pending.push_back({PendingWork::Kind::Search,p,execute});
+ else {std::unique_lock<std::mutex> unused; execute(unused);}
  return 0;
 }
 int cuvsCagraSerialize(cuvsResources_t,const char*,cuvsCagraIndex_t i,bool dataset) { ++S.serialize_calls; CHECK(dataset); if(inject_failure(ApiFailure::Serialize)) return CUVS_ERROR; snapshot_n=i->n; snapshot_dim=i->dim; return api_ok(); }
@@ -153,7 +249,10 @@ int pthread_mutex_lock(pthread_mutex_t* p) {
  {std::lock_guard<std::mutex> lk(S.mu); if(S.gate) {++S.attempts; S.second_blocked=true; S.cv.notify_all();}}
  p->native->value.lock(); return 0;
 }
-int pthread_mutex_unlock(pthread_mutex_t* p) { p->native->value.unlock(); return 0; }
+int pthread_mutex_unlock(pthread_mutex_t* p) {
+ {std::lock_guard<std::mutex> lock(S.mu); if(pending_work()!=0) ++S.unlock_with_pending;}
+ p->native->value.unlock(); return 0;
+}
 static void* build() { const float base[512]={}; void* h=seekdb_cuvs_build(base,256,2); CHECK(h); return h; }
 static void search(void* h,long nq,long topk,float marker=2,bool distances=true) {
  std::vector<float> q(static_cast<size_t>(nq)*2); for(long a=0;a<nq;++a) q[a*2]=marker+a;
@@ -211,6 +310,10 @@ static void serialized_copyback() {
  {std::unique_lock<std::mutex> lk(S.mu); attempted=S.cv.wait_for(lk,std::chrono::seconds(5),[]{return S.attempts>=2;}); S.release=true; S.cv.notify_all();}
  a.join(); b.join(); if(e1) std::rethrow_exception(e1); if(e2) std::rethrow_exception(e2);
  CHECK(entered); CHECK(attempted); CHECK(S.second_blocked); CHECK(S.cross_thread_api==0);
+ if(S.async_copy_calls>0) {
+  CHECK(S.pending_at_gate>=2); CHECK(S.unlock_with_pending==0); CHECK(S.params_destroyed_with_pending==0);
+  std::cout<<"PASS mutex covers queued IDs and distance copyback through stream synchronization\n";
+ }
  S.gate=false; seekdb_cuvs_free(h); clean_state(); std::cout<<"PASS same-handle serialization includes D2H IDs copyback\n";
 }
 static void release_failure_disables_handle(bool after_release) {
@@ -333,19 +436,168 @@ static void copy_serialize_diagnostics() {
  std::cout<<"copy/serialize diagnostic missing="<<missing<<" / 12\n"; CHECK(missing==0);
  std::cout<<"PASS copy/serialize diagnostics / return codes / output order / handle reuse (HOST ONLY)\n";
 }
+static void stream_model_defers_work() {
+ clean_state();
+ cuvsResources_t resource=nullptr;
+ CHECK(cuvsResourcesCreate(&resource)==CUVS_SUCCESS);
+ cudaStream_t stream=nullptr;
+ CHECK(cuvsStreamGet(resource,&stream)==CUVS_SUCCESS);
+ void* device=nullptr;
+ CHECK(cuvsRMMAlloc(resource,&device,4)==CUVS_SUCCESS);
+ std::memset(device,0,4);
+ const unsigned char input[4]={3,5,7,11};
+ unsigned char output[4]={};
+ CHECK(cudaMemcpyAsync(device,input,4,cudaMemcpyDefault,stream)==cudaSuccess);
+ CHECK(cudaMemcpyAsync(output,device,4,cudaMemcpyDefault,stream)==cudaSuccess);
+ CHECK(static_cast<unsigned char*>(device)[0]==0);
+ CHECK(output[0]==0); CHECK(pending_work()==2); CHECK(S.completed_work==0);
+ CHECK(cuvsStreamSync(resource)==CUVS_SUCCESS);
+ CHECK(std::memcmp(input,output,4)==0); CHECK(S.completed_work==2); CHECK(pending_work()==0);
+ CHECK(cuvsRMMFree(resource,device,4)==CUVS_SUCCESS);
+ CHECK(cuvsResourcesDestroy(resource)==CUVS_SUCCESS);
+ clean_state();
+ std::cout<<"PASS fake asynchronous copies execute only at Sync, in FIFO order (HOST ONLY)\n";
+}
+static void stream_workspace_growth_and_reuse() {
+ clean_state();
+ void* handle=build();
+ search(handle,1,10,3);
+ const bool bridge_uses_resource_stream=S.stream_get_calls==1 && S.stream_sync_calls==1 &&
+  S.async_copy_calls==3 && S.completed_work==4 && pending_work()==0;
+ if(!bridge_uses_resource_stream) {
+  std::cout<<"stream contract observed get="<<S.stream_get_calls<<" sync="<<S.stream_sync_calls
+   <<" async_copy="<<S.async_copy_calls<<" completed="<<S.completed_work<<"\n";
+  seekdb_cuvs_free(handle); clean_state();
+  CHECK(bridge_uses_resource_stream);
+ }
+ S.defer_frees=true;
+ struct Case {long queries,topk; int allocations;};
+ const Case cases[]={{64,10,3},{1,10,0},{64,100,2},{1,100,0},{1,10,0},{64,100,0}};
+ for(const auto& entry:cases) {
+  const int allocations=S.alloc_calls, gets=S.stream_get_calls, syncs=S.stream_sync_calls;
+  search(handle,entry.queries,entry.topk,7);
+  CHECK(S.alloc_calls==allocations+entry.allocations);
+  CHECK(S.stream_get_calls==gets+1); CHECK(S.stream_sync_calls==syncs+1);
+  CHECK(pending_work()==0); CHECK(S.unlock_with_pending==0); CHECK(S.params_destroyed_with_pending==0);
+ }
+ seekdb_cuvs_free(handle); clean_state();
+ std::cout<<"PASS stream ordering for nq 1/64/1, Top10/100, growth and workspace reuse\n";
+}
+static void stream_get_failure_recovery() {
+ for(bool warm:{false,true}) {
+  clean_state(); void* handle=build();
+  if(warm) search(handle,1,10);
+  const int allocations=S.alloc_calls, searches=S.searches, copies=S.async_copy_calls, syncs=S.stream_sync_calls;
+  S.stream_get_fail_at=S.stream_get_calls+1;
+  const float query[2]={5,0}; unsigned ids[10]={}; float distances[10]={};
+  const int result=seekdb_cuvs_search(handle,query,1,10,ids,distances);
+  CHECK(result==20); CHECK(S.alloc_calls==allocations); CHECK(S.searches==searches);
+  CHECK(S.async_copy_calls==copies); CHECK(S.stream_sync_calls==syncs); CHECK(pending_work()==0);
+  S.stream_get_fail_at=0;
+  search(handle,1,10,9); seekdb_cuvs_free(handle); clean_state();
+ }
+ std::cout<<"PASS StreamGet failure rc20 before work, cold/warm handle recovery\n";
+}
+static void stream_sync_failure_disables_handle() {
+ clean_state(); void* handle=build(); search(handle,1,10);
+ S.stream_sync_fail_at=S.stream_sync_calls+1;
+ const float query[2]={5,0}; unsigned ids[10]={}; float distances[10]={};
+ CHECK(seekdb_cuvs_search(handle,query,1,10,ids,distances)==21);
+ CHECK(S.unknown_work==4);
+ const int searches=S.searches, copies=S.async_copy_calls, allocations=S.alloc_calls;
+ S.stream_sync_fail_at=0;
+ CHECK(seekdb_cuvs_search(handle,query,1,10,ids,distances)==19);
+ CHECK(seekdb_cuvs_serialize(handle,"fake.disabled.snapshot")!=0);
+ CHECK(S.searches==searches); CHECK(S.async_copy_calls==copies); CHECK(S.alloc_calls==allocations);
+ seekdb_cuvs_free(handle);
+ CHECK(S.unknown_work==4);
+ std::cout<<"PASS failed Sync rc21 disables handle; model work execution remains unknown=4\n";
+ clean_state();
+}
+static void stream_failure_preserves_first_return() {
+ struct Case {ApiFailure api; int copy; bool allocation; int result;};
+ const Case cases[]={
+  {ApiFailure::None,0,true,10}, {ApiFailure::SearchParams,0,false,14},
+  {ApiFailure::Search,0,false,15}, {ApiFailure::None,1,false,13},
+  {ApiFailure::None,2,false,16}, {ApiFailure::None,3,false,18}
+ };
+ for(const auto& entry:cases) {
+  clean_state(); void* handle=build(); search(handle,1,10);
+  S.api_failure=entry.api;
+  if(entry.copy) S.copy_fail_at=S.copy_calls+entry.copy;
+  if(entry.allocation) S.fail_at=S.alloc_calls+1;
+  S.stream_sync_fail_at=S.stream_sync_calls+1;
+  const int prior_syncs=S.stream_sync_calls;
+  std::vector<float> query(entry.allocation?128U:2U,0);
+  query[0]=5;
+  std::vector<unsigned> ids(entry.allocation?640U:10U,0);
+  std::vector<float> distances(ids.size(),0);
+  StderrCapture capture;
+  const int result=seekdb_cuvs_search(handle,query.data(),entry.allocation?64:1,10,ids.data(),distances.data());
+  const std::string diagnostic=capture.finish();
+  CHECK(result==entry.result); CHECK(S.stream_sync_calls==prior_syncs+1);
+  CHECK(diagnostic.find("FIRST_STREAM_SYNC_ERROR")!=std::string::npos);
+  S.api_failure=ApiFailure::None; S.copy_fail_at=0; S.fail_at=0; S.stream_sync_fail_at=0;
+  CHECK(seekdb_cuvs_search(handle,query.data(),1,10,ids.data(),distances.data())==19);
+  seekdb_cuvs_free(handle);
+  std::cout<<"PASS earlier rc="<<entry.result<<" preserved through failed Sync; unknown model work="<<S.unknown_work<<"\n";
+  clean_state();
+ }
+}
+static void stream_free_ordering() {
+ // The pre/post-failure controls record unknown execution explicitly. Only the
+ // success control establishes completion of these synthetic queued operations.
+ for(int failed_phase:{0,1,2}) {
+  clean_state(); void* handle=build(); search(handle,1,10);
+  CHECK(S.active_resources.size()==1);
+  auto* resource=S.active_resources.front();
+  cudaStream_t stream=nullptr;
+  CHECK(cuvsStreamGet(resource,&stream)==CUVS_SUCCESS);
+  const unsigned char marker[4]={17,19,23,29};
+  CHECK(cudaMemcpyAsync(S.blocks.begin()->first,marker,4,cudaMemcpyDefault,stream)==cudaSuccess);
+  S.defer_frees=true;
+  const int completed=S.completed_work, unknown=S.unknown_work;
+  if(failed_phase) S.stream_sync_fail_at=S.stream_sync_calls+failed_phase;
+  S.stream_events.clear();
+  seekdb_cuvs_free(handle);
+  const std::vector<StreamEvent> expected={StreamEvent::Sync,StreamEvent::Free,StreamEvent::Free,
+   StreamEvent::Free,StreamEvent::Index,StreamEvent::Params,StreamEvent::Sync,StreamEvent::Resource};
+  CHECK(S.stream_events==expected); CHECK(pending_work()==0);
+  if(failed_phase==0) {CHECK(S.completed_work==completed+4); CHECK(S.unknown_work==unknown); CHECK(live_blocks()==0);}
+  if(failed_phase==1) {CHECK(S.completed_work==completed+3); CHECK(S.unknown_work==unknown+1); CHECK(live_blocks()==0);}
+  if(failed_phase==2) {CHECK(S.completed_work==completed+1); CHECK(S.unknown_work==unknown+3); CHECK(live_blocks()==3);}
+  std::cout<<"PASS free pre/post Sync order phase="<<failed_phase<<" unknown model work="<<S.unknown_work
+   <<" model allocations unresolved="<<live_blocks()<<"\n";
+  // Dispose fixture-owned backing storage after recording the unknown state.
+  for(auto& block:S.blocks) block.second.live=false;
+  clean_state();
+ }
+}
+static void stream_ordering() {
+ stream_model_defers_work();
+ stream_workspace_growth_and_reuse();
+ stream_get_failure_recovery();
+ stream_sync_failure_disables_handle();
+ stream_failure_preserves_first_return();
+ serialized_copyback();
+ stream_free_ordering();
+ std::cout<<"PASS stream-ordering regression suite (HOST ONLY)\n";
+}
 int main(int argc,char** argv) {
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
  const bool before_only=argc==2 && std::string(argv[1])=="--release-failure-before";
  const bool after_only=argc==2 && std::string(argv[1])=="--release-failure-after";
  const bool diagnostic_only=argc==2 && std::string(argv[1])=="--lifecycle-diagnostics";
  const bool copy_only=argc==2 && std::string(argv[1])=="--copy-serialize-diagnostics";
- if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics]\n"; return 2;}
+ const bool stream_only=argc==2 && std::string(argv[1])=="--stream-ordering";
+ if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only && !stream_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics|--stream-ordering]\n"; return 2;}
  try {
   if(before_only || after_only) {release_failure_disables_handle(after_only); return 0;}
   if(diagnostic_only) {lifecycle_diagnostics(); return 0;}
   if(copy_only) {copy_serialize_diagnostics(); return 0;}
+  if(stream_only) {stream_ordering(); return 0;}
   reuse_and_growth(strict); allocation_failure_recovery(); deserialize_empty(strict);
-  if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback(); release_failure_disables_handle(false); release_failure_disables_handle(true); lifecycle_diagnostics(); copy_serialize_diagnostics();}
+  if(strict) {invalid_sizes_no_allocation(); distance_copy_failure_recovery(); serialized_copyback(); release_failure_disables_handle(false); release_failure_disables_handle(true); lifecycle_diagnostics(); copy_serialize_diagnostics(); stream_ordering();}
   std::cout<<"HOST LOGIC PASS (no GPU/POSIX/Recall claim)\n"; return 0;
  }
  catch(const std::exception& e) {std::cerr<<"FAIL "<<e.what()<<"\n"; return 1;}
