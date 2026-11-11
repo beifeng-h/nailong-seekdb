@@ -37,6 +37,9 @@ BASE_ELF_SHA = 'fa2be2a166c042421080e142adbb98b83f277be6f77b2a47ce63dc69f0f6db03
 BASE_BUILD_ID = '983ae843c7765c615f6a3ba870bdbd65b5d86c74'
 LOG_PAYLOAD_CAP = 56*1024**2
 LOG_FILE_CAP = 256*1024
+SERVER_LOG_ARCHIVE_CAP = 96*1024**2
+SERVER_LOG_RAW_CAP = 2*1024**3
+SERVER_LOG_TOTAL_ARCHIVE_CAP = 4*SERVER_LOG_ARCHIVE_CAP
 DATA_SHA = 'bc385b3c9586d40d667093947be20a8714ed65301eae68487af8fac22956d235'
 USER_IDENTITY = b'fcoox1111-rgb <288271307+fcoox1111-rgb@users.noreply.github.com>'
 PRODUCT = frozenset(('src/sql/engine/table/ob_table_scan_op.cpp', 'src/sql/engine/table/ob_table_scan_op.h'))
@@ -101,7 +104,7 @@ def source_proof(args):
     require(not common.git(source, 'diff', '--name-only', KERNEL, driver, '--', 'src').strip(),
             'CI driver changes production source')
     topics={KERNEL:'perf(fts): cache operator-local expression resolution',
-        driver:'ci(fts): validate expression-cache native parity [dedicated-native-validation]'}
+        driver:'ci(fts): preflight baseline SQL and retain full server logs [dedicated-native-validation]'}
     for commit,title in topics.items():
         require(common.git(source,'show','-s','--format=%s',commit).decode().strip()==title,
             'New publication topic differs from reviewed neutral title')
@@ -259,12 +262,47 @@ def prebuild(args):
     common.verify_loader(binary,args.root/'evidence/baseline/prebuild-ldd.log',args.source,
                          common.runtime_env(args.source,binary))
     verify_version(args,binary,args.root/'evidence/baseline/version.log',BASE)
-    dump(args.root/'evidence/prebuild.json',dict(passed=True,driverCommit=args.driver_sha,baselineSha256=BASE_ELF_SHA))
+    import fts_expr_cache_targeted as targeted
+    report=json.loads((args.root/'report.json').read_text())
+    require('baseline' not in report['targeted'],'Baseline SQL preflight must execute once, not be retried silently')
+    identity=json.loads((args.root/'runtime/baseline/identity.json').read_text())
+    row=run_owned(args,report,{'baseline':identity},'baseline','targeted-baseline',
+        lambda call,out,pid:targeted.run(call,out,args,sql))
+    common.require_instance(row)
+    report['targeted']['baseline']=row['work']
+    canonical=sha(json.dumps(row['work']['canonical'],sort_keys=True,separators=(',',':')).encode())
+    report['baselineTargetedPreflight']=dict(driverCommit=args.driver_sha,baselineCommit=BASE,
+        baselineElfSha256=BASE_ELF_SHA,helperSha256=common.digest(args.source/PREFIX/'fts_expr_cache_targeted.py'),
+        canonicalSha256=canonical,resultSha256=common.digest(args.root/'validation/targeted-baseline/result.json'),
+        executedBeforeCandidateCompile=True,rawStatus=row['status'],cleanupPassed=row['cleanupPassed'])
+    dump(args.root/'report.json',report)
+    dump(args.root/'evidence/prebuild.json',dict(passed=True,driverCommit=args.driver_sha,
+        baselineSha256=BASE_ELF_SHA,baselineTargetedPreflight=report['baselineTargetedPreflight']))
+    print('EXPR_CACHE_BASELINE_SQL_PREFLIGHT '+json.dumps(report['baselineTargetedPreflight']),flush=True)
+
+
+def check_baseline_targeted(args,report):
+    receipt=report.get('baselineTargetedPreflight',{})
+    expected=dict(driverCommit=args.driver_sha,baselineCommit=BASE,baselineElfSha256=BASE_ELF_SHA,
+        helperSha256=common.digest(args.source/PREFIX/'fts_expr_cache_targeted.py'),
+        canonicalSha256=sha(json.dumps(report.get('targeted',{}).get('baseline',{}).get('canonical'),
+            sort_keys=True,separators=(',',':')).encode()),
+        resultSha256=common.digest(args.root/'validation/targeted-baseline/result.json'),
+        executedBeforeCandidateCompile=True,rawStatus='passed',cleanupPassed=True)
+    require(receipt==expected,'Baseline prebuild tiny SQL receipt changed or failed')
+    row=json.loads((args.root/'validation/targeted-baseline/result.json').read_text())
+    require(row['work']==report['targeted']['baseline'] and row['status']=='passed'
+        and row['cleanupPassed'] and not (args.root/'validation/targeted-baseline/database').exists(),
+        'Saved baseline native SQL result or cleanup changed')
+    prebuild=json.loads((args.root/'evidence/prebuild.json').read_text())
+    require(prebuild['baselineTargetedPreflight']==receipt,'Prebuild baseline SQL identity binding changed')
+    return receipt
 
 
 def snapshot(args):
     plan=load_plan(args)
     require(json.loads((args.root/'evidence/prebuild.json').read_text())['passed'], 'Missing prebuild gate')
+    check_baseline_targeted(args,json.loads((args.root/'report.json').read_text()))
     expected,rust=build_profile(args)
     version=args.source/'build_release/src/observer/ob_version.cpp'
     require(args.driver_sha in version.read_text(),'Generated version is not actual driver commit')
@@ -370,6 +408,105 @@ def build_work(args,pid):
     return work
 
 
+
+def process_state(pid):
+    try:
+        raw=(Path('/proc')/str(pid)/'stat').read_text()
+    except FileNotFoundError:
+        return None
+    fields=raw[raw.rindex(')')+2:].split()
+    return dict(state=fields[0],startTicks=int(fields[19]))
+
+
+def capture_full_server_logs(base,out,role,name):
+    require(name in dict(SCHEDULE) and dict(SCHEDULE)[name]==role,'Full server logs must bind one ABBA role')
+    require(base==out/'database' and base.is_dir(),'Capture must precede owned database destruction')
+    stop=json.loads((out/'own-stop.log.json').read_text())
+    require(stop['exitCode']==0,'Owned server must stop successfully before full log capture')
+    owned=json.loads((out/'owned-process.json').read_text())
+    state=process_state(owned['pid'])
+    require(state is None or state['startTicks']!=owned['startTicks'] or state['state']=='Z',
+        'Original owned process is still live; refusing non-final log bytes')
+    logdir=base/'log'
+    common.no_symlinks(logdir)
+    require(logdir.is_dir(),'Owned raw server log directory missing')
+    files=[]; total=0
+    for path in sorted(logdir.iterdir()):
+        # Only server-owned stdout/stderr and known server log families, never configs or datafiles.
+        if path.name!='console.log' and re.fullmatch(r'seekdb\.log(?:\.wf)?(?:\.[0-9]+)?(?:\.wf)?',path.name) is None:
+            continue
+        common.no_symlinks(path)
+        st=path.stat()
+        require(stat.S_ISREG(st.st_mode) and st.st_nlink==1,'Raw server log must be a unique regular file')
+        total+=st.st_size
+        require(len(files)<64 and total<=SERVER_LOG_RAW_CAP,'Raw server log count/byte cap exceeded; no truncation allowed')
+        files.append((path,dict(path=path.relative_to(base).as_posix(),bytes=st.st_size,
+            sha256=common.digest(path),mtimeNs=st.st_mtime_ns,fullBytes=True,truncated=False)))
+    names={p.name for p,_ in files}
+    require({'console.log','seekdb.log'}<=names,'At least complete main log and original server console required per round')
+    destination=out/'full-server-logs.tar.gz'
+    def populate(tar):
+        for path,record in files:
+            info=tarfile.TarInfo(record['path']); info.size=record['bytes']; info.mode=0o644
+            with path.open('rb') as stream: tar.addfile(info,stream)
+            current=path.stat()
+            require(current.st_size==record['bytes'] and current.st_mtime_ns==record['mtimeNs']
+                and common.digest(path)==record['sha256'],'Stopped raw server log changed during capture')
+    record=archive(destination,SERVER_LOG_ARCHIVE_CAP,populate)
+    receipt=dict(name=name,role=role,archive=record,fileCount=len(files),rawBytes=total,
+        captureMoment='after_owned_stop_before_database_destroy',ownedPid=owned['pid'],
+        ownedStartTicks=owned['startTicks'],postStopProcessState=state,stopExitCode=0,
+        files=[r for _,r in files],fullBytes=True,truncated=False,
+        rawCapBytes=SERVER_LOG_RAW_CAP,archiveCapBytes=SERVER_LOG_ARCHIVE_CAP)
+    dump(out/'full-server-logs.json',receipt)
+    return receipt
+
+
+def run_owned(args,report,identities,role,name,work,initialize=False,native=False):
+    source_proof(args)
+    source=args.root/'sources/baseline' if role=='baseline' else args.source
+    expected=BASE if role=='baseline' else args.driver_sha
+    common.source_identity(source,expected)
+    b=Path(identities[role]['binary'])
+    role_args=argparse.Namespace(source=source,binary=b,
+        obclient=args.source/'deps/3rd/u01/obclient/bin/obclient',
+        mysqltest=args.source/'deps/3rd/u01/obclient/bin/mysqltest',out=args.root/'validation')
+    old={key:os.environ.get(key) for key in ('PATH','LD_LIBRARY_PATH')}
+    env=common.runtime_env(args.source,b)
+    os.environ.update({key:env[key] for key in old})
+    def checked(call,out):
+        observed=common.effective_parameters(out/'actual-parameters.log')
+        if 'observedParameters' in report: require(observed==report['observedParameters'],'Actual database settings differ')
+        report['observedParameters']=observed
+        sdb=common.load_module('expr_cache_owned_sdb',source/PREFIX/'sdb.py')
+        pid=sdb.inspect_instance_process(call.base_dir,b)
+        require(pid and (Path('/proc')/str(pid)/'exe').resolve(strict=True)==b,'Owned process role ELF mismatch')
+        state=process_state(pid)
+        require(state is not None and state['state']!='Z','Live owned process state required')
+        dump(out/'owned-process.json',dict(pid=pid,startTicks=state['startTicks'],role=role,binary=str(b),sha256=identities[role]['sha256']))
+        resource_record(out/'resources-before.json',8*1024**3)
+        return work(call,out,pid)
+    original_log_capture=native_harness.bounded_db_logs
+    if name in dict(SCHEDULE):
+        def full_capture(base,out):
+            tails=original_log_capture(base,out)
+            return dict(tails,fullServerLogs=capture_full_server_logs(base,out,role,name))
+        native_harness.bounded_db_logs=full_capture
+    try:
+        row=native_harness.run_instance(role_args,native_harness.load_native(source),name,
+            7500+len(report['instances']),checked,initialize=initialize)
+    finally:
+        native_harness.bounded_db_logs=original_log_capture
+        for key,value in old.items():
+            if value is None: os.environ.pop(key,None)
+            else: os.environ[key]=value
+    row['role']=role
+    report['instances'].append(row)
+    dump(args.root/'report.json',report)
+    common.source_identity(source,expected)
+    source_proof(args)
+    return row
+
 def validate(args):
     plan=load_plan(args)
     report=json.loads((args.root/'report.json').read_text())
@@ -379,48 +516,13 @@ def validate(args):
         safe_elf(Path(i['binary']),i['sha256'],i['bytes'],i['buildId'],BASE if r=='baseline' else args.driver_sha)
     report['builds']=identities
     dump(args.root/'report.json',report)
-    def run(role,name,work,initialize=False,native=False):
-        source_proof(args)
-        source=args.root/'sources/baseline' if role=='baseline' else args.source
-        expected=BASE if role=='baseline' else args.driver_sha
-        common.source_identity(source,expected)
-        b=Path(identities[role]['binary'])
-        role_args=argparse.Namespace(source=source,binary=b,
-            obclient=args.source/'deps/3rd/u01/obclient/bin/obclient',
-            mysqltest=args.source/'deps/3rd/u01/obclient/bin/mysqltest',out=args.root/'validation')
-        old={key:os.environ.get(key) for key in ('PATH','LD_LIBRARY_PATH')}
-        env=common.runtime_env(args.source,b)
-        os.environ.update({key:env[key] for key in old})
-        def checked(call,out):
-            observed=common.effective_parameters(out/'actual-parameters.log')
-            if 'observedParameters' in report: require(observed==report['observedParameters'],'Actual database settings differ')
-            report['observedParameters']=observed
-            sdb=common.load_module('expr_cache_owned_sdb',source/PREFIX/'sdb.py')
-            pid=sdb.inspect_instance_process(call.base_dir,b)
-            require(pid and (Path('/proc')/str(pid)/'exe').resolve(strict=True)==b,'Owned process role ELF mismatch')
-            dump(out/'owned-process.json',dict(pid=pid,role=role,binary=str(b),sha256=identities[role]['sha256']))
-            resource_record(out/'resources-before.json',8*1024**3)
-            return work(call,out,pid)
-        try:
-            row=native_harness.run_instance(role_args,native_harness.load_native(source),name,
-                7500+len(report['instances']),checked,initialize=initialize)
-        finally:
-            for key,value in old.items():
-                if value is None: os.environ.pop(key,None)
-                else: os.environ[key]=value
-        row['role']=role
-        report['instances'].append(row)
-        dump(args.root/'report.json',report)
-        common.source_identity(source,expected)
-        source_proof(args)
-        return row
     native=native_harness.load_native(args.source)
     available={c.name:c for c in native.discover_cases(args.source)}
     case_args=argparse.Namespace(source=args.source)
     for case in CASES:
         require(case in available,'Selected unchanged native case unavailable: '+case)
         inner=native_harness.original_case(case_args,native,available[case])
-        row=run('candidate',case,lambda call,out,pid,inner=inner:inner(call,out),initialize=True,native=True)
+        row=run_owned(args,report,identities,'candidate',case,lambda call,out,pid,inner=inner:inner(call,out),initialize=True,native=True)
         proof=None
         if case=='fts_index.simple_query':
             # Preserve FAIL and require complete-byte proof of only four known flags.
@@ -435,19 +537,24 @@ def validate(args):
             cleanupPassed=row['cleanupPassed'],compatibility=proof))
         dump(args.root/'report.json',report)
     import fts_expr_cache_targeted as targeted
-    for role in ('baseline','candidate'):
-        row=run(role,'targeted-'+role,lambda call,out,pid:targeted.run(call,out,args,sql))
-        common.require_instance(row)
-        report['targeted'][role]=row['work']
-        dump(args.root/'report.json',report)
+    check_baseline_targeted(args,report)
+    row=run_owned(args,report,identities,'candidate','targeted-candidate',
+        lambda call,out,pid:targeted.run(call,out,args,sql))
+    common.require_instance(row)
+    report['targeted']['candidate']=row['work']
+    dump(args.root/'report.json',report)
     require(report['targeted']['baseline']['canonical']==report['targeted']['candidate']['canonical'],'New targeted b147/candidate canonical parity failed')
     report['correctnessPassed']=True
     dump(args.root/'report.json',report)
     for name,role in SCHEDULE:
-        row=run(role,name,lambda call,out,pid:build_work(args,pid)(call,out))
+        row=run_owned(args,report,identities,role,name,lambda call,out,pid:build_work(args,pid)(call,out))
         common.require_instance(row)
         report['rounds'].append(dict(name=name,role=role,**row['work']))
         dump(args.root/'report.json',report)
+    full_logs=[r.get('dbLogs',{}).get('fullServerLogs',{}) for r in report['instances'] if r['name'] in dict(SCHEDULE)]
+    require(len(full_logs)==4 and all(r.get('fullBytes') and not r.get('truncated') for r in full_logs)
+        and sum(r.get('fileCount',0) for r in full_logs)>=8,'Complete raw ABBA server logs missing')
+    report['completeAbbaServerLogs']=dict(rounds=4,fileCount=sum(r['fileCount'] for r in full_logs),fullBytes=True,truncated=False)
     means={role:{key:sum(r['wallSeconds'][key] for r in report['rounds'] if r['role']==role)/2
         for key in report['rounds'][0]['wallSeconds']} for role in ('baseline','candidate')}
     report.update(status='native_correctness_and_descriptive_abba_completed',meansSeconds=means,
@@ -468,6 +575,25 @@ def collect(args):
     args.out.mkdir(parents=True)
     report_path=args.root/'report.json'
     if report_path.is_file(): shutil.copyfile(report_path,args.out/'report.json')
+    server_archives=[]; archive_total=0
+    for name,role in SCHEDULE:
+        directory=args.root/'validation'/name
+        receipt_path=directory/'full-server-logs.json'
+        if not receipt_path.is_file(): continue
+        receipt=json.loads(receipt_path.read_text())
+        path=directory/'full-server-logs.tar.gz'
+        common.no_symlinks(path)
+        require(receipt['name']==name and receipt['role']==role and receipt['fullBytes'] and not receipt['truncated']
+            and path.stat().st_size==receipt['archive']['bytes'] and common.digest(path)==receipt['archive']['sha256'],
+            'Full raw ABBA server archive changed')
+        archive_total+=path.stat().st_size
+        require(path.stat().st_size<=SERVER_LOG_ARCHIVE_CAP and archive_total<=SERVER_LOG_TOTAL_ARCHIVE_CAP,
+            'Full raw ABBA archive output cap exceeded')
+        destination=args.out/'server-logs'/(name+'-full-server-logs.tar.gz')
+        destination.parent.mkdir(exist_ok=True)
+        shutil.copyfile(path,destination)
+        server_archives.append(dict(name=name,role=role,path=destination.relative_to(args.out).as_posix(),
+            **{k:receipt[k] for k in ('archive','fileCount','rawBytes','fullBytes','truncated')}))
     manifest=[]; payload=[]; budget=LOG_PAYLOAD_CAP; complete=True
     selected=[args.root/'report.json',args.root/'plan.json']
     for directory in (args.root/'evidence',args.root/'validation'):
@@ -508,7 +634,8 @@ def collect(args):
     record=archive(args.out/'evidence.tar.gz',LOG_ARCHIVE_CAP,populate)
     dump(args.out/'evidence-manifest.json',dict(archive=record,files=manifest,
         archiveCapBytes=LOG_ARCHIVE_CAP,payloadCapBytes=LOG_PAYLOAD_CAP,allSelectedEvidenceSaved=complete,
-        fullCandidateSeparate=True,baselineNotReuploaded=True))
+        fullCandidateSeparate=True,baselineNotReuploaded=True,completeServerArchives=server_archives,
+        completeServerArchiveCapBytes=SERVER_LOG_TOTAL_ARCHIVE_CAP))
     if (args.root/'report.json').is_file(): shutil.copyfile(args.root/'report.json',args.out/'report.json')
     print('EXPR_CACHE_EVIDENCE '+json.dumps(record),flush=True)
 

@@ -128,7 +128,7 @@ jobs:
           cache: 'false'
           crates-mirror: 'false'
 
-      - name: Initialize one candidate with original release init configuration
+      - name: Initialize original build profile and verify b147 tiny SQL before compiling candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -177,7 +177,7 @@ jobs:
             --source "$GITHUB_WORKSPACE" --root "$EXPR_ROOT" --driver-sha "$GITHUB_SHA" \
             --out "$RUNNER_TEMP/seekdb-expr-candidate"
 
-      - name: Preserve full new candidate before any SQL diagnostic
+      - name: Preserve full new candidate before candidate SQL diagnostics
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fts-expr-cache-candidate-${{ github.sha }}
@@ -211,14 +211,14 @@ jobs:
             echo 'Native validation not prepared; no correctness or performance claim.'
           fi
 
-      - name: Upload bounded new evidence separately from complete candidate ELF
+      - name: Upload bounded evidence and complete ABBA server logs separately from candidate ELF
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fts-expr-cache-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/seekdb-expr-evidence/
           retention-days: 3
-          compression-level: 6
+          compression-level: 0
           if-no-files-found: warn
           include-hidden-files: false
 
