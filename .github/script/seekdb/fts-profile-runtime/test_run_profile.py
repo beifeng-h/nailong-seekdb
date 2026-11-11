@@ -17,6 +17,28 @@ from unittest import mock
 import run_profile
 
 
+class FakeResource:
+    RLIMIT_NOFILE = 7
+    RLIM_INFINITY = -1
+
+    def __init__(self, soft, hard):
+        self.limits = (soft, hard)
+        self.changes = []
+        self.reads = 0
+
+    def getrlimit(self, limit):
+        if limit != self.RLIMIT_NOFILE:
+            raise AssertionError("Only RLIMIT_NOFILE may be read")
+        self.reads += 1
+        return self.limits
+
+    def setrlimit(self, limit, values):
+        if limit != self.RLIMIT_NOFILE:
+            raise AssertionError("Only RLIMIT_NOFILE may be changed")
+        self.changes.append((limit, values))
+        self.limits = tuple(values)
+
+
 class PortableChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,6 +107,89 @@ class PortableChecks(unittest.TestCase):
             with self.assertRaisesRegex(run_profile.AdapterError, "require Linux"):
                 run_profile.main(["--portable-root", str(self.root), "--mode", "run"])
             load.assert_not_called()
+
+    def test_preflight_raises_low_soft_limit_before_original_resource_gate(self):
+        resource = FakeResource(1024, 1048576)
+        with mock.patch.dict(sys.modules, {"resource": resource}):
+            module = run_profile.load_driver(self.root)
+        with tempfile.TemporaryDirectory() as directory:
+            owned = Path(directory) / "preflight"
+
+            def original_preflight(argv):
+                args = module.parser().parse_args(argv)
+                owned.mkdir()
+                snapshot = {
+                    "effectiveMemAvailableBytes": 16 * 1024**3,
+                    "diskFreeBytes": 20 * 1024**3,
+                    "affinity": [0, 1],
+                    "nofileLimit": list(resource.getrlimit(resource.RLIMIT_NOFILE)),
+                    "interfaces": "header\nheader\neth0: 0 0\n",
+                }
+                try:
+                    module.require_resources(snapshot, args)
+                    report = {"status": "runtime_preflight_passed_no_database_started", "roles": {}}
+                    result = 0
+                except module.Blocked as error:
+                    report = {"status": "blocked", "error": str(error), "roles": {}}
+                    result = 1
+                module.dump(owned / "report.json", report)
+                return result
+
+            module.main = original_preflight
+            with mock.patch.object(run_profile.sys, "platform", "linux"), \
+                    mock.patch.object(run_profile, "load_driver", return_value=module), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = run_profile.main([
+                    "--portable-root", str(self.root), "--mode", "preflight", "--run-root", str(owned),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(resource.limits, (8192, 1048576))
+            summary = json.loads((owned / "profiling-adapter-report.json").read_text())
+            self.assertEqual(summary["fileDescriptorLimit"]["before"], [1024, 1048576])
+            self.assertEqual(summary["fileDescriptorLimit"]["after"], [8192, 1048576])
+            self.assertEqual(summary["fileDescriptorLimit"]["scope"], "adapter_process_and_future_descendants")
+            self.assertEqual(json.loads((owned / "report.json").read_text())["roles"], {})
+
+    def test_infinite_soft_limit_passes_real_original_gate_after_adjustment(self):
+        resource = FakeResource(FakeResource.RLIM_INFINITY, FakeResource.RLIM_INFINITY)
+        with mock.patch.dict(sys.modules, {"resource": resource}):
+            module = run_profile.load_driver(self.root)
+        args = module.parser().parse_args([])
+        snapshot = {
+            "effectiveMemAvailableBytes": 16 * 1024**3,
+            "diskFreeBytes": 20 * 1024**3,
+            "affinity": [0, 1],
+            "nofileLimit": list(resource.limits),
+            "interfaces": "header\nheader\neth0: 0 0\n",
+        }
+        with self.assertRaisesRegex(module.Blocked, "open-file limit"):
+            module.require_resources(snapshot, args)
+        run_profile.prepare_nofile_limit(resource, {})
+        snapshot["nofileLimit"] = list(resource.limits)
+        module.require_resources(snapshot, args)
+        self.assertEqual(resource.limits, (8192, FakeResource.RLIM_INFINITY))
+
+    def test_insufficient_hard_limit_blocks_before_original_driver(self):
+        resource = FakeResource(1024, 4096)
+        with mock.patch.dict(sys.modules, {"resource": resource}):
+            module = run_profile.load_driver(self.root)
+        module.main = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            owned = Path(directory) / "preflight"
+            with mock.patch.object(run_profile.sys, "platform", "linux"), \
+                    mock.patch.object(run_profile, "load_driver", return_value=module), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                result = run_profile.main([
+                    "--portable-root", str(self.root), "--mode", "preflight", "--run-root", str(owned),
+                ])
+            self.assertEqual(result, 2)
+            module.main.assert_not_called()
+            self.assertFalse(owned.exists())
+            self.assertEqual(resource.changes, [])
+            summary = json.loads(output.getvalue())
+            self.assertIn("hard limit 4096", summary["error"])
+            self.assertEqual(summary["fileDescriptorLimit"]["before"], [1024, 4096])
+            self.assertEqual(summary["fileDescriptorLimit"]["after"], [1024, 4096])
 
     def test_real_original_collect_cli_exports_raw_perf_and_jsonl(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,6 +291,7 @@ class HookChecks(unittest.TestCase):
         self.calls = []
         self.now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
         self.module = types.SimpleNamespace(
+            resource=FakeResource(8192, 1048576),
             checked=self.original_checked,
             comparison=mock.Mock(),
             required_pair_budget=lambda args: 2740,
@@ -396,6 +502,73 @@ class HookChecks(unittest.TestCase):
         self.assertLess(self.events.index("original_driver_database_cleanup"), self.events.index("perf_report"))
         for path, expected in original_files.items():
             self.assertEqual(path.read_bytes(), expected)
+
+
+class NoFileLimitChecks(unittest.TestCase):
+    def test_sufficient_soft_limit_is_unchanged(self):
+        for soft in (8192, 16384):
+            with self.subTest(soft=soft):
+                resource = FakeResource(soft, 1048576)
+                report = {}
+                run_profile.prepare_nofile_limit(resource, report)
+                self.assertEqual(resource.changes, [])
+                self.assertEqual(report["before"], [soft, 1048576])
+                self.assertEqual(report["after"], [soft, 1048576])
+                self.assertFalse(report["changed"])
+
+    def test_low_soft_limit_is_raised_to_original_gate(self):
+        resource = FakeResource(1024, 1048576)
+        report = {}
+        run_profile.prepare_nofile_limit(resource, report)
+        self.assertEqual(resource.changes, [(resource.RLIMIT_NOFILE, (8192, 1048576))])
+        self.assertEqual(report["before"], [1024, 1048576])
+        self.assertEqual(report["after"], [8192, 1048576])
+        self.assertTrue(report["changed"])
+
+    def test_insufficient_hard_limit_fails_without_change(self):
+        resource = FakeResource(1024, 4096)
+        report = {}
+        with self.assertRaisesRegex(run_profile.AdapterError, "hard limit 4096.*8192"):
+            run_profile.prepare_nofile_limit(resource, report)
+        self.assertEqual(resource.changes, [])
+        self.assertEqual(report["before"], report["after"])
+        self.assertFalse(report["changed"])
+
+    def test_infinite_hard_limit_is_preserved_when_soft_is_raised(self):
+        resource = FakeResource(1024, FakeResource.RLIM_INFINITY)
+        report = {}
+        run_profile.prepare_nofile_limit(resource, report)
+        self.assertEqual(resource.limits, (8192, FakeResource.RLIM_INFINITY))
+        self.assertEqual(report["after"], [8192, FakeResource.RLIM_INFINITY])
+
+    def test_infinite_soft_limit_is_made_finite_for_original_gate(self):
+        resource = FakeResource(FakeResource.RLIM_INFINITY, FakeResource.RLIM_INFINITY)
+        report = {}
+        run_profile.prepare_nofile_limit(resource, report)
+        self.assertEqual(resource.changes, [(resource.RLIMIT_NOFILE, (8192, FakeResource.RLIM_INFINITY))])
+        self.assertEqual(report["before"], [FakeResource.RLIM_INFINITY, FakeResource.RLIM_INFINITY])
+        self.assertEqual(report["after"], [8192, FakeResource.RLIM_INFINITY])
+        self.assertTrue(report["changed"])
+
+    def test_extract_and_collect_do_not_read_or_change_limits(self):
+        for mode in ("extract", "collect"):
+            with self.subTest(mode=mode):
+                resource = FakeResource(1024, 1048576)
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--mode")
+                parser.add_argument("--bundle-root")
+                parser.add_argument("--run-root", type=Path)
+                module = types.SimpleNamespace(
+                    resource=resource, parser=lambda: parser, collect=mock.Mock(), main=mock.Mock(return_value=0),
+                )
+                with mock.patch.object(run_profile.sys, "platform", "linux"), \
+                        mock.patch.object(run_profile, "verify_portable", return_value={"originalInputCount": 75}), \
+                        mock.patch.object(run_profile, "load_driver", return_value=module), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    result = run_profile.main(["--portable-root", "unused-fixture", "--mode", mode])
+                self.assertEqual(result, 0)
+                self.assertEqual(resource.reads, 0)
+                self.assertEqual(resource.changes, [])
 
 
 class SampleChecks(unittest.TestCase):

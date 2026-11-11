@@ -10,6 +10,8 @@ The dedicated workflow uses a standard Ubuntu 24.04 runner in this public reposi
 
 The original runtime budget is 3900 seconds for the session and 3000 seconds for the pair. The capture adds a 20-second cleanup reserve. Post-cleanup perf reporting has a 30-second command limit and a 50-second total reserve. The workflow has a 90-minute job limit and records a fresh operator-selected UTC stop deadline.
 
+Before `preflight` or `run`, the adapter satisfies the original driver's soft file-descriptor limit of 8192 for its own process and future descendants. It preserves the hard limit and records both observed limits. An infinite soft limit is set to 8192 for compatibility with the original numeric gate.
+
 `profile_capture.py` attaches to the driver-verified candidate PID. It records 99 Hz user CPU samples with DWARF call stacks and collects process CPU, I/O and RSS every 250 ms. Benchmark stage markers carry polling and scheduling uncertainty. The capture signals and reaps its own perf process group.
 
 `run_profile.py` verifies the exact original runner, manifest and all 75 frozen inputs. It adds sampling to the candidate benchmark and runs flat perf reporting after the original driver has completed database cleanup. Positive integer sample rows and unknown-symbol fractions are recorded in the diagnostic report.

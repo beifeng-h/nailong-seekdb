@@ -21,6 +21,7 @@ PERF_COMMAND_CLEANUP_SECONDS = 15
 PERF_REPORT_RESERVE_SECONDS = PERF_REPORT_TIMEOUT_SECONDS + PERF_COMMAND_CLEANUP_SECONDS + 5
 DIAGNOSTIC_SCOPE = "Candidate-only profiling of the original benchmark"
 OVERHEAD_NOTE = "Candidate timings include perf and /proc sampling overhead."
+MIN_NOFILE_SOFT_LIMIT = 8192
 
 
 class AdapterError(RuntimeError):
@@ -77,6 +78,28 @@ def load_driver(portable_root):
     exec(compile(raw, str(path), "exec"), module.__dict__)
     module.verify_bundle(Path(portable_root))
     return module
+
+
+def prepare_nofile_limit(resource, record):
+    """Satisfy the original driver's descriptor gate for this process tree."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    record.update(
+        scope="adapter_process_and_future_descendants",
+        requiredSoftLimit=MIN_NOFILE_SOFT_LIMIT,
+        infinityValue=resource.RLIM_INFINITY,
+        before=[soft, hard],
+        after=[soft, hard],
+        changed=False,
+    )
+    if soft != resource.RLIM_INFINITY and soft >= MIN_NOFILE_SOFT_LIMIT:
+        return
+    if hard != resource.RLIM_INFINITY and hard < MIN_NOFILE_SOFT_LIMIT:
+        raise AdapterError(f"RLIMIT_NOFILE hard limit {hard} is below required soft limit {MIN_NOFILE_SOFT_LIMIT}")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (MIN_NOFILE_SOFT_LIMIT, hard))
+    observed_soft, observed_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    record.update(after=[observed_soft, observed_hard], changed=(observed_soft, observed_hard) != (soft, hard))
+    if observed_hard != hard or observed_soft != MIN_NOFILE_SOFT_LIMIT:
+        raise AdapterError("RLIMIT_NOFILE adjustment did not preserve the hard limit and satisfy the original soft-limit gate")
 
 
 def install_hooks(module, portable_root, args, capture_factory, capture_reserve_seconds):
@@ -322,6 +345,9 @@ def main(argv=None):
         }
         result = 2
         try:
+            if options.mode in {"preflight", "run"}:
+                summary["fileDescriptorLimit"] = {}
+                prepare_nofile_limit(module.resource, summary["fileDescriptorLimit"])
             result = module.main(forwarded)
             summary["driverReturnCode"] = result
             if options.mode == "run" and result == 0:
