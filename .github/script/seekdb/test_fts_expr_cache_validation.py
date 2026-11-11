@@ -5,6 +5,8 @@ import re
 import subprocess
 import tempfile
 import json
+import tarfile
+from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
 import fts_expr_cache_validation as driver
@@ -95,6 +97,148 @@ class ValidationContractTests(unittest.TestCase):
             self.assertEqual((out/'report.json').read_text(),(root/'report.json').read_text())
             self.assertTrue((out/'evidence.tar.gz').is_file())
             self.assertTrue(any(r.get('omitted') for r in manifest['files']))
+
+    def test_baseline_fixture_precedes_compile_and_receipt_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'root'; source=Path(tmp)/'source'
+            (root/'runtime/baseline').mkdir(parents=True)
+            (root/'runtime/baseline/seekdb').write_bytes(b'baseline-placeholder')
+            (root/'runtime/baseline/identity.json').write_text(json.dumps(dict(role='baseline',sha256=driver.BASE_ELF_SHA)))
+            (root/'evidence').mkdir()
+            (root/'report.json').write_text(json.dumps(dict(instances=[],targeted={})))
+            for name in driver.common.CLIENTS:
+                path=source/'deps/3rd/u01/obclient/bin'/name
+                path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(name.encode())
+            helper=source/driver.PREFIX/'fts_expr_cache_targeted.py'
+            helper.parent.mkdir(parents=True); helper.write_text('fixture-v1')
+            pins={name:driver.common.digest(source/'deps/3rd/u01/obclient/bin'/name) for name in driver.common.CLIENTS}
+            args=argparse.Namespace(root=root,source=source,driver_sha='d'*40)
+            calls=[]
+            def fake_run(a,report,identities,role,name,work,**kwargs):
+                self.assertEqual((role,name),('baseline','targeted-baseline'))
+                self.assertFalse((source/'build_release/src/observer/seekdb').exists())
+                calls.append((role,name))
+                row=dict(name=name,status='passed',cleanupPassed=True,
+                    work=dict(passed=True,canonical={'alpha':[[1,2,3]]}))
+                out=root/'validation'/name; out.mkdir(parents=True)
+                (out/'result.json').write_text(json.dumps(row))
+                report['instances'].append(row)
+                return row
+            with ExitStack() as stack:
+                for name in ('load_plan','resource_record','build_profile','verify_version'):
+                    stack.enter_context(patch.object(driver,name,return_value={}))
+                stack.enter_context(patch.object(driver,'run_owned',side_effect=fake_run))
+                stack.enter_context(patch.object(driver.common,'CLIENTS',pins))
+                stack.enter_context(patch.object(driver.common,'verify_loader',return_value={}))
+                driver.prebuild(args)
+                report=json.loads((root/'report.json').read_text())
+                receipt=driver.check_baseline_targeted(args,report)
+                self.assertTrue(receipt['executedBeforeCandidateCompile'])
+                self.assertEqual(calls,[('baseline','targeted-baseline')])
+                with self.assertRaisesRegex(RuntimeError,'execute once'):
+                    driver.prebuild(args)
+            helper.write_text('fixture-v2')
+            with self.assertRaisesRegex(RuntimeError,'receipt changed'):
+                driver.check_baseline_targeted(args,report)
+        source=Path(__file__).resolve().parents[3]
+        workflow=(source/'.github/workflows/fts-expr-cache-validation.yml').read_text()
+        self.assertLess(workflow.index('--phase prebuild'),workflow.index('--target ob_sql'))
+        self.assertLess(workflow.index('--target ob_sql'),workflow.index('--target seekdb'))
+
+    def test_complete_round_server_logs_are_original_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'A1'; out.mkdir()
+            base=out/'database'; log=base/'log'; log.mkdir(parents=True)
+            data={'seekdb.log':b'complete-main-log\n'*20000,'console.log':b'startup stdout and stderr\n',
+                  'seekdb.log.wf':b'warning detail\n','seekdb.log.20261111091500000':b'rotated full bytes\n'}
+            for name,raw in data.items(): (log/name).write_bytes(raw)
+            (out/'own-stop.log.json').write_text('{"exitCode":0}')
+            (out/'owned-process.json').write_text('{"pid":1073741824,"startTicks":0}')
+            receipt=driver.capture_full_server_logs(base,out,'baseline','A1')
+            self.assertTrue(base.is_dir())
+            self.assertEqual(receipt['captureMoment'],'after_owned_stop_before_database_destroy')
+            self.assertEqual(receipt['fileCount'],4)
+            self.assertTrue(receipt['fullBytes']); self.assertFalse(receipt['truncated'])
+            with tarfile.open(out/'full-server-logs.tar.gz','r:gz') as tar:
+                actual={m.name:tar.extractfile(m).read() for m in tar.getmembers()}
+            self.assertEqual(actual,{'log/'+name:raw for name,raw in data.items()})
+            for record in receipt['files']:
+                self.assertEqual(record['sha256'],driver.sha(data[Path(record['path']).name]))
+                self.assertEqual(record['bytes'],len(data[Path(record['path']).name]))
+
+    def test_full_server_log_cap_or_live_process_never_claim_full(self):
+        for mode in ('live','cap'):
+            with tempfile.TemporaryDirectory() as tmp:
+                out=Path(tmp)/'B1'; out.mkdir(); base=out/'database'; log=base/'log'; log.mkdir(parents=True)
+                for name in ('seekdb.log','console.log'): (log/name).write_bytes(b'original logs'*100)
+                (out/'own-stop.log.json').write_text('{"exitCode":0}')
+                (out/'owned-process.json').write_text('{"pid":1073741824,"startTicks":42}')
+                with ExitStack() as stack:
+                    if mode=='live':
+                        stack.enter_context(patch.object(driver,'process_state',return_value=dict(state='S',startTicks=42)))
+                    else:
+                        stack.enter_context(patch.object(driver,'SERVER_LOG_ARCHIVE_CAP',10))
+                    with self.assertRaises((RuntimeError,ValueError)):
+                        driver.capture_full_server_logs(base,out,'candidate','B1')
+                self.assertFalse((out/'full-server-logs.json').exists())
+                self.assertFalse((out/'full-server-logs.tar.gz').exists())
+                self.assertTrue(base.exists())
+
+    def test_collector_keeps_complete_archives_outside_tail_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'root'; root.mkdir()
+            (root/'report.json').write_text('{"status":"failed_or_blocked"}')
+            (root/'plan.json').write_text('{}')
+            for name,role in driver.SCHEDULE:
+                out=root/'validation'/name; out.mkdir(parents=True)
+                base=out/'database'; log=base/'log'; log.mkdir(parents=True)
+                for file in ('seekdb.log','console.log'): (log/file).write_bytes((name+' original raw\n').encode()*100)
+                (out/'own-stop.log.json').write_text('{"exitCode":0}')
+                (out/'owned-process.json').write_text('{"pid":1073741824,"startTicks":0}')
+                driver.capture_full_server_logs(base,out,role,name)
+            dest=Path(tmp)/'out'
+            with patch.object(driver,'LOG_PAYLOAD_CAP',140): driver.collect(argparse.Namespace(root=root,out=dest))
+            manifest=json.loads((dest/'evidence-manifest.json').read_text())
+            logs=manifest['completeServerArchives']
+            self.assertEqual(len(logs),4)
+            self.assertEqual(sum(r['fileCount'] for r in logs),8)
+            for row in logs:
+                self.assertEqual(driver.common.digest(dest/row['path']),row['archive']['sha256'])
+                self.assertTrue(row['fullBytes']); self.assertFalse(row['truncated'])
+            self.assertLess(driver.SERVER_LOG_TOTAL_ARCHIVE_CAP+driver.LOG_ARCHIVE_CAP,512*1024**2)
+
+    def test_round_hook_uses_original_stop_destroy_gap_and_is_restored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'root'; root.mkdir(); source=Path(tmp)/'source'; source.mkdir()
+            args=argparse.Namespace(root=root,source=source,driver_sha='d'*40)
+            report=dict(instances=[])
+            identity=dict(binary=str(root/'candidate-placeholder'),sha256='e'*64)
+            original=driver.native_harness.bounded_db_logs
+            def fake_instance(role_args,native,name,port,work,initialize=False):
+                self.assertIsNot(driver.native_harness.bounded_db_logs,original)
+                out=role_args.out/name; out.mkdir(parents=True)
+                base=out/'database'; log=base/'log'; log.mkdir(parents=True)
+                for file in ('console.log','seekdb.log'): (log/file).write_bytes(b'complete raw')
+                (out/'own-stop.log.json').write_text('{"exitCode":0}')
+                (out/'owned-process.json').write_text('{"pid":1073741824,"startTicks":0}')
+                captured=driver.native_harness.bounded_db_logs(base,out)
+                self.assertTrue(base.is_dir())
+                self.assertTrue((out/'full-server-logs.tar.gz').is_file())
+                # A native harness would destroy here; fake row only checks the seam.
+                return dict(name=name,status='passed',cleanupPassed=True,dbLogs=captured,work={'passed':True})
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(driver,'source_proof',return_value={}))
+                stack.enter_context(patch.object(driver.common,'source_identity',return_value={}))
+                stack.enter_context(patch.object(driver.common,'runtime_env',return_value={'PATH':'same','LD_LIBRARY_PATH':'same'}))
+                stack.enter_context(patch.object(driver.native_harness,'load_native',return_value=None))
+                stack.enter_context(patch.object(driver.native_harness,'run_instance',side_effect=fake_instance))
+                row=driver.run_owned(args,report,{'candidate':identity},'candidate','B1',lambda *a:None)
+            self.assertIs(driver.native_harness.bounded_db_logs,original)
+            self.assertEqual(row['dbLogs']['fullServerLogs']['fileCount'],2)
+        source=Path(__file__).resolve().parents[3]
+        text=(source/'.github/script/seekdb/fts_contest_validation.py').read_text()
+        self.assertLess(text.index("row['stop'] = capture"),text.index("row['dbLogs'] = bounded_db_logs"))
+        self.assertLess(text.index("row['dbLogs'] = bounded_db_logs"),text.index("row['destroy'] = capture"))
 
     def test_identical_product_after_kernel(self):
         source=Path(__file__).resolve().parents[3]
