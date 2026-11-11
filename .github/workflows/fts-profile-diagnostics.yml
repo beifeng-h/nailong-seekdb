@@ -49,22 +49,76 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apt_sources="$PROFILE_WORK_ROOT/evidence/apt-sources.list"
-          apt_sourceparts="$PROFILE_WORK_ROOT/apt-sourceparts"
-          mkdir -m 0700 "$apt_sourceparts"
-          test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          cat > "$apt_sources" <<'SOURCES'
+          exec > >(tee "$PROFILE_WORK_ROOT/evidence/prerequisites.log") 2>&1
+          prerequisites_ready=true
+          for tool in python3 readelf ldd; do
+            if command -v "$tool" && "$tool" --version; then
+              printf 'Available tool: %s\n' "$tool"
+            else
+              printf 'Missing or unusable tool: %s\n' "$tool"
+              prerequisites_ready=false
+            fi
+          done
+          if test -x /usr/bin/python3; then
+            /usr/bin/python3 --version
+          else
+            printf 'Missing driver interpreter: /usr/bin/python3\n'
+            prerequisites_ready=false
+          fi
+          libaio=/lib/x86_64-linux-gnu/libaio.so.1t64
+          if test -r "$libaio"; then
+            ls -l -- "$libaio"
+          else
+            printf 'Missing required library: %s\n' "$libaio"
+            prerequisites_ready=false
+          fi
+          perf_path=
+          while IFS= read -r candidate; do
+            test -x "$candidate" || continue
+            printf 'Probing perf candidate: %s\n' "$candidate"
+            if timeout 5s "$candidate" --version && \
+              sudo -n timeout --signal=TERM --kill-after=5s 10s "$candidate" \
+                stat -e cpu-clock:u -- sleep 0.05; then
+              perf_path=$candidate
+              break
+            fi
+          done < <(
+            command -v perf || true
+            if test -d /usr/lib/linux-tools; then
+              find /usr/lib/linux-tools -maxdepth 3 -type f -name perf -print | sort -V -r
+            fi
+          )
+          if test -n "$perf_path"; then
+            printf 'Verified existing perf: %s\n' "$perf_path"
+            printf '%s\n' "$(dirname -- "$perf_path")" >> "$GITHUB_PATH"
+          fi
+          if test "$prerequisites_ready" = true && test -n "$perf_path"; then
+            printf 'Existing prerequisites passed; skipping APT.\n'
+          else
+            printf 'Existing prerequisites incomplete; checking official repository DNS before APT.\n'
+            for host in archive.ubuntu.com security.ubuntu.com; do
+              if ! timeout --signal=TERM --kill-after=2s 10s getent ahostsv4 "$host"; then
+                printf 'Official repository DNS lookup failed or timed out: %s; APT was not started.\n' "$host"
+                exit 2
+              fi
+            done
+            apt_sources="$PROFILE_WORK_ROOT/evidence/apt-sources.list"
+            apt_sourceparts="$PROFILE_WORK_ROOT/apt-sourceparts"
+            mkdir -m 0700 "$apt_sourceparts"
+            test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+            cat > "$apt_sources" <<'SOURCES'
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-backports main universe
           deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe
           SOURCES
-          apt_options=(-o "Dir::Etc::sourcelist=$apt_sources" -o "Dir::Etc::sourceparts=$apt_sourceparts"
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-          sudo -n apt-get "${apt_options[@]}" update --error-on=any
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
-            install -y --no-install-recommends \
-            libaio1t64 binutils python3 linux-tools-common linux-tools-generic
+            apt_options=(-o "Dir::Etc::sourcelist=$apt_sources" -o "Dir::Etc::sourceparts=$apt_sourceparts"
+              -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            sudo -n apt-get "${apt_options[@]}" update --error-on=any
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+              install -y --no-install-recommends \
+              libaio1t64 binutils python3 linux-tools-common linux-tools-generic
+          fi
 
       - name: Download the exact original baseline ZIP
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333

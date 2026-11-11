@@ -8,6 +8,8 @@ Candidate measurements include perf and process-sampling overhead. The adapter l
 
 The dedicated workflow uses a standard Ubuntu 24.04 runner in this public repository. It downloads the two pinned existing artifacts, verifies their ZIP/TAR/ELF identities, extracts the verified official client and checks the runtime before starting databases.
 
+The workflow first checks the existing interpreter, binary tools, libaio and perf software-event capability. Passing installed prerequisites are reused. The probe output is preserved with the diagnostic evidence.
+
 The original runtime budget is 3900 seconds for the session and 3000 seconds for the pair. The capture adds a 20-second cleanup reserve. Post-cleanup perf reporting has a 30-second command limit and a 50-second total reserve. The workflow has a 90-minute job limit and records a fresh operator-selected UTC stop deadline.
 
 Before `preflight` or `run`, the adapter satisfies the original driver's soft file-descriptor limit of 8192 for its own process and future descendants. It preserves the hard limit and records both observed limits. An infinite soft limit is set to 8192 for compatibility with the original numeric gate.
