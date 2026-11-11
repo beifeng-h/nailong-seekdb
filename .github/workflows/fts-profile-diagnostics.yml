@@ -49,8 +49,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo -n apt-get update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          sudo -n apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 update --error-on=any
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+            install -y --no-install-recommends \
             libaio1t64 binutils python3 linux-tools-common linux-tools-generic
 
       - name: Download the exact original baseline ZIP
