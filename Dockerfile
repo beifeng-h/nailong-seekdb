@@ -60,10 +60,4 @@ RUN python3 /source/tests/public_protocol_check.py \
 ENTRYPOINT ["/build/minivectordb_development_server"]
 CMD ["--development-protocol", "mvdb-judge-json-v1", "--data", "/data"]
 
-FROM build AS database
-LABEL org.opencontainers.image.title="MiniVectorDB" \
-      minivectordb.phase="official-stdio-protocol" \
-      minivectordb.formal-ready="false"
-
-ENTRYPOINT ["/build/minivectordb_server"]
-CMD ["--data", "/data"]
+FROM development-checks AS database
