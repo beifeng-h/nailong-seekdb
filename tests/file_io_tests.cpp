@@ -43,6 +43,49 @@ void require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
 
+std::uint32_t reference_crc_update(std::uint32_t value, const void* data, std::size_t length) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  for (std::size_t index = 0; index < length; ++index) {
+    value ^= bytes[index];
+    for (unsigned bit = 0; bit < 8; ++bit)
+      value = (value >> 1) ^ (0xedb88320U & (0U - (value & 1U)));
+  }
+  return value;
+}
+
+void check_crc_bytes(const void* data, std::size_t length) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  for (const auto seed : {0U, 0xffffffffU, 0x12345678U}) {
+    const auto expected = reference_crc_update(seed, data, length);
+    require(minivectordb::crc_update(seed, data, length) == expected,
+            "CRC lookup differs from the bitwise reference");
+    for (const auto split : {std::size_t{0}, length / 2, length}) {
+      auto actual = minivectordb::crc_update(seed, data, split);
+      actual = minivectordb::crc_update(actual, bytes + split, length - split);
+      require(actual == expected, "Incremental CRC differs across chunk boundaries");
+    }
+  }
+  require(minivectordb::crc(data, length) == ~reference_crc_update(0xffffffffU, data, length),
+          "CRC initialization or final complement differs");
+}
+
+void crc_contracts() {
+  require(minivectordb::crc(nullptr, 0) == 0, "Empty CRC differs");
+  require(minivectordb::crc_update(0x12345678U, nullptr, 0) == 0x12345678U,
+          "Empty CRC update changed the seed");
+  constexpr char standard[] = "123456789";
+  require(minivectordb::crc(standard, 9) == 0xcbf43926U, "Standard CRC-32 check value differs");
+  check_crc_bytes(standard, 9);
+  std::array<unsigned char, 256> values{};
+  for (std::size_t index = 0; index < values.size(); ++index)
+    values[index] = static_cast<unsigned char>(index);
+  check_crc_bytes(values.data(), values.size());
+  minivectordb::Page page{};
+  for (std::size_t index = 0; index < page.size(); ++index)
+    page[index] = std::byte((index * 37 + 11) & 255);
+  check_crc_bytes(page.data(), page.size());
+}
+
 struct TestDirectory {
   std::filesystem::path path;
   explicit TestDirectory(const char* name) : path(std::filesystem::absolute(name).lexically_normal()) {
@@ -91,6 +134,8 @@ int main(int argc, char** argv) {
     TestDirectory directory(argv[1]);
     unsigned passed = 0;
     const auto pass = [&](const char* name) { ++passed; std::cout << "PASS " << name << '\n'; };
+    crc_contracts();
+    pass("crc32_matches_reference_and_incremental_updates");
     std::array<std::byte, 37> expected{};
     for (std::size_t index = 0; index < expected.size(); ++index) expected[index] = std::byte((index * 7 + 3) & 255);
     std::array<std::byte, 37> actual{};

@@ -277,6 +277,20 @@ building the image. It saves the material byte length and SHA256 in
 `learning-material-input.json`. Run `python3 tests/learning_material_check.py`
 to perform the same input check locally. The platform performs the Agent assessment.
 
+Record decoding reserves the schema's column count before appending values.
+Float32 vectors use bulk byte copies for encoding and decoding on little-endian
+hosts, with explicit little-endian conversion on other hosts. WAL checksums use
+a compile-time CRC-32 lookup table with the existing polynomial and incremental
+checksum state. Record bytes, WAL framing and durable commit ordering follow
+the existing format. The file I/O regression compares CRC results against the
+previous bitwise algorithm, including incremental updates and page payloads.
+
+The learning material includes selected authentic user requests, the user's
+filter-order explanation and version-specific experiment results. Student
+statements and assistant-executed validation retain their source attribution.
+Material input checks establish file identity and parseability. Assessment of
+the student's learning evidence uses the platform's independent evaluation.
+
 ## Numeric serialization comparison
 
 The M10 workflow uses the runner's installed CMake and C++ compiler to build

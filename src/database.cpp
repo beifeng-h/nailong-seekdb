@@ -86,13 +86,22 @@ std::vector<std::byte> encode_row(const Row& row) {
   for (const auto& value : row) {
     if (const auto* integer = std::get_if<std::int64_t>(&value)) append64(bytes, std::bit_cast<std::uint64_t>(*integer));
     else if (const auto* text = std::get_if<std::string>(&value)) append_string(bytes, *text);
-    else for (float number : std::get<Vector>(value)) append32(bytes, std::bit_cast<std::uint32_t>(number));
+    else {
+      const auto& vector = std::get<Vector>(value);
+      if constexpr (std::endian::native == std::endian::little) {
+        const auto raw = std::as_bytes(std::span(vector));
+        bytes.insert(bytes.end(), raw.begin(), raw.end());
+      } else {
+        for (float number : vector) append32(bytes, std::bit_cast<std::uint32_t>(number));
+      }
+    }
   }
   return bytes;
 }
 
 Row decode_row(const Schema& schema, const std::vector<std::byte>& bytes) {
   Decoder input{bytes}; Row row;
+  row.reserve(schema.columns.size());
   for (const auto& column : schema.columns) {
     if (column.type == Type::bigint) row.emplace_back(std::bit_cast<std::int64_t>(input.u64()));
     else if (column.type == Type::varchar) row.emplace_back(input.string());

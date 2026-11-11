@@ -134,13 +134,21 @@ class File {
   std::FILE* stream_ = nullptr;
 };
 
-std::uint32_t crc_update(std::uint32_t value, const void* data, std::size_t length) {
-  const auto* bytes = static_cast<const unsigned char*>(data);
-  for (std::size_t i = 0; i < length; ++i) {
-    value ^= bytes[i];
+constexpr auto crc_table = [] {
+  std::array<std::uint32_t, 256> table{};
+  for (std::size_t index = 0; index < table.size(); ++index) {
+    auto value = static_cast<std::uint32_t>(index);
     for (int bit = 0; bit < 8; ++bit)
       value = (value >> 1) ^ (0xedb88320U & (0U - (value & 1U)));
+    table[index] = value;
   }
+  return table;
+}();
+
+std::uint32_t crc_update(std::uint32_t value, const void* data, std::size_t length) {
+  const auto* bytes = static_cast<const unsigned char*>(data);
+  for (std::size_t i = 0; i < length; ++i)
+    value = crc_table[(value ^ bytes[i]) & 255U] ^ (value >> 8);
   return value;
 }
 

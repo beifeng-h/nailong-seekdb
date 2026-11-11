@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "synthetic": false,
-  "scope": "MiniVectorDB learning evidence. The single student technical explanation is u4. Assistant questions, explanations and automated experiments are attributed separately.",
+  "scope": "Selected authentic MiniVectorDB task prompts, the original student technical explanation u4, user verification requests, and assistant-executed experiments. Each contribution retains its source and actual validation scope.",
   "conversations": [
     {
       "id": "a1",
@@ -17,6 +17,16 @@
       "id": "a2",
       "role": "assistant",
       "content": "对。先全表取 Top1 会选中 B，再被 WHERE 剔除，最终得到空结果，尽管库里存在符合条件的 A。题目要求先限定 A 类集合，再从中找最近的一条。"
+    },
+    {
+      "id": "a3",
+      "role": "assistant",
+      "content": "两次评测的学习 JSON 完全相同，前次 Agent 得到有效分，本次显示异常。你认为仅凭“容器入口改过”能否确定原因？你会先核对什么证据？用自己的话简短判断即可，我会继续完成材料和验证准备。"
+    },
+    {
+      "id": "u13",
+      "role": "user",
+      "content": "我不知道，你可以看看通过的会话和你的有什么区别"
     }
   ],
   "experiments": [
@@ -65,7 +75,8 @@
       "query_timing": "{\"unfiltered\": {\"baseline_mean_seconds\": 2.810699751999998, \"candidate_mean_seconds\": 2.216776636000006, \"speedup\": 1.2679219486324425, \"candidate_elapsed_ratio\": 0.788692080832406}, \"filtered\": {\"baseline_mean_seconds\": 2.4248533594999913, \"candidate_mean_seconds\": 1.8485013209999934, \"speedup\": 1.3117942259236286, \"candidate_elapsed_ratio\": 0.7623146833840532}}",
       "provenance": "https://github.com/beifeng-h/nailong-seekdb/actions/runs/42600565765",
       "limits": "Two runs per variant per group, retained operating-system cache, 2 CPUs and 2 GiB development containers. Official protocol and performance score remain pending.",
-      "student_involvement": "The assistant implemented and executed this work. It does not add evidence of student participation or understanding."
+      "student_involvement": "The assistant implemented and executed this work. It does not add evidence of student participation or understanding.",
+      "status_scope": "The limits field records the state of the 2026-11-09 experiment. Later protocol publication and formal results are recorded in the subsequent experiments and current_status."
     },
     {
       "id": "m7-bounded-linux",
@@ -77,12 +88,236 @@
       "result_summary": "Text SQL write, restart and all 100000 stored rows, two Top10 groups and 100000 rows in each complete distance ordering passed. GCC 14.2 strict primary-translation-unit I/O compilation and all 7 file tests passed without warning downgrades.",
       "limits": "Coordinator-verified results. Raw logs were not materialized on the Windows workstation. RLIMIT_AS excludes operating-system page cache. This targeted run did not execute CMake or Docker.",
       "student_involvement": "This is assistant-coordinated automated verification. No additional student experiment, explanation or mastery is claimed."
+    },
+    {
+      "id": "same-material-formal-comparison",
+      "date": "2026-11-11",
+      "executor": "assistant reading the official platform UI and exact Git objects",
+      "student_request_ids": [
+        "u6",
+        "u10"
+      ],
+      "input": "Compare formal commits d8d894ff918c04751ecdf32f229454fa48b2f808 and da0e4bef6005834d301e6a5e160f2a21990897f4 using their same-run result details and the exact agent/conversation.json bytes.",
+      "output": "{\"d8\": {\"commit\": \"d8d894ff918c04751ecdf32f229454fa48b2f808\", \"mysql_admission\": \"PASS\", \"performance_page_raw_value\": \"272.917104\", \"agent_prompt_raw_value\": \"1.000000\"}, \"da0\": {\"commit\": \"da0e4bef6005834d301e6a5e160f2a21990897f4\", \"mysql_admission\": \"PASS\", \"performance_page_raw_value\": \"273.128539\", \"agent_prompt_raw_value\": null, \"agent_prompt_detail\": \"Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名；未截断或换算本地分数。\"}, \"material_bytes\": 7686, \"material_sha256\": \"60fd7d525cf72d78d14c09218c9ab5bfa43e3a285d6f16487667a8df5f7373b0\", \"material_identical\": true, \"all_agent_files_identical\": true, \"changed_files\": [\"Dockerfile\", \"README.md\"]}",
+      "student_involvement": "用户要求对比通过版本，并指出第二项没有结果、质疑是否阅读两题文档。网页读取、Git差异和摘要计算由助手完成。用户在u13明确表示尚不知道原因。后续澄清已将“通过的会话”对应到截图中的d8正式提交。",
+      "limits": "The platform combines several invalid/review/range/digest conditions in one message. Its actual locked digest, assessment status, rule version and three assessment reports remain unavailable in the observed UI. The exact cause is unresolved.",
+      "evidence": "minivectordb-formal-da0e4be-20261111/SUBMISSION_RECEIPT.json and CANDIDATE_COMPARISON.json",
+      "reference_clarification": "The passed reference is the d8d894ff918c04751ecdf32f229454fa48b2f808 formal submission shown in the user screenshot. The compared d8 and da0 revisions have the same learning-material bytes and differ only in Dockerfile and README.md. The cause of the different Agent validity remains unknown."
+    },
+    {
+      "id": "locked-da0-linux-container-validation",
+      "date": "2026-11-11",
+      "executor": "assistant using the existing Ubuntu 24.04 GitHub Actions runner",
+      "source_commit": "da0e4bef6005834d301e6a5e160f2a21990897f4",
+      "input": "Build the exact da0 default Linux amd64 image, inspect its actual Entrypoint/Cmd, then run the unchanged official handshake and public protocol driver.",
+      "output": "{\"run_id\": 42961191871, \"job_id\": 130327858714, \"attempt\": 1, \"conclusion\": \"success\", \"entrypoint\": [\"/build/minivectordb_development_server\"], \"command\": [\"--development-protocol\", \"mvdb-judge-json-v1\", \"--data\", \"/data\"], \"handshake_passed\": true, \"public_cases_passed\": 20, \"public_sql_passed\": 95, \"manifest_files_verified\": 58, \"program_bytes\": 454160, \"program_sha256\": \"9c17434aa58188e8f35f1eb1adba564dfbc9b3afde831554583930493db72137\"}",
+      "student_involvement": "The assistant performed the build, protocol validation and artifact verification. The user authorized cloud-capable development and later requested formal evaluation.",
+      "limits": "Public container correctness and executable identity were checked. Performance ranking and Agent assessment require their own same-run platform results.",
+      "evidence": "minivectordb-passed-entry-linux-20261111/LINUX_VALIDATION_RECEIPT.json"
+    },
+    {
+      "id": "bulk-vector-decode-default-process-comparison",
+      "date": "2026-11-11",
+      "executor": "assistant using two MSVC Release builds, the existing independent integer-distance fixture and real default JSONL processes",
+      "student_request_ids": [
+        "u11"
+      ],
+      "source_commit": "7b9fb279978d70bcd64e90958cc5ad48cb813bba",
+      "baseline_commit": "e2564074fed97586a452bd06e01ccc6757df9331",
+      "input": "10000 rows, 128 dimensions, Top10, 100 unfiltered and 100 filtered SQL queries per process group. Baseline-candidate-candidate-baseline order, two samples per version and group, same frozen database. Filter predicate tag=3.",
+      "output": "{\"protocol\": \"mvdb-judge-json-v1\", \"queries_checked\": 800, \"rows_checked\": 8000, \"all_results_match_independent_truth\": true, \"database_unchanged\": true, \"summary\": {\"unfiltered\": {\"baseline_mean_seconds\": 4.46067854994908, \"candidate_mean_seconds\": 4.129957899916917, \"speedup\": 1.0800784555307006, \"elapsed_reduction_fraction\": 0.07414133216031404}, \"filtered\": {\"baseline_mean_seconds\": 4.215026900172234, \"candidate_mean_seconds\": 4.013847650028765, \"speedup\": 1.0501212969909375, \"elapsed_reduction_fraction\": 0.04772905485733625}}, \"baseline_program_sha256\": \"a1f02291e1c037855e78937fe010b0f83ab28b4a214628208970c4ae79eadff3\", \"candidate_program_sha256\": \"cf39b2af86276728d5772d04ffbbdb47241a614bd2b56e27685b26c6fbd93302\"}",
+      "student_involvement": "用户要求继续优化。批量解码的选择、实现、构建与性能测量由助手完成。",
+      "limits": "Windows x64 development measurement. Each group has two samples per version, retained OS cache and visible timing variation. Linux container resource statistics and formal performance score remain unverified for this optimization.",
+      "evidence": "minivectordb-bulk-decode-20261111/PROTOCOL_COMPARISON.json and SOURCE_IDENTITY.json"
+    },
+    {
+      "id": "locked-029-linux-default-container-validation",
+      "date": "2026-11-11",
+      "executor": "assistant using the existing Ubuntu 24.04 GitHub Actions runner and independent local artifact verification",
+      "student_request_ids": [
+        "u12",
+        "u14"
+      ],
+      "source_commit": "029b884bd3d109a107ae59131b3d274f11fb8ee0",
+      "input": "Publish the authorized candidate to 2026-competition-round2, check the original learning file at that exact checkout, build the default Linux amd64 image, and run native regressions plus the unchanged official handshake and public driver against its default entrypoint.",
+      "output": "{\"source_commit\": \"029b884bd3d109a107ae59131b3d274f11fb8ee0\", \"source_tree\": \"e6b14175ee285266cf7857e0b563f011ceb91c50\", \"workflow_commit\": \"029b884bd3d109a107ae59131b3d274f11fb8ee0\", \"run_id\": 42993546963, \"job_id\": 130431942469, \"attempt\": 1, \"conclusion\": \"success\", \"image_id\": \"sha256:16b0ef36a12dcea628e2fb16bdbb87d4c5b50158c6e17c98cb79b7c95a413200\", \"image_platform\": \"linux/amd64\", \"entrypoint\": [\"/build/minivectordb_server\"], \"command\": [\"--data\", \"/data\"], \"ctest_passed\": 8, \"ctest_failed\": 0, \"handshake_passed\": true, \"public_cases_passed\": 20, \"public_cases_failed\": 0, \"public_sql_and_assertions\": 95, \"native_edge_id_checks\": 14, \"native_edge_malformed_requests\": 11, \"native_edge_single_response_rows\": 600, \"native_edge_shutdown_and_eof_rollback_passed\": true, \"legacy_schema_statements_passed\": 5, \"legacy_index_restart_passed\": true, \"material_bytes_at_validated_commit\": 7686, \"material_sha256_at_validated_commit\": \"60fd7d525cf72d78d14c09218c9ab5bfa43e3a285d6f16487667a8df5f7373b0\", \"program_bytes\": 584248, \"program_sha256\": \"28850c0a00e3951a530bdb63cd1e12336efa7e527798ebbc386a429fb61b6011\", \"archive_manifest_files_verified\": 40}",
+      "output_kind": "Structured summary of the saved CI metadata, raw reports and independently verified executable identity.",
+      "student_involvement": "用户要求同时核对两项结果，并明确授权“发布并跑 Linux 自测”。发布、构建、测试、SQL计数和产物核验由助手执行。",
+      "limits": "This run checks the original 7686-byte learning file at commit 029b884 and public Linux container correctness. Native edges ran as separate in-container commands, with public=null in their edges-only report. The official public driver separately passed 20 groups and 95 SQL assertions. This run provides no Linux A/B performance measurement or private Agent assessment. The subsequently updated learning JSON requires its own commit and digest binding.",
+      "evidence": "minivectordb-two-item-linux-20261111/LINUX_VALIDATION_RECEIPT.json, linux-evidence/learning-material-input.json, native-ctest.log, native-stdio-edges.json, legacy-index-schema.json and m11-official-public/result.json"
+    },
+    {
+      "id": "multi-angle-runtime-validation",
+      "requested_by": "u15",
+      "performed_by": "assistant",
+      "output": "Windows x64 Release build with MSVC 19.51.36257.0 passed all 8 CTest executables. The standard-input process passed 20 public groups and 95 SQL statements, 14 identifier cases, 11 malformed requests, 600-row framing, shutdown and EOF rollback. Legacy schema/index readback passed. The SQL fault driver passed 14 forced-kill/reopen cases, and index creation passed 13. Float32 signed zeros, subnormals, finite extremes, Unicode and BIGINT bounds produced byte-identical pages across baseline and candidate. Both baseline-to-candidate and candidate-to-baseline WAL recovery passed after interruption at commit.wal_synced.",
+      "source": "Current local build and CROSS_VERSION_STORAGE.json, CTEST.log, STDIO_PROTOCOL.json, SQL_CRASH.json and INDEX_CRASH.json in minivectordb-multi-angle-20261111. These are assistant-executed checks in response to u15.",
+      "formal_scope": "New changes require corresponding Linux/container and formal platform validation."
+    },
+    {
+      "id": "multi-angle-runtime-measurements",
+      "requested_by": "u15",
+      "performed_by": "assistant",
+      "output": "A Windows synthetic 10000-row, 128-dimensional dataset with 100-row durable write batches was compared in A/B/B/A order. Query mean elapsed reduction was 21.24% without filtering and 5.21% with filtering, two samples per version/group. The first writing block was 6.59% slower for the candidate and the second 19.46% faster. Combined four samples per version gave baseline 10.939153s and candidate 10.355753s, a 5.33% mean reduction. An A/A control with the same baseline binary differed by 1.28% between labels. In the CPU-measured block, baseline user/kernel CPU means were 2.828125/4.8671875s and candidate means were 0.9765625/5.5234375s. Total child CPU dropped from 7.6953125 to 6.5s. All written pages were 41504768 bytes, SHA256 c3c21b748827244b9a0a5bc1007e36609bff485ca64a4e89f5bd3f60c1bd25a5; restart verification passed.",
+      "source": "PERFORMANCE_SUMMARY.json, QUERY_COMPARISON.json, WRITE_COMPARISON.json, WRITE_AA.json and WRITE_CPU_COMPARISON.json. The complete observations and their variation are retained.",
+      "attribution": "The user requested multiple optimization angles and the handbook scoring check. The assistant selected, implemented and measured the changes. These measurements belong to the same optimization chain.",
+      "limitations": "Retained Windows filesystem cache and small synthetic workload. Process CPU is from Windows GetProcessTimes. Linux cgroup physical I/O, peak memory, same-version formal performance and Agent results are pending."
     }
   ],
   "limitations": [
-    "Only the original quoted student explanation of filter-first TopK is evidence of student understanding.",
+    "The selected material contains the original student technical explanation u4 and later user source-checking and acceptance-verification requests. The student explicitly says the causal explanation is unknown in u13.",
     "Implementation, validation, bug fixes and performance experiments were performed by the assistant or coordinated automated execution.",
-    "Official process protocol, full judge driver, frozen resource limits and official acceptance remain pending.",
+    "Current protocol and formal-result status is version-specific and recorded in current_status. The da0 formal MySQL admission passed and its performance page value is available, while its Agent result remains unresolved. The bulk-decode candidate has Windows comparison results and public Linux default-container validation at commit 029b884. Same-run formal performance and Agent validity for that candidate, and evaluation of this updated learning input, remain pending.",
     "Unrelated project conversations, account information, credentials and local absolute paths are excluded from this selected material."
-  ]
+  ],
+  "user_prompts": [
+    {
+      "id": "u1",
+      "role": "user",
+      "content": "读取项目内容，你负责做新题"
+    },
+    {
+      "id": "u2",
+      "role": "user",
+      "content": "就是这道题"
+    },
+    {
+      "id": "u3",
+      "role": "user",
+      "content": "可以用云端实例"
+    },
+    {
+      "id": "u5",
+      "role": "user",
+      "content": "暂时没有，你去题目的参考手册或者链接看看"
+    },
+    {
+      "id": "u6",
+      "role": "user",
+      "content": "继续，用通过的版本，对比一下你之前的做法和理解"
+    },
+    {
+      "id": "u7",
+      "role": "user",
+      "content": "能否提测"
+    },
+    {
+      "id": "u8",
+      "role": "user",
+      "content": "那你提测一次看看"
+    },
+    {
+      "id": "u9",
+      "role": "user",
+      "content": "我来看结果，你先停"
+    },
+    {
+      "id": "u10",
+      "role": "user",
+      "content": "出结果了，但是第二题没出，你去看看前一次的提测记录，那个通过了，比对完后继续。还有，你是不是没看这两题的文档？"
+    },
+    {
+      "id": "u11",
+      "role": "user",
+      "content": "继续优化一下"
+    },
+    {
+      "id": "u12",
+      "role": "user",
+      "content": "继续，你要先保证两个问题都能通过才会有分数"
+    },
+    {
+      "id": "u14",
+      "role": "user",
+      "content": "发布并跑 Linux 自测",
+      "preceding_assistant_question": "候选 `029b884bd` 已对齐截图中 d8 的启动配置和原始学习 JSON，并保留解码优化。完成 Linux 镜像验证需将它正常快进推送到 `beifeng-h/nailong-seekdb` 的 `2026-competition-round2`，触发现有 GitHub Actions。你提供的 AGENTS.md 要求远程推送由你明确授权。是否发布这一个候选并完成 Linux 自测？",
+      "context": "Literal answer to the authorization question. The build, implementation and verification were performed by the assistant."
+    },
+    {
+      "id": "u15",
+      "role": "user",
+      "content": "多换几个角度去优化，顺便看看每题计算的满分是多少，题目的参考手册有"
+    }
+  ],
+  "material_selection": {
+    "source": "Literal user-authored messages from the current task conversation, the original selected interaction, and saved raw tool results.",
+    "ordering": "The original three conversation entries retain their positions. Earlier task prompts are selected in user_prompts. New interaction follows the original entries.",
+    "original_technical_explanation_id": "u4",
+    "verification_request_ids": [
+      "u5",
+      "u6",
+      "u10",
+      "u12",
+      "u13",
+      "u14",
+      "u15"
+    ],
+    "selection_date": "2026-11-11",
+    "privacy_scope": "Task-relevant selected content and relative evidence names. Account data, credentials and local absolute paths are excluded.",
+    "passed_reference": "The user clarified that the passed reference is the d8d894f formal submission in the screenshot."
+  },
+  "retrospective": [
+    {
+      "role": "assistant",
+      "request_ids": [
+        "u10",
+        "u12"
+      ],
+      "content": "后续验收同时核对同次提交的MySQL准入、有效性能结果和有效Agent结果。已通过的d8记录作为同次双项有效基线。d8与da0的学习材料相同，文件差异只有Dockerfile和README.md；Agent结果差异的具体原因仍未知。新优化版本和更新后的材料需要绑定各自的正式提交验收。"
+    },
+    {
+      "role": "assistant",
+      "request_ids": [
+        "u5",
+        "u10"
+      ],
+      "content": "已核对两个子题和参考手册。需评分的实际任务指令、必要上下文与结果应直接包含在单个agent/conversation.json中。此前材料停留在11月9日，本次补齐有来源的后续原话和结果，并标明旧实验限制的历史时点。"
+    },
+    {
+      "role": "assistant",
+      "request_ids": [
+        "u15"
+      ],
+      "content": "已按参考手册核对满分。总分80，性能与Agent各40，分别按max(40 - 0.5 * (rank - 1), 0)从有效排名换算。Agent原始分没有固定上限，原始1分需依据该榜排名换算。性能综合E按从高到低排名，T、B、M使用各自基线效率比，经f(R)=R/(1+R)归一化；E=(E_write+2*E_query)/3，三轮取中位数并保留六位小数。两项成绩独立有效并绑定同一最终提交。页面272至273一类原始值的口径与该有界E公式仍未核实。",
+      "source": "Official MiniVectorDB manual sections 2.4, 3.3.3 and 3.4, and the scoring page, read live on 2026-11-11. Captured as CURRENT_MANUAL_LIVE.txt and CURRENT_SCORING_LIVE.txt in minivectordb-multi-angle-20261111. This explanation was written by the assistant in response to u15."
+    }
+  ],
+  "current_status": {
+    "date": "2026-11-11",
+    "official_protocol_commit": "f4d4e26653af823a7601668802f80e374ad6643c",
+    "valid_same_run_formal_baseline": "d8d894ff918c04751ecdf32f229454fa48b2f808",
+    "latest_formal_commit": "da0e4bef6005834d301e6a5e160f2a21990897f4",
+    "latest_formal_mysql_admission_passed": true,
+    "latest_formal_performance_page_raw_value": "273.128539",
+    "latest_formal_agent_prompt_raw_value": null,
+    "latest_formal_agent_specific_cause": "UNKNOWN",
+    "optimized_runtime_source_commit": "7b9fb279978d70bcd64e90958cc5ad48cb813bba",
+    "optimized_runtime_windows_validation_passed": true,
+    "optimized_runtime_linux_container_validation_pending": false,
+    "material_binding": "The Linux input check at commit 029b884 records the original 7686-byte file with SHA256 60fd7d525cf72d78d14c09218c9ab5bfa43e3a285d6f16487667a8df5f7373b0. This updated JSON adds selected authentic task evidence after that check. Its bytes and digest must be recorded with its eventual submitted commit.",
+    "passed_reference_type": "formal submission shown in the user screenshot",
+    "passed_reference_commit": "d8d894ff918c04751ecdf32f229454fa48b2f808",
+    "passed_reference_material_matches_da0": true,
+    "passed_reference_vs_da0_changed_files": [
+      "Dockerfile",
+      "README.md"
+    ],
+    "validated_linux_container_commit": "029b884bd3d109a107ae59131b3d274f11fb8ee0",
+    "validated_linux_container_run": 42993546963,
+    "optimized_runtime_linux_container_validation_scope": "Default Linux amd64 image, native regressions, official handshake and 20 public groups with 95 SQL assertions at commit 029b884.",
+    "optimized_runtime_linux_performance_comparison_pending": true,
+    "optimized_runtime_formal_evaluation_pending": true,
+    "updated_learning_input_formal_evaluation_pending": true,
+    "additional_local_runtime_changes": {
+      "changes": [
+        "CRC-32 table lookup with the same checksum state and polynomial",
+        "Bulk little-endian float32 encoding with the existing other-endian conversion",
+        "Reserve decoded Row capacity from the schema column count"
+      ],
+      "windows_validation_passed": true,
+      "linux_container_validation_pending": true,
+      "formal_evaluation_pending": true,
+      "validation_output": "8 CTest; 20 public groups/95 SQL; 27 forced-kill cases; 2 cross-version record reads; 2 cross-version WAL recoveries passed."
+    }
+  }
 }
