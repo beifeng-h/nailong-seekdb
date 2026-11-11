@@ -1,6 +1,7 @@
 """Offline adapter checks. All runtime and perf calls use mocks."""
 
 import argparse
+import copy
 import contextlib
 import datetime as dt
 import hashlib
@@ -37,6 +38,34 @@ class FakeResource:
             raise AssertionError("Only RLIMIT_NOFILE may be changed")
         self.changes.append((limit, values))
         self.limits = tuple(values)
+
+
+class FakeClock:
+    def __init__(self):
+        self.seconds = 0.0
+
+    def monotonic(self):
+        return self.seconds
+
+    def now(self):
+        return dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=self.seconds)
+
+    def advance(self, seconds):
+        self.seconds += seconds
+
+
+def fifth_attempt_busy_snapshot():
+    # attempt-5/EVIDENCE.zip SHA b45ec3468eb8b793068546dbdf6c5e03fdcaf8a5d7b1e022bc0e88c6b5c1a540.
+    return {
+        "utc": "2026-11-11T14:43:48.001049+00:00",
+        "intervalSeconds": 2.0039329589999966,
+        "foreignRelated": [],
+        "foreignActive": [{
+            "comm": "provjobd2540121", "cpuTicks": 2869, "observedCpuCores": 1.0030275668518525,
+            "ownedOrAncestor": False, "pgrp": 1749, "pid": 1765, "ppid": 1762,
+            "session": 1749, "startTicks": 1072, "state": "S",
+        }],
+    }
 
 
 class PortableChecks(unittest.TestCase):
@@ -107,6 +136,252 @@ class PortableChecks(unittest.TestCase):
             with self.assertRaisesRegex(run_profile.AdapterError, "require Linux"):
                 run_profile.main(["--portable-root", str(self.root), "--mode", "run"])
             load.assert_not_called()
+
+    def recovery_driver(self, clock, observer):
+        with mock.patch.dict(sys.modules, {"resource": types.ModuleType("resource")}):
+            module = run_profile.load_driver(self.root)
+        module.now = clock.now
+        module.process_observation = observer
+        args = module.parser().parse_args([])
+        return module, args
+
+    def test_real_guard_recovers_transient_busy_and_driver_dumps_fresh_sample(self):
+        clock = FakeClock()
+        busy = fifth_attempt_busy_snapshot()
+        idle = dict(copy.deepcopy(busy), utc="2026-11-11T14:43:52.040790+00:00", foreignActive=[])
+        originals = copy.deepcopy([busy, idle])
+        samples = iter([busy, idle])
+        reads = []
+
+        def observer(seconds):
+            reads.append(seconds)
+            clock.advance(seconds)
+            return next(samples)
+
+        module, args = self.recovery_driver(clock, observer)
+        guard = module.guard_processes
+        with self.assertRaisesRegex(module.Blocked, "Another active workload"):
+            guard(busy)
+        budget = module.required_pair_budget(args)
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            fresh = module.process_observation(args.observation_seconds)
+        self.assertIs(module.guard_processes, guard)
+        self.assertIs(fresh, idle)
+        module.guard_processes(fresh)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "global-processes-preflight.json"
+            module.dump(path, fresh)
+            self.assertEqual(json.loads(path.read_text())["foreignActive"], [])
+        self.assertEqual([busy, idle], originals)
+        self.assertEqual(reads, [2, 2])
+        self.assertEqual(report["calls"][0]["observations"], originals)
+        self.assertEqual(report["calls"][0]["outcome"], "idle_after_wait")
+        self.assertEqual(report["cumulativeAdditionalWaitSeconds"], 2)
+        self.assertEqual(module.required_pair_budget(args), budget + 30)
+        self.assertEqual((args.pair_timeout_seconds, args.total_timeout_seconds), (3000, 3900))
+
+    def test_permanent_busy_shares_wait_budget_and_original_caller_still_blocks(self):
+        clock = FakeClock()
+        reads = []
+
+        def observer(seconds):
+            reads.append(seconds)
+            clock.advance(seconds)
+            return fifth_attempt_busy_snapshot()
+
+        module, args = self.recovery_driver(clock, observer)
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            first = module.process_observation(args.observation_seconds)
+            first_wait = report["cumulativeAdditionalWaitSeconds"]
+            second = module.process_observation(args.observation_seconds)
+        self.assertGreater(first_wait, 0)
+        self.assertLessEqual(report["cumulativeAdditionalWaitSeconds"], 30)
+        self.assertEqual(report["cumulativeAdditionalWaitSeconds"], first_wait)
+        self.assertEqual(report["calls"][1]["additionalWaitSeconds"], 0)
+        self.assertEqual(report["calls"][1]["outcome"], "busy_wait_budget_exhausted")
+        for snapshot in (first, second):
+            with self.assertRaisesRegex(module.Blocked, "Another active workload"):
+                module.guard_processes(snapshot)
+
+    def test_foreign_related_is_returned_without_wait_for_original_caller(self):
+        clock = FakeClock()
+        snapshot = fifth_attempt_busy_snapshot()
+        snapshot["foreignRelated"] = [{"comm": "seekdb", "pid": 999}]
+        def observe(seconds):
+            clock.advance(seconds)
+            return snapshot
+
+        observer = mock.Mock(side_effect=observe)
+        module, args = self.recovery_driver(clock, observer)
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            actual = module.process_observation(args.observation_seconds)
+        observer.assert_called_once_with(2)
+        self.assertIs(actual, snapshot)
+        self.assertEqual(report["cumulativeAdditionalWaitSeconds"], 0)
+        with self.assertRaisesRegex(module.Blocked, "Foreign SQL/compiler"):
+            module.guard_processes(actual)
+
+    def test_final_observation_can_return_busy_without_a_new_exception(self):
+        clock = FakeClock()
+        snapshot = fifth_attempt_busy_snapshot()
+        snapshot["foreignRelated"] = [{"comm": "rustc", "pid": 999}]
+        module, args = self.recovery_driver(clock, lambda seconds: snapshot)
+        run_profile.install_observation_recovery(module, args, {})
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            actual = module.process_observation(args.observation_seconds)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "global-processes-final.json"
+            module.dump(path, actual)
+            self.assertEqual(json.loads(path.read_text()), snapshot)
+
+    def test_busy_utc_window_exhaustion_returns_original_snapshot(self):
+        clock = FakeClock()
+        def observe(seconds):
+            clock.advance(seconds)
+            return fifth_attempt_busy_snapshot()
+
+        observer = mock.Mock(side_effect=observe)
+        module, args = self.recovery_driver(clock, observer)
+        args.window_deadline_utc = (clock.now() + dt.timedelta(seconds=3)).isoformat()
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            actual = module.process_observation(args.observation_seconds)
+        observer.assert_called_once_with(2)
+        self.assertEqual(report["calls"][0]["outcome"], "busy_utc_window_exhausted")
+        self.assertEqual(report["cumulativeAdditionalWaitSeconds"], 0)
+        with self.assertRaises(module.Blocked):
+            module.guard_processes(actual)
+
+    def test_late_idle_does_not_override_the_wait_budget_rejection(self):
+        clock = FakeClock()
+        busy = fifth_attempt_busy_snapshot()
+        idle = dict(copy.deepcopy(busy), foreignActive=[])
+        samples = iter([(2, busy), (35, idle)])
+
+        def observer(seconds):
+            elapsed, snapshot = next(samples)
+            clock.advance(elapsed)
+            return snapshot
+
+        module, args = self.recovery_driver(clock, observer)
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            actual = module.process_observation(args.observation_seconds)
+        self.assertIs(actual, busy)
+        self.assertIs(report["calls"][0]["observations"][-1], idle)
+        self.assertEqual(report["calls"][0]["returnedObservationIndex"], 0)
+        with self.assertRaises(module.Blocked):
+            module.guard_processes(actual)
+
+    def test_late_idle_does_not_override_the_utc_reserve_rejection(self):
+        clock = FakeClock()
+        busy = fifth_attempt_busy_snapshot()
+        idle = dict(copy.deepcopy(busy), foreignActive=[])
+        samples = iter([(2, busy), (5, idle)])
+
+        def observer(seconds):
+            elapsed, snapshot = next(samples)
+            clock.advance(elapsed)
+            return snapshot
+
+        module, args = self.recovery_driver(clock, observer)
+        args.window_deadline_utc = (clock.now() + dt.timedelta(seconds=125)).isoformat()
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            actual = module.process_observation(args.observation_seconds)
+        self.assertIs(actual, busy)
+        self.assertEqual(report["calls"][0]["outcome"], "idle_after_utc_reserve_exhausted")
+        with self.assertRaises(module.Blocked):
+            module.guard_processes(actual)
+
+    def test_observation_interrupt_is_preserved_without_retry(self):
+        clock = FakeClock()
+        samples = [fifth_attempt_busy_snapshot()]
+        module, args = self.recovery_driver(clock, lambda seconds: None)
+        interrupt = module.Blocked("Operator interrupted; cleaning owned processes and preserving receipts")
+
+        def observer(seconds):
+            clock.advance(seconds)
+            if samples:
+                return samples.pop()
+            raise interrupt
+
+        module.process_observation = observer
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            with self.assertRaises(module.Blocked) as raised:
+                module.process_observation(args.observation_seconds)
+        self.assertIs(raised.exception, interrupt)
+        self.assertEqual(report["calls"][0]["outcome"], "observation_or_guard_exception")
+        self.assertEqual(report["cumulativeAdditionalWaitSeconds"], 2)
+
+    def test_guard_interrupt_is_preserved_instead_of_treated_as_busy(self):
+        clock = FakeClock()
+        observer = mock.Mock(return_value=fifth_attempt_busy_snapshot())
+        module, args = self.recovery_driver(clock, observer)
+        interrupt = module.Blocked("Operator interrupted; cleaning owned processes and preserving receipts")
+        module.guard_processes = mock.Mock(side_effect=interrupt)
+        report = {}
+        run_profile.install_observation_recovery(module, args, report)
+        with mock.patch.object(run_profile.time, "monotonic", clock.monotonic):
+            with self.assertRaises(module.Blocked) as raised:
+                module.process_observation(args.observation_seconds)
+        self.assertIs(raised.exception, interrupt)
+        observer.assert_called_once_with(2)
+        self.assertEqual(report["calls"][0]["returnedObservationIndex"], None)
+
+    def test_original_preflight_publishes_fresh_recovered_observation(self):
+        clock = FakeClock()
+        busy = fifth_attempt_busy_snapshot()
+        idle = dict(copy.deepcopy(busy), foreignActive=[])
+        samples = iter([busy, idle, idle])
+
+        def observer(seconds):
+            clock.advance(seconds)
+            return next(samples)
+
+        module, _ = self.recovery_driver(clock, observer)
+        module.resource = FakeResource(8192, 1048576)
+        snapshot = {"effectiveMemAvailableBytes": 16 * 1024**3, "diskFreeBytes": 20 * 1024**3,
+                    "affinity": [0, 1], "nofileLimit": [8192, 1048576],
+                    "interfaces": "header\nheader\neth0: 0 0\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            owned = root / "preflight"
+            with mock.patch.object(run_profile.sys, "platform", "linux"), \
+                    mock.patch.object(run_profile.time, "monotonic", clock.monotonic), \
+                    mock.patch.object(run_profile, "load_driver", return_value=module), \
+                    mock.patch.object(module, "resources", return_value=snapshot), \
+                    mock.patch.object(module, "gpu_observation"), \
+                    mock.patch.object(module, "verify_runtime", return_value={}), \
+                    mock.patch.object(module.os, "sched_getaffinity", return_value={0, 1}, create=True), \
+                    mock.patch.object(module.socket, "socket"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = run_profile.main([
+                    "--portable-root", str(self.root), "--mode", "preflight", "--run-root", str(owned),
+                    "--baseline-elf", str(root / "baseline"), "--candidate-elf", str(root / "candidate"),
+                    "--obclient", str(root / "obclient"),
+                ])
+            self.assertEqual(result, 0)
+            published = json.loads((owned / "global-processes-preflight.json").read_text())
+            self.assertEqual(published["foreignActive"], [])
+            module.guard_processes(published)
+            summary = json.loads((owned / "profiling-adapter-report.json").read_text())
+            recovery = summary["processObservationRecovery"]
+            self.assertEqual(recovery["cumulativeAdditionalWaitSeconds"], 2)
+            self.assertEqual(recovery["calls"][0]["observations"][0], busy)
+            self.assertEqual(recovery["calls"][0]["observations"][1], idle)
+            self.assertEqual(json.loads((owned / "report.json").read_text())["roles"], {})
 
     def test_preflight_raises_low_soft_limit_before_original_resource_gate(self):
         resource = FakeResource(1024, 1048576)
@@ -291,6 +566,9 @@ class HookChecks(unittest.TestCase):
         self.calls = []
         self.now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
         self.module = types.SimpleNamespace(
+            Blocked=RuntimeError,
+            guard_processes=mock.Mock(),
+            process_observation=mock.Mock(return_value={"foreignRelated": [], "foreignActive": []}),
             resource=FakeResource(8192, 1048576),
             checked=self.original_checked,
             comparison=mock.Mock(),

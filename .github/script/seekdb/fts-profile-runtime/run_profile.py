@@ -22,6 +22,9 @@ PERF_REPORT_RESERVE_SECONDS = PERF_REPORT_TIMEOUT_SECONDS + PERF_COMMAND_CLEANUP
 DIAGNOSTIC_SCOPE = "Candidate-only profiling of the original benchmark"
 OVERHEAD_NOTE = "Candidate timings include perf and /proc sampling overhead."
 MIN_NOFILE_SOFT_LIMIT = 8192
+PROCESS_OBSERVATION_WAIT_SECONDS = 30
+FOREIGN_ACTIVE_MESSAGE = "Another active workload is present; refuse to start"
+FOREIGN_RELATED_MESSAGE = "Foreign SQL/compiler/GPU-related processes present; refuse to start"
 
 
 class AdapterError(RuntimeError):
@@ -100,6 +103,82 @@ def prepare_nofile_limit(resource, record):
     record.update(after=[observed_soft, observed_hard], changed=(observed_soft, observed_hard) != (soft, hard))
     if observed_hard != hard or observed_soft != MIN_NOFILE_SOFT_LIMIT:
         raise AdapterError("RLIMIT_NOFILE adjustment did not preserve the hard limit and satisfy the original soft-limit gate")
+
+
+def install_observation_recovery(module, args, report):
+    """Return a fresh original observation after a bounded transient workload."""
+    original_observation = module.process_observation
+    original_guard = module.guard_processes
+    original_pair_budget = module.required_pair_budget
+    additional_wait = 0.0
+    report.update(maximumAdditionalWaitSeconds=PROCESS_OBSERVATION_WAIT_SECONDS,
+                  cumulativeAdditionalWaitSeconds=0.0, additionalBudgetSeconds=PROCESS_OBSERVATION_WAIT_SECONDS,
+                  originalDeadlinesExtended=False, calls=[])
+
+    def process_observation(seconds):
+        nonlocal additional_wait
+        call = {"startedUtc": module.now().isoformat(), "observationSeconds": seconds,
+                "observations": [], "outcome": "observing", "returnedObservationIndex": None}
+        report["calls"].append(call)
+        waiting_started = None
+        blocked_index = None
+        try:
+            snapshot = original_observation(seconds)
+            call["observations"].append(snapshot)
+            while True:
+                current_index = len(call["observations"]) - 1
+                try:
+                    original_guard(snapshot)
+                except module.Blocked as error:
+                    if snapshot["foreignRelated"] and str(error) == FOREIGN_RELATED_MESSAGE:
+                        call.update(outcome="foreign_related", returnedObservationIndex=current_index)
+                        return snapshot
+                    if snapshot["foreignRelated"] or not snapshot["foreignActive"] or str(error) != FOREIGN_ACTIVE_MESSAGE:
+                        raise
+                    blocked_index = current_index
+                    if waiting_started is None:
+                        waiting_started = time.monotonic()
+                    remaining = PROCESS_OBSERVATION_WAIT_SECONDS - additional_wait - (time.monotonic() - waiting_started)
+                    call["remainingWaitSeconds"] = max(0.0, remaining)
+                    if remaining <= seconds:
+                        call.update(outcome="busy_wait_budget_exhausted", returnedObservationIndex=current_index)
+                        return snapshot
+                    if args.window_deadline_utc:
+                        utc_remaining = (module.instant(args.window_deadline_utc) - module.now()).total_seconds()
+                        call["remainingUtcWindowSeconds"] = utc_remaining
+                        if utc_remaining <= args.window_buffer_seconds + seconds:
+                            call.update(outcome="busy_utc_window_exhausted", returnedObservationIndex=current_index)
+                            return snapshot
+                    snapshot = original_observation(seconds)
+                    call["observations"].append(snapshot)
+                else:
+                    if waiting_started is not None:
+                        elapsed = time.monotonic() - waiting_started
+                        if additional_wait + elapsed > PROCESS_OBSERVATION_WAIT_SECONDS:
+                            call.update(outcome="idle_after_wait_budget_exhausted", returnedObservationIndex=blocked_index)
+                            return call["observations"][blocked_index]
+                        if args.window_deadline_utc:
+                            utc_remaining = (module.instant(args.window_deadline_utc) - module.now()).total_seconds()
+                            if utc_remaining < args.window_buffer_seconds:
+                                call.update(outcome="idle_after_utc_reserve_exhausted", returnedObservationIndex=blocked_index)
+                                return call["observations"][blocked_index]
+                    call["outcome"] = "idle_after_wait" if waiting_started is not None else "original_guard_passed"
+                    call["returnedObservationIndex"] = current_index
+                    return snapshot
+        except BaseException as error:
+            call.update(outcome="observation_or_guard_exception", error=f"{type(error).__name__}: {error}")
+            raise
+        finally:
+            elapsed = time.monotonic() - waiting_started if waiting_started is not None else 0.0
+            additional_wait += elapsed
+            call["additionalWaitSeconds"] = elapsed
+            call["latestObservationIndex"] = len(call["observations"]) - 1 if call["observations"] else None
+            call["finishedUtc"] = module.now().isoformat()
+            report["cumulativeAdditionalWaitSeconds"] = additional_wait
+            report["waitBudgetOverrunObserved"] = additional_wait > PROCESS_OBSERVATION_WAIT_SECONDS
+
+    module.process_observation = process_observation
+    module.required_pair_budget = lambda values: original_pair_budget(values) + PROCESS_OBSERVATION_WAIT_SECONDS
 
 
 def install_hooks(module, portable_root, args, capture_factory, capture_reserve_seconds):
@@ -348,6 +427,8 @@ def main(argv=None):
             if options.mode in {"preflight", "run"}:
                 summary["fileDescriptorLimit"] = {}
                 prepare_nofile_limit(module.resource, summary["fileDescriptorLimit"])
+                summary["processObservationRecovery"] = {}
+                install_observation_recovery(module, args, summary["processObservationRecovery"])
             result = module.main(forwarded)
             summary["driverReturnCode"] = result
             if options.mode == "run" and result == 0:
