@@ -3,6 +3,25 @@
   "synthetic": false,
   "scope": "MiniVectorDB Agent Prompt iteration history. Each version adds only rules that a real failure or a real misjudgement forced. The assistant wrote and ran the implementation, the validation and the experiments; the single student technical judgement is attributed separately in conversation.json.",
   "artifact": "agent/AGENT_PROMPT.md",
+  "submission": {
+    "branch": "2026-competition-round2",
+    "material_commit": "e158a338f072e63c4c8b13d52ca05094c5dff161",
+    "ci_run": {
+      "id": 42941464341,
+      "conclusion": "success",
+      "head_sha": "e158a338f072e63c4c8b13d52ca05094c5dff161",
+      "workflow": "MiniVectorDB official stdio protocol validation",
+      "url": "https://github.com/beifeng-h/nailong-seekdb/actions/runs/42941464341"
+    },
+    "public_driver_result": {
+      "handshake": "PASS",
+      "public_cases_total": 20,
+      "public_cases_passed": 20,
+      "native_protocol_edge_checks": "passed",
+      "raw_report": "agent/verification/submission_ci_public_check.json"
+    },
+    "note": "The organizer's protocol_check/run.py, _assertions.py and the public fixture package were used unchanged by the CI job, against the image built from this branch."
+  },
   "versions": [
     {
       "id": "v1",

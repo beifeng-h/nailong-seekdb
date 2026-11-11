@@ -73,5 +73,13 @@ $cmd = '["' + ($py -replace '\\','/') + '", "<参考实现仓库>/scripts/minive
 
 - `python_public_check.first_run.txt`——首轮差分的原始控制台输出（逐字记录）；
 - `python_public_check.result.json`——组织方 `result.json` 原样拷贝；
-- `python_public_check.cases.json`——逐用例状态与耗时。
+- `python_public_check.cases.json`——逐用例状态与耗时；
+- `submission_ci_public_check.json`——**提测实现**在 CI 里跑同一份官方
+  驱动得到的 `result.json`（从 CI 运行日志还原）：握手 PASS，20 组公开
+  用例 20/20 PASS。对应运行：
+  <https://github.com/beifeng-h/nailong-seekdb/actions/runs/42941464341>。
+
+  把两份报告并排看，就能看出差分验证的价值：同一份组织方断言，
+  在提测实现上 20/20，在本地参考实现上 19/20——差的那一例正是
+  `vector_index_maintenance`（参考实现不做 ANN 索引）。
 

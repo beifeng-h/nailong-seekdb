@@ -160,6 +160,20 @@ python3 protocol_check/run.py --image minivectordb-m11 --handshake-only ...
 python3 protocol_check/run.py --image minivectordb-m11 ...
 ```
 
+**携带本材料的那次提测**（CI `42941464341`，`head_sha=e158a338f`，结论
+`success`）的实际输出是：
+
+```text
+{"scope": "native-stdio-public-and-edge-checks", "passed": true}
+{"scope": "public-protocol-check", "passed": true}   <- handshake
+{"scope": "public-protocol-check", "passed": true}   <- 20 组公开用例，20/20 PASS
+```
+
+逐用例状态原样存于
+[`verification/submission_ci_public_check.json`](verification/submission_ci_public_check.json)
+（从该次运行的日志里还原），其中 `vector_index_maintenance` 与
+`transaction_failed_insert` 均为 `PASS`。
+
 ### 3.3 验证手段二：独立真值，不用自己的输出自证
 
 对照实现的查询结果不能自己给自己作证。可核验的独立真值来源有三类：
@@ -202,6 +216,10 @@ python3 protocol_check/run.py --image minivectordb-m11 ...
    `vector_index_maintenance`（本地实现不做 ANN 索引，已在 SPEC-006
    登记为不在契约范围内），提测实现侧由 CI `42611519248` 与
    `42819609767` 覆盖。
+
+   同一份题包下两套实现对同一用例给出不同结论，本身就是最有说服力的
+   证据：本地参考实现在 `vector_index_maintenance` 上失败，提测实现在
+   同一用例上 PASS——说明断言确实在区分实现，而不是两边都"看起来对"。
 
 原始报告见 [`verification/python_public_check.result.json`](verification/python_public_check.result.json)
 （组织方 `result.json` 原样拷贝）与
@@ -263,6 +281,7 @@ python3 protocol_check/run.py --image minivectordb-m11 ...
 | 结论 | 出处 |
 | --- | --- |
 | 提测分支实现了组织方正式 JSONL 协议 | `e4c8c178c`、`5247fd706`、`63055c809` |
+| **携带本材料的那次提测：握手 PASS、公开用例 20/20 PASS** | CI `42941464341`，结论 `success`，`head_sha=e158a338f`；逐用例状态见 `verification/submission_ci_public_check.json` |
 | 组织方原版驱动在提测镜像上跑通握手 + 全部公开用例 | CI `42819609767`，结论 `success`，`head_sha=e4c8c178c` |
 | M11 分支同样通过组织方原版协议验证 | CI `42804710742`，结论 `success`，`head_sha=5247fd706` |
 | 数值序列化字节级回归通过 | CI `42618083030`，`head_sha=a33ea6e05` |
