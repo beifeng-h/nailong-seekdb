@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      SOURCE_REVISION: da0e4bef6005834d301e6a5e160f2a21990897f4
+      SOURCE_REVISION: ${{ github.sha }}
     steps:
       - name: Check out the public source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -50,6 +50,15 @@ jobs:
             = '["/build/minivectordb_development_server"]'
           test "$(docker image inspect minivectordb-m11 --format '{{json .Config.Cmd}}')" \
             = '["--development-protocol","mvdb-judge-json-v1","--data","/data"]'
+
+      - name: Check native protocol edge cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --entrypoint /build/judge_protocol_tests minivectordb-m11
+          docker run --rm --network none --entrypoint python3 minivectordb-m11 \
+            /source/tests/stdio_protocol_test.py --driver /build/minivectordb_server \
+            --edges-only --report /tmp/m11-native-edges.json
 
       - name: Run the unchanged official handshake and public driver on the default image
         shell: bash
