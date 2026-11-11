@@ -22,6 +22,7 @@ import zipfile
 
 import fts_contest_validation as native_harness
 import fts_paired_validation as common
+from fts_expr_cache_profile import verify_build_profile
 from fts_paired_collect import archive, add_bytes, BINARY_ARCHIVE_CAP, LOG_ARCHIVE_CAP
 from fts_plan_compatibility import classify_plan_metadata_compatibility
 
@@ -49,7 +50,8 @@ USER_IDENTITY = b'fcoox1111-rgb <288271307+fcoox1111-rgb@users.noreply.github.co
 PRODUCT = frozenset(('src/sql/engine/table/ob_table_scan_op.cpp', 'src/sql/engine/table/ob_table_scan_op.h'))
 PREFIX = '.github/script/seekdb/'
 ALLOWED_CI = frozenset((PREFIX+'fts_expr_cache_validation.py', PREFIX+'fts_expr_cache_targeted.py',
-    PREFIX+'test_fts_expr_cache_validation.py', '.github/workflows/fts-expr-cache-validation.yml',
+    PREFIX+'test_fts_expr_cache_validation.py', PREFIX+'fts_expr_cache_profile.py',
+    '.github/workflows/fts-expr-cache-validation.yml',
     '.github/workflows/fts-contest-validation.yml'))
 PROTECTED = ('build.sh', 'CMakeLists.txt', 'cmake', 'rust', 'deps',
     '.github/actions/setup-rust', 'tools/cmake', 'tools/benchmark', 'tools/deploy')
@@ -113,7 +115,7 @@ def source_proof(args):
     require(not common.git(source, 'diff', '--name-only', KERNEL, driver, '--', 'src').strip(),
             'CI driver changes production source')
     topics={KERNEL:'perf(fts): cache operator-local expression resolution',
-        driver:'ci(fts): normalize source proof Git diff [dedicated-native-validation]'}
+        driver:'ci(fts): verify generated compiler profile [dedicated-native-validation]'}
     for commit,title in topics.items():
         require(common.git(source,'show','-s','--format=%s',commit).decode().strip()==title,
             'New publication topic differs from reviewed neutral title')
@@ -237,19 +239,7 @@ def load_plan(args):
 
 
 def build_profile(args):
-    settings={}
-    for line in (args.source/'build_release/CMakeCache.txt').read_text().splitlines():
-        m=re.fullmatch(r'([^#/:][^:]*):[^=]+=(.*)',line)
-        if m: settings[m[1]]=m[2]
-    expected=dict(CMAKE_BUILD_TYPE='RelWithDebInfo',OB_ENABLE_UNITY='ON',OB_USE_LLD='ON')
-    require(all(settings.get(k)==v for k,v in expected.items()),'Original CMake settings changed')
-    for key in ('CMAKE_C_COMPILER','CMAKE_CXX_COMPILER'):
-        text=subprocess.check_output([settings[key],'--version'],timeout=30).decode()
-        require('clang version 17.0.6' in text,'Original Clang 17.0.6 required')
-        (args.root/'evidence/candidate'/(key+'-version.log')).write_text(text)
-    rust=subprocess.check_output(['rustc','--version'],cwd=args.source/'rust',timeout=30).decode().strip()
-    require(rust.startswith('rustc 1.98.1 '),'Original Rust 1.98.1 required')
-    return expected,rust
+    return verify_build_profile(args)
 
 
 def verify_version(args,binary,out,commit):
@@ -613,15 +603,17 @@ def collect(args):
                     selected.append(p)
     def priority(p):
         if p.name in ('report.json','plan.json'): return (0,str(p))
+        if p.parent.name in ('profile-prebuild','profile-snapshot') and p.name in ('CMakeCache.txt','CMakeCCompiler.cmake','CMakeCXXCompiler.cmake'): return (1,str(p))
         if p.name in ('supplemental-plan-compatibility.json','mysqltest-output.log','original-run-case.log') or p.suffix in ('.reject','.result'): return (1,str(p))
         return (2 if p.suffix=='.json' else 3,str(p))
     for p in sorted(set(selected),key=priority):
         if not p.exists(): continue
         common.no_symlinks(p)
         rel=p.relative_to(args.root).as_posix()
-        if p.suffix not in ('.json','.log','.txt','.sql','.reject','.result'): continue
+        profile_file=p.parent.name in ('profile-prebuild','profile-snapshot') and p.name in ('CMakeCache.txt','CMakeCCompiler.cmake','CMakeCXXCompiler.cmake')
+        if p.suffix not in ('.json','.log','.txt','.sql','.reject','.result') and not profile_file: continue
         original=p.stat().st_size
-        full=p.suffix in ('.json','.reject','.result') or p.name in ('mysqltest-output.log','original-run-case.log')
+        full=profile_file or p.suffix in ('.json','.reject','.result') or p.name in ('mysqltest-output.log','original-run-case.log')
         cap=8*1024**2 if full or p.suffix=='.sql' else LOG_FILE_CAP
         require(not full or original<=cap,'Refusing truncated complete native/JSON evidence')
         take=min(original,cap)

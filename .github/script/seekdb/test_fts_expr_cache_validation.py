@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import json
 import tarfile
+import fts_expr_cache_profile as profile
 from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
@@ -274,6 +275,137 @@ class ValidationContractTests(unittest.TestCase):
         source=Path(__file__).resolve().parents[3]
         diff=subprocess.check_output(['git','-C',str(source),'diff','--name-only',driver.KERNEL,'HEAD','--','src'])
         self.assertFalse(diff)
+
+
+class ProfileTests(unittest.TestCase):
+    # These positive Clang fixtures are synthetic. The actual failed CI did not
+    # retain its cache/compiler files; it retained only configure stdout.
+    def fixture(self, root):
+        source=root/'source'; build=source/'build_release'; files=build/'CMakeFiles/3.27.9'
+        files.mkdir(parents=True); (source/'rust').mkdir()
+        args=argparse.Namespace(source=source,root=root/'out',phase='prebuild')
+        rows=[]
+        cache='\n'.join(k+':STRING='+v for k,v in dict(profile.EXPECTED,
+            CMAKE_GENERATOR='Unix Makefiles',CMAKE_EXPORT_COMPILE_COMMANDS='ON').items())+'\n'
+        (build/'CMakeCache.txt').write_text(cache)
+        unity=build/'src/sql/CMakeFiles/ob_sql.dir/Unity/affected.cxx'
+        unity.parent.mkdir(parents=True); unity.write_text('#include "src/sql/engine/table/ob_table_scan_op.cpp"\n')
+        for lang,name in (('C','clang-17'),('CXX','clang++-17')):
+            compiler=source/'deps/3rd/usr/local/oceanbase/devtools/bin'/name
+            compiler.parent.mkdir(parents=True,exist_ok=True); compiler.write_text('synthetic compiler path only')
+            record=''.join('set(CMAKE_'+lang+'_'+key+' "'+value+'")\n' for key,value in
+                (('COMPILER',str(compiler)),('COMPILER_ID','Clang'),('COMPILER_VERSION','17.0.6')))
+            (files/('CMake'+lang+'Compiler.cmake')).write_text(record)
+            file=unity if lang=='CXX' else source/'probe.c'
+            rows.append(dict(directory=str(build),command=str(compiler)+' -c '+str(file)+' -o '+str(build/(lang+'.o')),file=str(file)))
+        (build/'compile_commands.json').write_text(json.dumps(rows))
+        return args,build,files,rows
+
+    @staticmethod
+    def version(command, **kwargs):
+        return b'rustc 1.98.1 (fixture)\n' if command[0]=='rustc' else b'clang version 17.0.6 (fixture)\n'
+
+    def test_generated_records_without_compiler_cache_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args,build,files,rows=self.fixture(Path(tmp))
+            self.assertNotIn('CMAKE_C_COMPILER',profile.cache_values((build/'CMakeCache.txt').read_bytes()))
+            with patch.object(profile.subprocess,'check_output',side_effect=self.version):
+                settings,rust=profile.verify_build_profile(args)
+                args.phase='snapshot'; profile.verify_build_profile(args)
+            self.assertEqual(settings,profile.EXPECTED); self.assertTrue(rust.startswith('rustc 1.98.1 '))
+            out=args.root/'evidence/candidate/profile-prebuild'
+            for name in ('CMakeCache.txt','CMakeCCompiler.cmake','CMakeCXXCompiler.cmake','compile-commands-proof.json','profile-proof.json'):
+                self.assertTrue((out/name).is_file())
+            proof=json.loads((out/'compile-commands-proof.json').read_text())
+            self.assertEqual(proof['selectedEntries'],[rows[1]])
+            self.assertEqual(proof['sha256'],profile.digest(build/'compile_commands.json'))
+            self.assertFalse(proof['wholeFileCopied'])
+
+    def test_read_layout_from_genuine_local_msvc_excerpt(self):
+        # Verbatim field shape observed from existing CMake 4.3.1-msvc1 local
+        # configure. This proves the layout only, not Linux Clang17 behavior.
+        path='C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe'
+        for lang in ('C','CXX'):
+            text='set(CMAKE_'+lang+'_COMPILER "'+path+'")\nset(CMAKE_'+lang+'_COMPILER_ID "MSVC")\nset(CMAKE_'+lang+'_COMPILER_VERSION "19.51.36257.0")\nset(CMAKE_'+lang+'_COMPILER_WORKS TRUE)\n'
+            values=profile.compiler_values(text.encode(),lang)
+            self.assertEqual(values,dict(COMPILER=path,COMPILER_ID='MSVC',COMPILER_VERSION='19.51.36257.0'))
+
+    def test_reject_changed_generated_or_cache_profile(self):
+        for mode in ('version','id','path','cache','generator','missing','duplicate'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as tmp:
+                args,build,files,rows=self.fixture(Path(tmp)); record=files/'CMakeCXXCompiler.cmake'
+                if mode=='version':record.write_text(record.read_text().replace('17.0.6','17.0.7'))
+                if mode=='id':record.write_text(record.read_text().replace('"Clang"','"GNU"'))
+                if mode=='path':record.write_text(record.read_text().replace('clang++-17','other-clang'))
+                if mode=='cache':
+                    with (build/'CMakeCache.txt').open('a') as f:f.write('CMAKE_CXX_COMPILER:FILEPATH=/other/clang\n')
+                if mode=='generator':(build/'CMakeCache.txt').write_text((build/'CMakeCache.txt').read_text().replace('Unix Makefiles','Ninja'))
+                if mode=='missing':record.unlink()
+                if mode=='duplicate':
+                    other=files.parent/'other';other.mkdir();(other/record.name).write_bytes(record.read_bytes())
+                with patch.object(profile.subprocess,'check_output',side_effect=self.version):
+                    with self.assertRaises(RuntimeError):profile.verify_build_profile(args)
+                self.assertTrue((args.root/'evidence/candidate/profile-prebuild/CMakeCache.txt').is_file())
+
+    def test_actual_version_still_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args,_,_,_=self.fixture(Path(tmp))
+            with patch.object(profile.subprocess,'check_output',return_value=b'clang version 17.0.7\n'):
+                with self.assertRaisesRegex(RuntimeError,'Actual compiler'):profile.verify_build_profile(args)
+
+    def test_compile_commands_with_and_without_known_launcher(self):
+        for launcher in (False,True):
+            with tempfile.TemporaryDirectory() as tmp:
+                args,build,_,rows=self.fixture(Path(tmp))
+                if launcher:
+                    with (build/'CMakeCache.txt').open('a') as f:f.write('OB_COMPILE_EXECUTABLE:FILEPATH=/trusted/ob-compile\n')
+                    for row in rows:row['command']='/trusted/ob-compile '+row['command']
+                    (build/'compile_commands.json').write_text(json.dumps(rows))
+                with patch.object(profile.subprocess,'check_output',side_effect=self.version):profile.verify_build_profile(args)
+
+    def test_command_uses_other_compiler_or_loses_affected_unit(self):
+        for mode in ('compiler','missing','duplicate'):
+            with tempfile.TemporaryDirectory() as tmp:
+                args,build,_,rows=self.fixture(Path(tmp))
+                if mode=='compiler':rows[1]['command']='/other/compiler -c '+rows[1]['file']
+                if mode=='missing':rows=rows[:1]
+                if mode=='duplicate':rows.append(rows[1])
+                (build/'compile_commands.json').write_text(json.dumps(rows))
+                with patch.object(profile.subprocess,'check_output',side_effect=self.version):
+                    with self.assertRaises(RuntimeError):profile.verify_build_profile(args)
+
+    def test_large_command_database_saved_only_as_hash_and_selected_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args,build,_,rows=self.fixture(Path(tmp));rows[0]['irrelevantPadding']='x'*(9*1024**2)
+            (build/'compile_commands.json').write_text(json.dumps(rows))
+            with patch.object(profile.subprocess,'check_output',side_effect=self.version):profile.verify_build_profile(args)
+            out=args.root/'evidence/candidate/profile-prebuild'
+            self.assertFalse((out/'compile_commands.json').exists())
+            proof=out/'compile-commands-proof.json'
+            self.assertLess(proof.stat().st_size,1024**2)
+            self.assertEqual(json.loads(proof.read_text())['bytes'],(build/'compile_commands.json').stat().st_size)
+
+    def test_snapshot_rejects_profile_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args,_,files,_=self.fixture(Path(tmp))
+            with patch.object(profile.subprocess,'check_output',side_effect=self.version):
+                profile.verify_build_profile(args)
+                with (files/'CMakeCCompiler.cmake').open('a') as f:f.write('# changed generated record\n')
+                args.phase='snapshot'
+                with self.assertRaisesRegex(RuntimeError,'changed since prebuild'):profile.verify_build_profile(args)
+
+    def test_collector_preserves_whitelisted_profile_files_in_full(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'root';out=root/'evidence/candidate/profile-prebuild';out.mkdir(parents=True)
+            (root/'report.json').write_text('{"status":"failed_or_blocked"}')
+            raw=b'# full cache evidence\n'*20000
+            (out/'CMakeCache.txt').write_bytes(raw)
+            (out/'CMakeCCompiler.cmake').write_bytes(b'set(CMAKE_C_COMPILER "/compiler")\n')
+            destination=Path(tmp)/'collected';driver.collect(argparse.Namespace(root=root,out=destination))
+            with tarfile.open(destination/'evidence.tar.gz','r:gz') as tar:
+                self.assertEqual(tar.extractfile('evidence/candidate/profile-prebuild/CMakeCache.txt').read(),raw)
+                self.assertIsNotNone(tar.extractfile('evidence/candidate/profile-prebuild/CMakeCCompiler.cmake'))
+
 
 
 if __name__=='__main__':
