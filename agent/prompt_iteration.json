@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "synthetic": false,
+  "scope": "MiniVectorDB Agent Prompt iteration history. Each version adds only rules that a real failure or a real misjudgement forced. The assistant wrote and ran the implementation, the validation and the experiments; the single student technical judgement is attributed separately in conversation.json.",
+  "artifact": "agent/AGENT_PROMPT.md",
+  "versions": [
+    {
+      "id": "v1",
+      "title": "读题包先于写代码",
+      "date": "2026-11-09",
+      "rules_added": [
+        "动手前读完 mysqltest/README.md、STDIO_PROTOCOL.md、mysqltest/manifest.json 与全部 cases/*.test、*.result",
+        "把题包「正式验收要求仍然公开」逐条抄成可勾选清单，先有清单再写代码",
+        "禁止预存样例答案，禁止按用例 id / 表名 / 行数做特判"
+      ],
+      "trigger": {
+        "kind": "specification",
+        "detail": "题包明确写明「请实现正常执行与错误处理，而非预存样例答案」，并区分公开样例与正式准入。"
+      },
+      "evidence": [
+        "mysqltest/README.md",
+        "mysqltest/manifest.json"
+      ]
+    },
+    {
+      "id": "v2",
+      "title": "失败语句整条不生效",
+      "date": "2026-11-11",
+      "rules_added": [
+        "多行 INSERT / UPDATE / DELETE 中任何一行出错，整条语句的行级改动全部撤销",
+        "显式事务中该语句之前的成功修改仍可提交或回滚",
+        "自动提交模式下失败语句的行既不留在表里也不进入 WAL",
+        "原子性要分自动提交、显式事务中、崩溃之后三种情况分别验证"
+      ],
+      "trigger": {
+        "kind": "defect_found_by_differential_run",
+        "detail": "用组织方未修改的 protocol_check/run.py 与 _assertions.py 驱动另一套独立实现时，transaction_failed_insert 报出 rows: [[1], [2], [3], [4]] != [[1], [2], [3]]；失败的多行 INSERT 把前一行留在了表里。",
+        "failure_class": "atomicity"
+      },
+      "evidence": [
+        "agent/verification/python_public_check.cases.json",
+        "reference implementation: minivectordb/storage/engine.py Engine.rollback_to_savepoint",
+        "reference implementation tests: test_failed_multi_row_insert_leaves_no_rows"
+      ],
+      "student_involvement": "The defect was found and fixed by the assistant. No additional student explanation is claimed."
+    },
+    {
+      "id": "v3",
+      "title": "公开用例通过不等于正式准入",
+      "date": "2026-11-09",
+      "rules_added": [
+        "公开 20 组用例只是回归基线；正式验收 29 个用例，组织方另保留 9 个用例的输入与操作序列",
+        "题包正文里有、公开用例没覆盖的功能要求照样要实现",
+        "失败响应的 error.code 必须是稳定的语义名，不能是随手写的措辞"
+      ],
+      "trigger": {
+        "kind": "specification",
+        "detail": "题包写明「公开样例通过不代表完整功能准入通过」「隐藏的是测试数据，而非功能要求」。"
+      },
+      "evidence": [
+        "mysqltest/README.md",
+        "protocol_check/config.json"
+      ]
+    },
+    {
+      "id": "v4",
+      "title": "协议以判题器实际行为为准",
+      "date": "2026-11-10",
+      "rules_added": [
+        "启动完成恢复后主动输出一行 {\"type\":\"ready\"} 并 flush，且必须在等待第一条请求之前输出",
+        "每个请求恰好一个响应，原样回传请求 id（含 JSON 类型），ok 必须是 JSON 布尔值",
+        "每条输出一个物理行并立即 flush；stdout 只有协议报文，日志写 stderr",
+        "不得把整行 JSON 当 SQL，不得用分号切原始输入",
+        "shutdown 响应之后 stdout 不得再有任何内容，退出码 0",
+        "Docker 默认入口就是 stdin/stdout 模式，不依赖判题器补传私有参数"
+      ],
+      "trigger": {
+        "kind": "wrong_own_protocol",
+        "detail": "自研的 development stdio 协议在正式协议面前是错的：握手对象不匹配、请求是 SQL 文本而不是 JSON、响应字段名不同。"
+      },
+      "evidence": [
+        "STDIO_PROTOCOL.md",
+        "63055c809",
+        "5247fd706",
+        "e4c8c178c",
+        "ci:42819609767"
+      ],
+      "source_commit": "e4c8c178c64799177d2f8e958d32a6648817e2a8",
+      "ci_run": {
+        "id": 42819609767,
+        "conclusion": "success",
+        "head_sha": "e4c8c178c64799177d2f8e958d32a6648817e2a8"
+      }
+    },
+    {
+      "id": "v5",
+      "title": "数值序列化必须字节级一致",
+      "date": "2026-11-09",
+      "rules_added": [
+        "浮点输出用 std::to_chars 的 17 位有效数字与固定 64 字节缓冲",
+        "覆盖有符号零、次正规数、数值极值与 BIGINT 边界的字节回归",
+        "BIGINT 走 JSON 整数，不能转字符串也不能经浮点丢精度"
+      ],
+      "trigger": {
+        "kind": "defect",
+        "detail": "浮点输出格式与判题器的字节结果不一致；同一程序自身的噪声必须先被测量出来，否则无法区分格式差异与运行噪声。"
+      },
+      "evidence": [
+        "a33ea6e05",
+        "ci:42618083030",
+        "tests/serialization_comparison.py",
+        "tests/serialization_tests.cpp"
+      ],
+      "source_commit": "a33ea6e05f2e5936fe5770ed0624cbbe410fb9cc",
+      "ci_run": {
+        "id": 42618083030,
+        "conclusion": "success",
+        "head_sha": "a33ea6e05f2e5936fe5770ed0624cbbe410fb9cc"
+      }
+    },
+    {
+      "id": "v6",
+      "title": "位置化文件读与异常读单独验证",
+      "date": "2026-11-09",
+      "rules_added": [
+        "文件读使用原生位置化操作，不用流式读取的隐式偏移",
+        "短读、立即读、超过 4 GiB 的偏移、Linux 上的中断读要单独覆盖",
+        "文件 IO 测试作为独立主翻译单元编译，避免警告降级"
+      ],
+      "trigger": {
+        "kind": "risk_area",
+        "detail": "偏移越界、短读与中断读会让精确 TopK 在大数据量下返回错结果，而且不会在小样本上暴露。"
+      },
+      "evidence": [
+        "b222024f7",
+        "d033d2fd2",
+        "ci:42600565765",
+        "tests/file_io_tests.cpp"
+      ],
+      "source_commit": "d033d2fd2fb74d46dcec552d25ea98e92145fc22",
+      "ci_run": {
+        "id": 42600565765,
+        "conclusion": "success",
+        "head_sha": "d033d2fd2fb74d46dcec552d25ea98e92145fc22"
+      }
+    },
+    {
+      "id": "v7",
+      "title": "索引维护不得破坏事务语义",
+      "date": "2026-11-09",
+      "rules_added": [
+        "索引页、行页与目录改动共用同一套页事务、语句保存点、空闲页链表与 redo WAL",
+        "插入、更新、删除立即维护索引，包括替换整行记录页的普通列更新",
+        "新建索引的发布必须是原子的，索引构建过程中崩溃不能留下半成品",
+        "ANN 检索必须满足过滤、有效 ID、无重复与题包规定的召回率"
+      ],
+      "trigger": {
+        "kind": "independent_failure_surface",
+        "detail": "索引与事务是两个独立的失效面：索引页写坏了会直接破坏事务语义，而公开小样本用例不覆盖这一点。"
+      },
+      "evidence": [
+        "e5b5c83e1",
+        "ci:42611519248",
+        "tests/vector_index_tests.cpp",
+        "tests/index_build_recovery.py"
+      ],
+      "source_commit": "e5b5c83e1bb1edd52ecda1b4192df4839cc05be9",
+      "ci_run": {
+        "id": 42611519248,
+        "conclusion": "success",
+        "head_sha": "e5b5c83e1bb1edd52ecda1b4192df4839cc05be9"
+      }
+    }
+  ],
+  "cross_implementation_differential": {
+    "date": "2026-11-11",
+    "what": "The organizer's own protocol_check/run.py and _assertions.py, plus the unmodified public fixture package, were used to drive a second, independent implementation (the local Python reference implementation). Only the process transport was adapted, because the packaged transport selects on pipes with select(), which does not work on Windows; the driver, the assertions, the fixture package and the comparison parameters are unchanged.",
+    "first_run": {
+      "passed_cases": 14,
+      "total_cases": 20,
+      "console_output": "verification/python_public_check.first_run.txt",
+      "failures": [
+        {
+          "case": "vector_euclidean",
+          "cause": "L2_DISTANCE (the fixture dialect name) was not implemented"
+        },
+        {
+          "case": "storage_mutations",
+          "cause": "L2_DISTANCE was not implemented"
+        },
+        {
+          "case": "vector_ties_and_filter",
+          "cause": "L2_DISTANCE was not implemented"
+        },
+        {
+          "case": "vector_float32",
+          "cause": "L2_DISTANCE was not implemented"
+        },
+        {
+          "case": "transaction_failed_insert",
+          "cause": "real atomicity defect: a failed multi-row INSERT left the earlier row behind"
+        },
+        {
+          "case": "vector_index_maintenance",
+          "cause": "CREATE VECTOR INDEX is not implemented in the local reference implementation"
+        }
+      ]
+    },
+    "after_fixes": {
+      "passed_cases": 19,
+      "total_cases": 20,
+      "remaining_failure": "vector_index_maintenance",
+      "remaining_failure_reason": "The local reference implementation deliberately implements exact TopK only; approximate indexing is declared out of contract in SPEC-006. The submitted implementation covers it and is verified by ci:42611519248 and ci:42819609767."
+    },
+    "secondary_findings": [
+      {
+        "id": "case-passed-for-the-wrong-reason",
+        "detail": "sql_unsupported expects ALTER TABLE to fail. The local implementation failed it only because the executor had no ALTER branch at all, while its own SPEC-006 claimed ALTER TABLE support. The requirement was corrected and the rejection is now explicit.",
+        "lesson": "A green assertion and a broken specification can coexist; reading only the assertion result hides the mismatch."
+      },
+      {
+        "id": "stale-verification",
+        "detail": "The reference test test_topk_works_without_numpy blocked numpy with the find_module import hook, which Python 3.12 removed. On 3.12 numpy was never blocked, so the pure-Python fallback path was no longer being verified while the test stayed green.",
+        "lesson": "A green test can also have stopped checking what it claims to check."
+      }
+    ],
+    "student_involvement": "The differential run, the fixes and the re-verification were performed by the assistant. No additional student experiment or explanation is claimed."
+  },
+  "limitations": [
+    "The public fixture package covers 20 of the 29 formal cases. Formal acceptance is the organizer's judgement and is not claimed here.",
+    "The contest branch CI runs execute the organizer's unchanged protocol_check/run.py inside the built image; the local differential run drives a different implementation on Windows with an adapted transport layer.",
+    "Performance scores were not measured in this material and are not claimed.",
+    "Only the quoted student explanation of filter-first TopK is evidence of student understanding; implementation, validation and fixes were performed by the assistant or coordinated automated execution.",
+    "No credentials, account information, private endpoints or local absolute paths are included in this material."
+  ]
+}
+

@@ -1,0 +1,30 @@
+sql_crud: PASS 
+sql_comparisons: PASS 
+sql_ordering: PASS 
+sql_empty: PASS 
+sql_primary_key: PASS 
+sql_unicode: PASS 
+sql_bigint: PASS 
+sql_unsupported: PASS 
+storage_restart: PASS 
+vector_euclidean: FAIL line 3: SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs ORDER BY distance LIMIT 1;: statement failed: {'id': 3, 'ok': False, 'error': {'code': 'unsupported_sql', 'message': 'Unsupported function: L2_DISTANCE'}}
+transaction_commit: PASS 
+transaction_rollback: PASS 
+storage_mutations: FAIL line 7: SELECT id, L2_DISTANCE(embedding, '[0, 0]') AS distance FROM docs ORDER BY distance LIMIT 10;: statement failed: {'id': 7, 'ok': False, 'error': {'code': 'unsupported_sql', 'message': 'Unsupported function: L2_DISTANCE'}}
+storage_multiple_tables: PASS 
+vector_ties_and_filter: FAIL line 3: SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 1;: statement failed: {'id': 3, 'ok': False, 'error': {'code': 'unsupported_sql', 'message': 'Unsupported function: L2_DISTANCE'}}
+vector_float32: FAIL line 3: SELECT id, L2_DISTANCE(embedding, '[16777216,0]') AS distance FROM docs ORDER BY distance LIMIT 2;: statement failed: {'id': 3, 'ok': False, 'error': {'code': 'unsupported_sql', 'message': 'Unsupported function: L2_DISTANCE'}}
+vector_index_maintenance: FAIL line 3: CREATE VECTOR INDEX docs_vec ON docs(embedding);: statement failed: {'id': 3, 'ok': False, 'error': {'code': 'unsupported_sql', 'message': 'Only CREATE TABLE is supported'}}
+transaction_failed_insert: FAIL line 6: SELECT id FROM docs ORDER BY id;: rows: [[1], [2], [3], [4]] != [[1], [2], [3]]
+transaction_autocommit_atomic: PASS 
+transaction_shutdown_rollback: PASS 
+Report: <输出目录>/result.json
+EXIT=1
+
+本文件是首轮差分的原始控制台输出（14 PASS / 6 FAIL），逐字记录。
+运行环境：Windows / Python 3.12.14 / PYTHONUTF8=1，
+驱动为组织方未修改的 protocol_check/run.py + _assertions.py，
+题包为 2026-competition-round2 的 mysqltest/。
+
+其中 transaction_failed_insert 一行是真实的原子性缺陷：
+失败的多行 INSERT 把前一行留在了表里。
