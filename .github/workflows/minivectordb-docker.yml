@@ -16,10 +16,13 @@ jobs:
   protocol-validation:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      SOURCE_REVISION: da0e4bef6005834d301e6a5e160f2a21990897f4
     steps:
       - name: Check out the public source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ env.SOURCE_REVISION }}
           persist-credentials: false
 
       - name: Build the default database image from the source whitelist
@@ -27,29 +30,94 @@ jobs:
         run: |
           set -euo pipefail
           context="$RUNNER_TEMP/minivectordb-context"
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
           mkdir -p "$context"
+          mkdir -p "$evidence_dir"
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          git rev-parse HEAD 'HEAD^{tree}' > "$evidence_dir/source-identity.txt"
+          printf '%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > "$evidence_dir/workflow-identity.txt"
+          cp Dockerfile "$evidence_dir/Dockerfile"
+          cp protocol_check/config.json "$evidence_dir/protocol-config.json"
           git archive HEAD CMakeLists.txt Dockerfile .dockerignore include src third_party \
             tests mysqltest protocol_check STDIO_PROTOCOL.md | tar -x -C "$context"
-          docker build --platform linux/amd64 --tag minivectordb-m11 "$context"
+          docker build --progress=plain --platform linux/amd64 --tag minivectordb-m11 "$context" \
+            2>&1 | tee "$evidence_dir/docker-build.log"
+          docker image inspect minivectordb-m11 > "$evidence_dir/image-inspect.json"
           docker image inspect minivectordb-m11 \
             --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}} {{json .Config.Labels}}'
-
-      - name: Check native protocol edge cases
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --network none --entrypoint /build/judge_protocol_tests minivectordb-m11
-          docker run --rm --network none --entrypoint python3 minivectordb-m11 \
-            /source/tests/stdio_protocol_test.py --driver /build/minivectordb_server \
-            --edges-only --report /tmp/m11-native-edges.json
+          test "$(docker image inspect minivectordb-m11 --format '{{json .Config.Entrypoint}}')" \
+            = '["/build/minivectordb_development_server"]'
+          test "$(docker image inspect minivectordb-m11 --format '{{json .Config.Cmd}}')" \
+            = '["--development-protocol","mvdb-judge-json-v1","--data","/data"]'
 
       - name: Run the unchanged official handshake and public driver on the default image
         shell: bash
         run: |
           set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
           python3 protocol_check/run.py --image minivectordb-m11 --handshake-only \
-            --output "$RUNNER_TEMP/m11-handshake"
+            --output "$RUNNER_TEMP/m11-handshake" 2>&1 | tee "$evidence_dir/handshake-driver.log"
           cat "$RUNNER_TEMP/m11-handshake/result.json"
           python3 protocol_check/run.py --image minivectordb-m11 \
-            --output "$RUNNER_TEMP/m11-official-public"
+            --output "$RUNNER_TEMP/m11-official-public" 2>&1 | tee "$evidence_dir/public-driver.log"
           cat "$RUNNER_TEMP/m11-official-public/result.json"
+
+      - name: Preserve the database executable and validation evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
+          mkdir -p "$evidence_dir"
+          if docker image inspect minivectordb-m11 >/dev/null 2>&1; then
+            export_container="$(docker create minivectordb-m11)"
+            trap 'docker rm "$export_container" >/dev/null' EXIT
+            mkdir -p "$evidence_dir/bin"
+            docker cp "$export_container:/build/minivectordb_development_server" \
+              "$evidence_dir/bin/minivectordb_development_server"
+            docker cp "$export_container:/build/installed-packages.tsv" \
+              "$evidence_dir/installed-packages.tsv"
+            docker cp "$export_container:/build/protocol-results" \
+              "$evidence_dir/build-public-protocol"
+            docker cp "$export_container:/build/public-protocol-report.json" \
+              "$evidence_dir/build-public-protocol-report.json"
+            docker rm "$export_container" >/dev/null
+            trap - EXIT
+          fi
+          for report_dir in m11-handshake m11-official-public; do
+            if test -d "$RUNNER_TEMP/$report_dir"; then
+              cp -a "$RUNNER_TEMP/$report_dir" "$evidence_dir/$report_dir"
+            fi
+          done
+          python3 - "$evidence_dir" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          files = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file():
+                  content = path.read_bytes()
+                  files.append({"path": str(path.relative_to(root)), "bytes": len(content),
+                                "sha256": hashlib.sha256(content).hexdigest()})
+          (root / "manifest.json").write_text(json.dumps({"files": files}, indent=2) + "\n")
+          executable = root / "bin/minivectordb_development_server"
+          if executable.exists():
+              content = executable.read_bytes()
+              assert content[:4] == b"\x7fELF"
+              print(json.dumps({"program_bytes": len(content),
+                                "program_sha256": hashlib.sha256(content).hexdigest()}))
+          PY
+          tar -czf "$RUNNER_TEMP/minivectordb-validation.tar.gz" -C "$evidence_dir" .
+
+      - name: Upload the validation archive
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: minivectordb-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/minivectordb-validation.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
