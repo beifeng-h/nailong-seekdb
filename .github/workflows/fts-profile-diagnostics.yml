@@ -1,0 +1,96 @@
+name: SeekDB FTS profiling diagnostics
+
+on:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: seekdb-fts-profile-diagnostics-20261111
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      LC_ALL: C
+      LANG: C
+    steps:
+      - name: Initialize this job's isolated output paths and UTC window
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/fts-profile-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$work" && test ! -L "$work"
+          mkdir -m 0700 "$work"
+          mkdir -m 0700 "$work/evidence" "$work/downloads"
+          {
+            printf 'PROFILE_WORK_ROOT=%s\n' "$work"
+            printf 'PROFILE_JOB_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout the exact diagnostic source directory
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/script/seekdb/fts-profile-runtime
+          sparse-checkout-cone-mode: false
+
+      - name: Install documented runtime and profiling prerequisites
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libaio1t64 binutils python3 linux-tools-common linux-tools-generic
+
+      - name: Download the exact original baseline ZIP
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 10
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42797329842'
+          artifact-ids: '13757273442'
+          github-token: ${{ github.token }}
+          path: ${{ env.PROFILE_WORK_ROOT }}/downloads/baseline
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download the exact candidate ZIP
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 10
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42953505169'
+          artifact-ids: '13828533821'
+          github-token: ${{ github.token }}
+          path: ${{ env.PROFILE_WORK_ROOT }}/downloads/candidate
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Verify pinned inputs and capture the candidate profile
+        timeout-minutes: 80
+        shell: bash
+        run: bash .github/script/seekdb/fts-profile-runtime/ci_profile.sh
+
+      - name: Preserve diagnostic evidence and profiling outputs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fts-profile-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PROFILE_WORK_ROOT }}/evidence/
+            ${{ env.PROFILE_WORK_ROOT }}/profiling/
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 3
+          include-hidden-files: false
