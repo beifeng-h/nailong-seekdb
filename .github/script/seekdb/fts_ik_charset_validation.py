@@ -28,6 +28,35 @@ PRODUCTS = (
 )
 COMPILATION_SOURCES = (PRODUCTS[0], PRODUCTS[3], PRODUCTS[4])
 SCOPE = 'SAME_HOST_IK_CHARSET_DEVELOPMENT_VALIDATION_NOT_FORMAL_CONTEST'
+LONG_SEED_HEX = 'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A08220'
+LONG_REPETITIONS = 128
+LONG_INPUT = bytes.fromhex(LONG_SEED_HEX) * LONG_REPETITIONS
+LONG_UTF8_LITERAL = "_utf8mb4 X'" + LONG_INPUT.hex().upper() + "' COLLATE utf8mb4_general_ci"
+SHORT_INPUT = bytes.fromhex(LONG_SEED_HEX) * 40
+SHORT_UTF8_LITERAL = "_utf8mb4 X'" + SHORT_INPUT.hex().upper() + "' COLLATE utf8mb4_general_ci"
+LONG_REPEAT = f"REPEAT(_utf8mb4 X'{LONG_SEED_HEX}', {LONG_REPETITIONS})"
+SHORT_REPEAT = f"REPEAT(_utf8mb4 X'{LONG_SEED_HEX}', 40)"
+CAST_LONG_REPEAT = f'CAST({LONG_REPEAT} AS CHAR(5000) CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci'
+SMART_PROPERTIES = '[{"additional_args":[{"ik_mode":"smart"}]}]'
+MAX_WORD_PROPERTIES = '[{"additional_args":[{"ik_mode":"max_word"}]}]'
+
+LONG_INPUT_PROBES = (
+    ('repeat-below-batch-smart', f"SELECT TOKENIZE({SHORT_REPEAT}, 'ik', '{SMART_PROPERTIES}');"),
+    ('literal-below-batch-smart', f"SELECT TOKENIZE({SHORT_UTF8_LITERAL}, 'ik', '{SMART_PROPERTIES}');"),
+    ('literal-long-smart', f"SELECT TOKENIZE({LONG_UTF8_LITERAL}, 'ik', '{SMART_PROPERTIES}');"),
+    ('cast-repeat-long-smart', f"SELECT TOKENIZE({CAST_LONG_REPEAT}, 'ik', '{SMART_PROPERTIES}');"),
+)
+REPEAT_SQL_CASES = (
+    ('repeat-long-smart', f"SELECT TOKENIZE({LONG_REPEAT}, 'ik', '{SMART_PROPERTIES}');"),
+    ('repeat-long-max-word', f"SELECT TOKENIZE({LONG_REPEAT}, 'ik', '{MAX_WORD_PROPERTIES}');"),
+)
+METADATA_CASE_NAME = 'long-input-metadata'
+METADATA_SQL = f"""SELECT 'ik-long-input-metadata',
+CHAR_LENGTH({LONG_REPEAT}), OCTET_LENGTH({LONG_REPEAT}), COLLATION({LONG_REPEAT}),
+HEX({LONG_REPEAT}) = '{LONG_INPUT.hex().upper()}',
+CHAR_LENGTH({CAST_LONG_REPEAT}), OCTET_LENGTH({CAST_LONG_REPEAT}), COLLATION({CAST_LONG_REPEAT}),
+HEX({CAST_LONG_REPEAT}) = '{LONG_INPUT.hex().upper()}';
+"""
 
 # The first TOKENIZE argument retains its collation in type deduction. Wide
 # charset cases capture the actual SQL outcome, including unsupported charsets.
@@ -39,14 +68,14 @@ SELECT 'ik_utf8', TOKENIZE(_utf8mb4 X'E4B8ADE69687412D3132F09F9880' COLLATE utf8
 SELECT 'ik_embedded_nul', TOKENIZE(_utf8mb4 X'E4B8AD00410031' COLLATE utf8mb4_bin, 'ik');
 SELECT 'ik_smart', TOKENIZE(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
 SELECT 'ik_max_word', TOKENIZE(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
-SELECT 'ik_long_smart', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A08220', 128), 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
-SELECT 'ik_long_max_word', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A08220', 128), 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+SELECT 'ik_long_smart', TOKENIZE(__LONG_UTF8_LITERAL__, 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
+SELECT 'ik_long_max_word', TOKENIZE(__LONG_UTF8_LITERAL__, 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
 SET NAMES utf8mb4 COLLATE utf8mb4_bin;
 SELECT 'ik_binary_session', TOKENIZE(_utf8mb4 X'E4B8ADE69687412D3132F09F9880', 'ik');
 SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
 SELECT 'ik_repeated_utf8', TOKENIZE(_utf8mb4 X'E4B8ADE69687412D3132F09F9880' COLLATE utf8mb4_general_ci, 'ik');
 SELECT 'ik_repeated_smart', TOKENIZE(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
-"""
+""".replace('__LONG_UTF8_LITERAL__', LONG_UTF8_LITERAL)
 WIDE_SQL_CASES = (
     ('utf16-valid', "SELECT TOKENIZE(_utf16 X'4E2D65870041002D00310032D83DDE00' COLLATE utf16_general_ci, 'ik');"),
     ('utf16le-valid', "SELECT TOKENIZE(_utf16le X'2D4E876541002D00310032003DD800DE' COLLATE utf16le_general_ci, 'ik');"),
@@ -240,15 +269,10 @@ _equality_work = parent.equality_work
 
 
 def equality_work(call, out):
-    collation = _equality_work(call, out)
-    raw = driver.sql(call, out, 'ik-charset', IK_SQL)
-    rows = [line.split('\t') for line in raw.splitlines()]
-    labels = re.findall(r"^SELECT '([^']+)'", IK_SQL, re.M)
-    driver.require(len(rows) == len(labels) and [row[0] for row in rows] == labels
-                   and all(len(row) == 2 for row in rows), 'Incomplete IK charset parity output')
-    output = (out / 'ik-charset.log').read_bytes()
     outcomes = []
-    for name, query in WIDE_SQL_CASES + MALFORMED_SQL + BOUNDARY_SQL_CASES:
+    cases = (LONG_INPUT_PROBES + REPEAT_SQL_CASES + ((METADATA_CASE_NAME, METADATA_SQL),)
+             + WIDE_SQL_CASES + MALFORMED_SQL + BOUNDARY_SQL_CASES)
+    for name, query in cases:
         text = common.SESSION + query + '\n'
         label = 'ik-charset-case-' + name
         (out / (label + '.sql')).write_text(text, encoding='utf-8')
@@ -272,11 +296,34 @@ def equality_work(call, out):
                              unsupportedMessage=bool(re.search(
                                  rb'not supported|unsupported|unknown character set|unknown collation', data, re.I)),
                              outputSha256=hashlib.sha256(data).hexdigest()))
+    diagnostics = dict(outcomes=outcomes, metadataVerified=False, inputBytes=len(LONG_INPUT),
+                       inputCharacters=len(LONG_INPUT.decode('utf-8')), repetitions=LONG_REPETITIONS)
+    driver.dump(out / 'ik-input-diagnostics.json', diagnostics)
+    metadata = next(row for row in outcomes if row['name'] == METADATA_CASE_NAME)
+    driver.require(metadata['exitCode'] == 0, 'REPEAT metadata SQL must execute successfully')
+    fields = bytes.fromhex(metadata['output']).decode('utf-8').strip().split('\t')
+    driver.require(len(fields) == 9 and fields[0] == 'ik-long-input-metadata',
+                   'Incomplete REPEAT metadata output')
+    counts = [str(len(LONG_INPUT.decode('utf-8'))), str(len(LONG_INPUT)), '1']
+    driver.require([fields[index] for index in (1, 2, 4, 5, 6, 8)] == counts + counts,
+                   'REPEAT or CAST payload differs from the generated long literal')
+    diagnostics['metadataVerified'] = True
+    driver.dump(out / 'ik-input-diagnostics.json', diagnostics)
+    collation = _equality_work(call, out)
+    raw = driver.sql(call, out, 'ik-charset', IK_SQL)
+    rows = [line.split('\t') for line in raw.splitlines()]
+    labels = re.findall(r"^SELECT '([^']+)'", IK_SQL, re.M)
+    driver.require(len(rows) == len(labels) and [row[0] for row in rows] == labels
+                   and all(len(row) == 2 for row in rows), 'Incomplete IK charset parity output')
+    output = (out / 'ik-charset.log').read_bytes()
     canonical = dict(collation=collation['canonical'], ikOutput=output.hex(), sqlOutcomes=outcomes)
     encoded = json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode()
     return dict(passed=True, canonical=encoded.hex(), outputSha256=hashlib.sha256(encoded).hexdigest(),
                 cs45=collation, ikOutputBytes=len(output), ikOutputSha256=hashlib.sha256(output).hexdigest(),
                 ikSqlSha256=hashlib.sha256(IK_SQL.encode()).hexdigest(), charsetOutcomes=outcomes,
+                longInputMetadata=dict(characters=int(fields[1]), bytes=int(fields[2]), collation=fields[3],
+                                       castCharacters=int(fields[5]), castBytes=int(fields[6]), castCollation=fields[7],
+                                       repeatHexMatchesLiteral=True, castHexMatchesLiteral=True),
                 repeatedCallsShareConnection=True, requiredSuccessInputCharset='utf8mb4',
                 capturedInputCharsets=['utf8mb4', 'utf16', 'utf16le'],
                 capturedBoundaryCases=[name for name, _ in BOUNDARY_SQL_CASES])
