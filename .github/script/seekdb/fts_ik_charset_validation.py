@@ -31,15 +31,16 @@ SCOPE = 'SAME_HOST_IK_CHARSET_DEVELOPMENT_VALIDATION_NOT_FORMAL_CONTEST'
 
 # The first TOKENIZE argument retains its collation in type deduction. Wide
 # charset cases capture the actual SQL outcome, including unsupported charsets.
+# Long input includes ASCII spaces so the parser can split batches.
 IK_SQL = """SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
-SELECT 'ik_null', TOKENIZE(NULL, 'ik');
-SELECT 'ik_empty', TOKENIZE('', 'ik');
+SELECT 'ik_typed_null', TOKENIZE(CAST(NULL AS CHAR CHARACTER SET utf8mb4) COLLATE utf8mb4_general_ci, 'ik');
+SELECT 'ik_empty', TOKENIZE(_utf8mb4 '' COLLATE utf8mb4_general_ci, 'ik');
 SELECT 'ik_utf8', TOKENIZE(_utf8mb4 X'E4B8ADE69687412D3132F09F9880' COLLATE utf8mb4_general_ci, 'ik');
 SELECT 'ik_embedded_nul', TOKENIZE(_utf8mb4 X'E4B8AD00410031' COLLATE utf8mb4_bin, 'ik');
 SELECT 'ik_smart', TOKENIZE(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
 SELECT 'ik_max_word', TOKENIZE(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
-SELECT 'ik_long_smart', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 128), 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
-SELECT 'ik_long_max_word', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A082', 128), 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
+SELECT 'ik_long_smart', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A08220', 128), 'ik', '[{"additional_args":[{"ik_mode":"smart"}]}]');
+SELECT 'ik_long_max_word', TOKENIZE(REPEAT(_utf8mb4 X'E4B8ADE58D8EE4BABAE6B091E585B1E5928CE59BBDE4BABAE6B091E5A4A7E4BC9AE5A08220', 128), 'ik', '[{"additional_args":[{"ik_mode":"max_word"}]}]');
 SET NAMES utf8mb4 COLLATE utf8mb4_bin;
 SELECT 'ik_binary_session', TOKENIZE(_utf8mb4 X'E4B8ADE69687412D3132F09F9880', 'ik');
 SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
@@ -59,6 +60,10 @@ MALFORMED_SQL = (
     ('utf16-unpaired', "SELECT TOKENIZE(_utf16 X'D8000041', 'ik');"),
     ('utf16le-odd', "SELECT TOKENIZE(_utf16le X'410000', 'ik');"),
     ('utf16le-unpaired', "SELECT TOKENIZE(_utf16le X'00D84100', 'ik');"),
+)
+# Raw SQL NULL retains binary metadata during dictionary selection.
+BOUNDARY_SQL_CASES = (
+    ('null-binary-input', "SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;\nSELECT TOKENIZE(NULL, 'ik');"),
 )
 
 
@@ -205,12 +210,30 @@ def build_profile(args):
                                     sha256=common.digest(path), compileCommand=row)
     driver.dump(directory / 'ik-compilation-proof.json', dict(passed=True, signature=signature))
     if args.phase == 'snapshot':
-        for record in objects.values():
-            if set(record['compilationSources']) & set(COMPILATION_SOURCES[1:]):
-                record['headerDependencies'] = dependency_record(Path(record['path']), record['compileCommand'], args.source)
         driver.dump(args.root / 'evidence/candidate/affected-ik-objects.json',
                     dict(objects=list(objects.values()), sourceToObject=source_objects))
     return settings, rust
+
+
+def verify_header_dependencies(args):
+    snapshot = args.root / 'evidence/candidate/affected-ik-objects.json'
+    affected = json.loads(snapshot.read_text())
+    proof = dict(phase='validate', snapshotSha256=common.digest(snapshot), passed=False, objects=[])
+    required = set(COMPILATION_SOURCES[1:])
+    covered = set()
+    try:
+        for record in affected['objects']:
+            sources = set(record['compilationSources']) & required
+            if sources:
+                proof['checkingObject'] = record['path']
+                dependencies = dependency_record(Path(record['path']), record['compileCommand'], args.source)
+                proof['objects'].append(dict(compilationSources=sorted(sources), path=record['path'],
+                                             objectSha256=record['sha256'], headerDependencies=dependencies))
+                covered.update(sources)
+        driver.require(covered == required, 'Header dependency proof must cover both IK compilation sources')
+        proof['passed'] = True
+    finally:
+        driver.dump(args.root / 'evidence/candidate/ik-header-dependencies.json', proof)
 
 
 _equality_work = parent.equality_work
@@ -225,7 +248,7 @@ def equality_work(call, out):
                    and all(len(row) == 2 for row in rows), 'Incomplete IK charset parity output')
     output = (out / 'ik-charset.log').read_bytes()
     outcomes = []
-    for name, query in WIDE_SQL_CASES + MALFORMED_SQL:
+    for name, query in WIDE_SQL_CASES + MALFORMED_SQL + BOUNDARY_SQL_CASES:
         text = common.SESSION + query + '\n'
         label = 'ik-charset-case-' + name
         (out / (label + '.sql')).write_text(text, encoding='utf-8')
@@ -255,7 +278,8 @@ def equality_work(call, out):
                 cs45=collation, ikOutputBytes=len(output), ikOutputSha256=hashlib.sha256(output).hexdigest(),
                 ikSqlSha256=hashlib.sha256(IK_SQL.encode()).hexdigest(), charsetOutcomes=outcomes,
                 repeatedCallsShareConnection=True, requiredSuccessInputCharset='utf8mb4',
-                capturedInputCharsets=['utf8mb4', 'utf16', 'utf16le'])
+                capturedInputCharsets=['utf8mb4', 'utf16', 'utf16le'],
+                capturedBoundaryCases=[name for name, _ in BOUNDARY_SQL_CASES])
 
 
 _prebuild = parent.prebuild
@@ -281,6 +305,7 @@ _validate = parent.validate
 
 
 def validate(args):
+    verify_header_dependencies(args)
     _validate(args)
     report = json.loads((args.root / 'report.json').read_text())
     preflight = report['targeted']['baseline']['ikCharsetPreflight']
