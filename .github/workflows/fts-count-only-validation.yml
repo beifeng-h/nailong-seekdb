@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
+      COUNT_BASELINE_DIAGNOSTICS_ONLY: '1'
       CARGO_BUILD_JOBS: '2'
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       GIT_TERMINAL_PROMPT: '0'
@@ -221,6 +222,7 @@ jobs:
             --source "$GITHUB_WORKSPACE" --root "$COUNT_ONLY_ROOT" --driver-sha "$GITHUB_SHA"
 
       - name: Build the complete candidate once with the original two-job profile
+        if: ${{ env.COUNT_BASELINE_DIAGNOSTICS_ONLY != '1' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -236,6 +238,7 @@ jobs:
             --out "$COUNT_ONLY_CANDIDATE_OUT"
 
       - name: Preserve the full candidate before SQL validation
+        if: ${{ env.COUNT_BASELINE_DIAGNOSTICS_ONLY != '1' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fts-count-only-candidate-${{ github.sha }}
@@ -246,6 +249,7 @@ jobs:
           include-hidden-files: false
 
       - name: Validate native SQL and original nine-metric ABBA
+        if: ${{ env.COUNT_BASELINE_DIAGNOSTICS_ONLY != '1' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -301,6 +305,7 @@ jobs:
               'originalBenchmarkScorerRun', 'formalContestRun', 'baselineRebuilt', 'limitations',
               'validationScope', 'baselineCountPreflightPassed', 'countOnlySqlParityPassed',
               'countOnlyPlanProofPassed',
+              'diagnosticOnly', 'candidateBuildAttempted', 'baselineDiagnostics',
           ) if key in report}
           print('COUNT_ONLY_VISIBLE_RESULT', json.dumps(visible))
           with open(sys.argv[2], 'a', encoding='utf-8') as summary:
