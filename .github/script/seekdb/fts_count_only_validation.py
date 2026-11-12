@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate COUNT-consumer rewriting against the exact complete b963 ELF."""
+"""Validate COUNT-only unused projection pruning against the complete b963 ELF."""
 import argparse
 from collections import deque
 import datetime
@@ -25,7 +25,7 @@ BASE, BASE_TREE = parent.BASE, parent.BASE_TREE
 REWRITE_CPP = 'src/sql/rewrite/ob_transform_pre_process.cpp'
 REWRITE_HEADER = 'src/sql/rewrite/ob_transform_pre_process.h'
 PRODUCTS = (REWRITE_CPP, REWRITE_HEADER)
-SCOPE = 'SAME_HOST_COUNT_CONSUMER_DEVELOPMENT_VALIDATION_NOT_FORMAL_CONTEST'
+SCOPE = 'SAME_HOST_COUNT_ONLY_UNUSED_PROJECTION_PRUNING_DEVELOPMENT_VALIDATION_NOT_FORMAL_CONTEST'
 TABLE = 'fts_count_consumer.docs'
 MATCH = "MATCH(body) AGAINST('database performance audit')"
 
@@ -82,6 +82,14 @@ SCORING_CONTROLS = {
     'count_column': limited_count(2, aggregate='COUNT(nullable_value)', projection='id, nullable_value'),
     'parent_filter': limited_count(40, parent_filter=' WHERE counted.id > 30'),
 }
+PROJECTION_HINTS = (
+    ('child_no_rewrite', 'child', 'NO_REWRITE', True),
+    ('parent_no_rewrite', 'parent', 'NO_REWRITE', True),
+    ('child_no_project_prune', 'child', 'NO_PROJECT_PRUNE', True),
+    ('parent_no_project_prune', 'parent', 'NO_PROJECT_PRUNE', True),
+    ('child_project_prune_no_rewrite', 'child', 'PROJECT_PRUNE NO_REWRITE', False),
+    ('parent_project_prune_no_rewrite', 'parent', 'PROJECT_PRUNE NO_REWRITE', False),
+)
 DIAGNOSTIC_FIXTURES = (
     dict(name='beng_deleted_dense', parser='beng', deleted=True, mixed=False),
     dict(name='beng_dense_no_delete', parser='beng', deleted=False, mixed=False),
@@ -481,7 +489,8 @@ _prepare = parent.prepare
 def prepare(args):
     _prepare(args)
     plan = json.loads((args.root / 'plan.json').read_text())
-    plan.update(scope=SCOPE, candidateFeatures=['count_consumer_filter_only_limit'])
+    plan.update(scope=SCOPE, candidateFeatures=['count_consumer_filter_only_limit',
+                                                'count_only_unused_projection_pruning'])
     driver.dump(args.root / 'plan.json', plan)
     report = json.loads((args.root / 'report.json').read_text())
     report.update(plan=plan, validationScope=SCOPE)
@@ -594,7 +603,7 @@ def verify_header_dependencies(args):
         driver.dump(args.root / 'evidence/candidate/count-header-dependencies.json', proof)
 
 
-def check_count_plan(text, expected_relevance, require_unordered):
+def check_count_plan(text, expected_relevance, require_unordered, expected_index_back=None):
     parsed = common.plan_relevance(text)
     annotations = text.split('Outputs & filters:', 1)[1]
     blocks = list(re.finditer(r'^\s*(\d+)\s+-\s+output\(', annotations, re.M))
@@ -612,7 +621,67 @@ def check_count_plan(text, expected_relevance, require_unordered):
     driver.require(parsed['actualCalcRelevance'] == expected_relevance, 'COUNT-consumer relevance plan mismatch')
     driver.require(not require_unordered or not parsed['hasImplicitSortKeys'],
                    'COUNT-consumer plan retains implicit relevance sorting')
+    if expected_index_back is not None:
+        parsed['expectedIndexBack'] = expected_index_back
+        driver.require(parsed['actualIndexBack'] == expected_index_back,
+                       'COUNT-consumer index-back plan mismatch')
     return parsed
+
+
+def projection_hint_queries():
+    queries = []
+    for name, scope, hint, index_back in PROJECTION_HINTS:
+        query = limited_count(2)
+        if scope == 'child':
+            query = query.replace('(SELECT id ', '(SELECT /*+ ' + hint + ' */ id ', 1)
+        else:
+            query = query.replace('SELECT COUNT(*) ', 'SELECT /*+ ' + hint + ' */ COUNT(*) ', 1)
+        queries.append(dict(name=name, scope=scope, hint=hint, sql=query,
+                            candidateExpectedIndexBack=index_back))
+    return queries
+
+
+def projection_hint_work(call, out, role):
+    identity = matrix_identity(out, role)
+    cases, violations = [], []
+    for case in projection_hint_queries():
+        name, query = case['name'], case['sql']
+        count = diagnostic_sql(call, out, 'count-hint-' + name + '-count', query,
+                               'count', TABLE, 2, name)
+        explain = diagnostic_sql(call, out, 'count-hint-' + name + '-explain', 'EXPLAIN ' + query,
+                                 'explain', TABLE, case_name=name)
+        expected_back = role == 'baseline' or case['candidateExpectedIndexBack']
+        record = dict(case, expectedCount=2, expectedCalcRelevance=role == 'baseline',
+                      expectedIndexBack=expected_back, count=count, explain=explain)
+        cases.append(record)
+        for kind, row in (('count', count), ('explain', explain)):
+            if (row['exitCode'] != 0 or not row['childrenCleaned'] or row['serverErrorCode'] is not None
+                    or row['connectionLost'] or row.get('captureError')):
+                violations.append(dict(caseName=name, kind=kind, reason='Hint control SQL must succeed with a clean client'))
+        if count['observedCount'] != 2:
+            violations.append(dict(caseName=name, kind='count', reason='Hint control COUNT must equal 2'))
+        if explain['exitCode'] == 0:
+            try:
+                record['planVerification'] = check_count_plan(
+                    bytes.fromhex(explain['outputHex']).decode('utf-8'), role == 'baseline',
+                    role == 'candidate', expected_index_back=expected_back)
+            except (RuntimeError, UnicodeError, ValueError, StopIteration) as error:
+                violations.append(dict(caseName=name, kind='explain', reason=str(error)))
+    report = dict(validationScope=SCOPE, role=role, roleIdentity=identity, passed=not violations, caseCount=6, sqlCount=12,
+                  cases=cases, violations=violations, outlineReplayExecuted=False, outlineReplayVerified=False)
+    destination = out / 'count-projection-hint-controls.json'
+    driver.dump(destination, report)
+    driver.require(report['passed'], 'COUNT projection hint controls failed')
+    canonical = json.dumps({case['name']: case['count']['outputHex'] for case in cases},
+                           sort_keys=True, separators=(',', ':')).encode()
+    return dict(passed=True, caseCount=6, sqlCount=12, reportPath=str(destination),
+                reportSha256=common.digest(destination), roleIdentity=identity,
+                canonical=canonical.hex(),
+                outlineReplayExecuted=False, outlineReplayVerified=False,
+                cases=[dict(name=case['name'], expectedCount=2, expectedIndexBack=case['expectedIndexBack'],
+                    countOutputSha256=case['count']['outputSha256'],
+                    explainOutputSha256=case['explain']['outputSha256'], planVerification=case['planVerification'])
+                    for case in cases])
 
 
 _equality_work = parent.equality_work
@@ -636,20 +705,24 @@ def equality_work(call, out):
         label = 'count-plan-' + name
         text = driver.sql(call, out, label, 'EXPLAIN ' + query)
         expected_relevance = name in SCORING_CONTROLS or role == 'baseline'
-        proof = check_count_plan(text, expected_relevance, not expected_relevance)
+        expected_back = False if role == 'candidate' and name in COUNT_PLAN_CASES else None
+        proof = check_count_plan(text, expected_relevance, not expected_relevance,
+                                 expected_index_back=expected_back)
         proof.update(sql=query, sqlSha256=hashlib.sha256(query.encode()).hexdigest(),
                      outputSha256=common.digest(out / (label + '.log')))
         plans[name] = proof
     driver.dump(out / 'count-consumer-plans.json', dict(role=role, passed=True, queries=plans))
+    hint_controls = projection_hint_work(call, out, role)
     matrix = matrix_work(call, out, role, strict=True)
     output = (out / 'count-consumer.log').read_bytes()
-    canonical = json.dumps(dict(collation=collation['canonical'], counts=output.hex()),
+    canonical = json.dumps(dict(collation=collation['canonical'], counts=output.hex(),
+                                hintCounts=hint_controls['canonical']),
                            sort_keys=True, separators=(',', ':')).encode()
     return dict(passed=True, canonical=canonical.hex(), cs45=collation,
                 countOutputBytes=len(output), countOutputSha256=hashlib.sha256(output).hexdigest(),
                 countSqlSha256=hashlib.sha256(COUNT_SQL.encode()).hexdigest(),
                 expectedCounts={name: value for name, (query, value) in COUNT_CASES},
-                countConsumerPlans=plans, countMatrix=matrix)
+                countConsumerPlans=plans, countProjectionHintControls=hint_controls, countMatrix=matrix)
 
 
 def benchmark_callback(args, identities, role, baseline, scorer):
@@ -668,7 +741,8 @@ def benchmark_callback(args, identities, role, baseline, scorer):
         for name, query in common.plan_queries(queries).items():
             text = driver.sql(call, out, name + '-explain', 'EXPLAIN ' + query)
             expected = name in common.PLAN_CONTROLS or (name == 'query_limit' and role == 'baseline')
-            plans[name] = check_count_plan(text, expected, not expected)
+            expected_back = False if role == 'candidate' and name == 'query_limit' else None
+            plans[name] = check_count_plan(text, expected, not expected, expected_index_back=expected_back)
         result['roleConsistentPlans'] = plans
         return result
     return work
@@ -733,8 +807,12 @@ def validate(args):
                 for role in ('baseline', 'candidate')}
     driver.require(matrices['candidate']['newDenseCountExpectedResultsPassed'],
                    'New dense COUNT target results must pass independently')
+    driver.require(all(report['equality'][role]['countProjectionHintControls']['passed']
+                       for role in ('baseline', 'candidate')), 'Both roles must pass projection hint controls')
     report.update(validationScope=SCOPE, baselineCountPreflightPassed=True,
                   countOnlySqlParityPassed=True, countOnlyPlanProofPassed=True, candidateBuildAttempted=True,
+                   countOnlyIndexBackProofPassed=True, projectionHintControlsPassed=True,
+                   performanceOutlineReplayVerified=False,
                   newDenseCountExpectedResultsPassed=True,
                   legacyScoredControlErrors=[row for matrix in matrices.values() for row in matrix['legacyScoredControlErrors']],
                   inheritedBaselineCountErrors=matrices['baseline']['inheritedBaselineCountErrors'],
