@@ -21,6 +21,9 @@ on:
       - .github/workflows/fts-count-only-validation.yml
       - .github/script/seekdb/fts_count_only_validation.py
       - .github/script/seekdb/test_fts_count_only_validation.py
+      - .github/workflows/fts-count-projection-diagnostics.yml
+      - .github/script/seekdb/fts_count_projection_diagnostics.py
+      - .github/script/seekdb/test_fts_count_projection_diagnostics.py
       - src/sql/rewrite/ob_transform_pre_process.cpp
       - src/sql/rewrite/ob_transform_pre_process.h
 
