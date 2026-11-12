@@ -1,16 +1,7 @@
 name: SeekDB IK charset metadata development validation
 
 on:
-  push:
-    branches: [perf/fts-profile-diagnostics-20261111]
-    paths:
-      - src/storage/fts/ik/ob_ik_char_util.h
-      - src/storage/fts/ik/ob_ik_processor.h
-      - src/storage/fts/ik/ob_ik_processor.cpp
-      - src/storage/fts/ik/ob_ik_arbitrator.cpp
-      - .github/script/seekdb/fts_ik_charset_validation.py
-      - .github/script/seekdb/test_fts_ik_charset_validation.py
-      - .github/workflows/fts-ik-charset-validation.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

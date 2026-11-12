@@ -573,11 +573,6 @@ int ObCharset::strcmpsp(ObCollationType collation_type,
   int result = 0;
   if (is_argument_valid(collation_type, str1, str1_len, str2, str2_len)) {
     const ObCharsetInfo *cs = get_charset(collation_type);
-    // Exact byte equality avoids repeated character decoding for utf8mb4_general_ci.
-    if (CS_TYPE_UTF8MB4_GENERAL_CI == collation_type && str1_len == str2_len
-        && (0 == str1_len || 0 == MEMCMP(str1, str2, str1_len))) {
-      return 0;
-    }
     result = cs->coll->strnncollsp(cs,
                                 reinterpret_cast<const unsigned char *>(str1),
                                 str1_len,
