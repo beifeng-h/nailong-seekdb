@@ -51,8 +51,7 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), cs_(nullptr), cs_type_(CHARSET_INVALID), well_formed_len_(nullptr),
-      fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
+    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
       result_list_(allocator)
 {
@@ -64,17 +63,7 @@ int TokenizeContext::init()
 
   if (OB_ISNULL(fulltext_) || fulltext_len_ <= 0) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_UNLIKELY(coll_type_ <= CS_TYPE_INVALID || coll_type_ >= CS_TYPE_MAX)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(cs_ = ObCharset::get_charset(coll_type_))) {
-    ret = OB_NOT_SUPPORTED;
-  } else if (OB_ISNULL(cs_->cset)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {
-    cs_type_ = ObCharset::charset_type_by_coll(coll_type_);
-    well_formed_len_ = cs_->cset->well_formed_len;
-    if (OB_FAIL(prepare_next_char())) {
-    }
+  } else if (OB_FAIL(prepare_next_char())) {
   }
   return ret;
 }
@@ -113,33 +102,14 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(first_valid_char(fulltext_ + cursor_,
-                                 fulltext_len_ - cursor_,
-                                 next_char_len_))) {
-  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(cs_type_,
+  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                          fulltext_ + cursor_,
+                                          fulltext_len_ - cursor_,
+                                          next_char_len_))) {
+  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                        fulltext_ + cursor_,
                                                        next_char_len_,
                                                        next_char_type_))) {
-  }
-  return ret;
-}
-
-int TokenizeContext::first_valid_char(const char *buf, const int64_t buf_size, int64_t &char_len) const
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(nullptr == buf)) {
-    ret = OB_NOT_INIT;
-  } else if (buf_size <= 0) {
-    char_len = 0;
-  } else {
-    int error = 0;
-    const int64_t len = static_cast<int64_t>(well_formed_len_(cs_, buf, buf + buf_size, 1, &error));
-    if (OB_LIKELY(0 == error)) {
-      char_len = len;
-    } else {
-      ret = OB_INVALID_ARGUMENT;
-      STORAGE_FTS_LOG(WARN, "invalid encoding found");
-    }
   }
   return ret;
 }

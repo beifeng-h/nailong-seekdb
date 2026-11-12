@@ -179,7 +179,7 @@ int ObTransformPreProcess::transform_one_stmt(common::ObIArray<ObParentDMLStmt> 
     }
     if (OB_SUCC(ret)) {
       if (stmt->get_match_exprs().count() > 0 &&
-          OB_FAIL(preserve_order_for_fulltext_search(stmt, is_happened))) {
+          OB_FAIL(preserve_order_for_fulltext_search(parent_stmts, stmt, is_happened))) {
       } else {
         trans_happened |= is_happened;
       }
@@ -3788,9 +3788,55 @@ int ObTransformPreProcess::do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRaw
   return ret;
 }
 
-// full-text index queries on a single base table are processed with order preservation. 
+bool ObTransformPreProcess::is_count_star_parent(
+    const common::ObIArray<ObParentDMLStmt> &parent_stmts,
+    const ObDMLStmt *child) const
+{
+  if (OB_ISNULL(child) || !child->is_select_stmt() || parent_stmts.empty()
+      || child->is_fetch_with_ties() || nullptr != child->get_limit_percent_expr()
+      || child->has_for_update() || child->is_contains_assignment()) {
+    return false;
+  }
+  const ObDMLStmt *parent_stmt = parent_stmts.at(parent_stmts.count() - 1).stmt_;
+  if (OB_ISNULL(parent_stmt) || !parent_stmt->is_select_stmt()) {
+    return false;
+  }
+  const ObSelectStmt *parent = static_cast<const ObSelectStmt *>(parent_stmt);
+  if (!parent->is_scala_group_by() || 1 != parent->get_aggr_item_size()
+      || 1 != parent->get_select_item_size() || !parent->is_single_table_stmt()
+      || 1 != parent->get_from_item_size()
+      || !parent->get_condition_exprs().empty() || parent->has_having()
+      || parent->has_window_function() || parent->has_order_by() || parent->has_distinct()
+      || parent->is_set_stmt() || 0 != parent->get_subquery_expr_size()
+      || !parent->get_joined_tables().empty() || !parent->get_semi_infos().empty()
+      || parent->get_from_item(0).is_joined_ || parent->has_for_update()) {
+    return false;
+  }
+  const TableItem *view = parent->get_table_item(0);
+  const ObAggFunRawExpr *count_expr = parent->get_aggr_item(0);
+  if (OB_ISNULL(view) || !view->is_generated_table() || view->ref_query_ != child
+      || parent->get_from_item(0).table_id_ != view->table_id_
+      || OB_ISNULL(count_expr) || T_FUN_COUNT != count_expr->get_expr_type()
+      || 0 != count_expr->get_real_param_count() || count_expr->is_param_distinct()
+      || parent->get_select_item(0).expr_ != count_expr) {
+    return false;
+  }
+  const ObSelectStmt *child_select = static_cast<const ObSelectStmt *>(child);
+  for (int64_t i = 0; i < child_select->get_select_item_size(); ++i) {
+    const ObRawExpr *expr = child_select->get_select_item(i).expr_;
+    if (OB_ISNULL(expr) || (!expr->is_column_ref_expr() && !expr->is_const_raw_expr())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// full-text index queries on a single base table are processed with order preservation.
 // (Order is not preserved in multi-table join scenarios.)
-int ObTransformPreProcess::preserve_order_for_fulltext_search(ObDMLStmt *stmt, bool& trans_happened)
+int ObTransformPreProcess::preserve_order_for_fulltext_search(
+    const common::ObIArray<ObParentDMLStmt> &parent_stmts,
+    ObDMLStmt *stmt,
+    bool &trans_happened)
 {
   int ret = OB_SUCCESS;
   trans_happened = false;
@@ -3859,6 +3905,8 @@ int ObTransformPreProcess::preserve_order_for_fulltext_search(ObDMLStmt *stmt, b
         }
       }  
     }
+  } else if (is_count_star_parent(parent_stmts, stmt)) {
+    // Only the derived-table row count is consumed. LIMIT and OFFSET stay in place.
   } else {
     const common::ObIArray<ObRawExpr *> &condition_exprs = stmt->get_condition_exprs();
     bool found = false;

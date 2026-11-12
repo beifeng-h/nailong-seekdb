@@ -1,13 +1,7 @@
 name: SeekDB cs45 equality development validation
 
 on:
-  push:
-    branches: [perf/fts-profile-diagnostics-20261111]
-    paths:
-      - src/oblib/lib/charset/ob_charset.cpp
-      - .github/script/seekdb/fts_cs45_equality_validation.py
-      - .github/script/seekdb/test_fts_cs45_equality_validation.py
-      - .github/workflows/fts-cs45-equality-validation.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

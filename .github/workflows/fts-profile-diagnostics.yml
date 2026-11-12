@@ -18,6 +18,11 @@ on:
       - src/storage/fts/ik/ob_ik_processor.h
       - src/storage/fts/ik/ob_ik_processor.cpp
       - src/storage/fts/ik/ob_ik_arbitrator.cpp
+      - .github/workflows/fts-count-only-validation.yml
+      - .github/script/seekdb/fts_count_only_validation.py
+      - .github/script/seekdb/test_fts_count_only_validation.py
+      - src/sql/rewrite/ob_transform_pre_process.cpp
+      - src/sql/rewrite/ob_transform_pre_process.h
 
 permissions:
   contents: read
