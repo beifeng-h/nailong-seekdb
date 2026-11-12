@@ -254,6 +254,35 @@ def run_command(name, command):
     return result.returncode
 
 
+def stack_coverage(name):
+    header_pattern = re.compile(r"^\s*(\d+)/(\d+)\s+(\d+\.\d{9}):\s*$")
+    frame_pattern = re.compile(r"^\s+[0-9a-fA-F]+\s+.+\s+\(.+\)\s*$")
+    headers = []
+    frame_counts = []
+    unparsed_lines = 0
+    with (evidence / (name + ".txt")).open(encoding="utf-8", errors="replace") as source:
+        for line in source:
+            header = header_pattern.fullmatch(line)
+            if header:
+                headers.append((int(header[1]), int(header[2]), header[3]))
+                frame_counts.append(0)
+            elif line.strip():
+                if headers and frame_pattern.fullmatch(line):
+                    frame_counts[-1] += 1
+                else:
+                    unparsed_lines += 1
+    two_frame_samples = sum(count >= 2 for count in frame_counts)
+    return {
+        "path": name + ".txt",
+        "headerCount": len(headers),
+        "samplesWithAnyFrame": sum(count >= 1 for count in frame_counts),
+        "samplesWithAtLeastTwoFrames": two_frame_samples,
+        "twoFrameCoverageFraction": two_frame_samples / len(headers) if headers else 0,
+        "observedTids": sorted({header[1] for header in headers}),
+        "unparsedNonemptyLineCount": unparsed_lines,
+    }, headers
+
+
 notes_status = run_command("candidate-readelf-notes", [
     "timeout", "--signal=TERM", "--kill-after=5s", "15s", "readelf", "--notes", paths["elf"],
 ])
@@ -272,10 +301,48 @@ report_status = run_command("caller-all", [
     "--max-stack=64", "--percent-limit=0.25", "--symfs", paths["symfs"],
     "-i", paths["perfData"],
 ])
-if script_status or report_status:
-    raise SystemExit(1)
-if not (evidence / "stack-samples.txt").stat().st_size or not (evidence / "caller-all.txt").stat().st_size:
-    raise SystemExit("Perf decoded an empty output")
-print("Both saved-recording analysis commands completed.")
+thread_statuses = {}
+for tid in (2993, 2994, 3055, 3056, 3090, 2974):
+    thread_statuses[tid] = run_command("stack-samples-tid-" + str(tid), [
+        "timeout", "--signal=TERM", "--kill-after=5s", "60s", perf, "script",
+        "--ns", "--max-stack=64", "--no-inline", "--symfs", paths["symfs"],
+        "-i", paths["perfData"], "-F", "time,pid,tid,ip,sym,dso", "--tid=" + str(tid),
+    ])
+all_coverage, input_headers = stack_coverage("stack-samples")
+coverage = {
+    "scope": "Saved recording call-chain coverage with independent single-TID decoders",
+    "expectedRecordingHeaderCount": 4355,
+    "recordingHeaderCountMatches": all_coverage["headerCount"] == 4355,
+    "allSamples": all_coverage,
+    "threadSamples": [],
+    "commandExitCodes": {"stack-samples": script_status, "caller-all": report_status},
+}
+for tid, status in thread_statuses.items():
+    name = "stack-samples-tid-" + str(tid)
+    thread_coverage, headers = stack_coverage(name)
+    filtered_headers = [header for header in input_headers if header[1] == tid]
+    thread_coverage.update({
+        "requestedTid": tid,
+        "expectedInputHeaderCount": len(filtered_headers),
+        "tidFilterMatches": bool(headers) and thread_coverage["observedTids"] == [tid],
+        "inputFilteredHeadersMatch": bool(filtered_headers) and headers == filtered_headers,
+    })
+    coverage["threadSamples"].append(thread_coverage)
+    coverage["commandExitCodes"][name] = status
+coverage["passed"] = (
+    coverage["recordingHeaderCountMatches"]
+    and all_coverage["unparsedNonemptyLineCount"] == 0
+    and (evidence / "caller-all.txt").stat().st_size > 0
+    and all(status == 0 for status in coverage["commandExitCodes"].values())
+    and all(row["tidFilterMatches"] and row["inputFilteredHeadersMatch"]
+            and row["samplesWithAtLeastTwoFrames"] > 0
+            and row["unparsedNonemptyLineCount"] == 0
+            for row in coverage["threadSamples"])
+)
+(evidence / "coverage.json").write_text(
+    json.dumps(coverage, indent=2) + "\n", encoding="utf-8")
+if not coverage["passed"]:
+    raise SystemExit("Saved-recording commands or call-chain coverage checks failed")
+print("Saved-recording reports and six independent single-TID coverage checks completed.")
 PY
 stage=complete
