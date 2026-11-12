@@ -1,6 +1,7 @@
 """Offline regressions for the COUNT-consumer validation entry point."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -9,6 +10,16 @@ import unittest
 from unittest.mock import patch
 
 import fts_count_only_validation as count_only
+
+
+def setUpModule():
+    global _diagnostic_mode
+    _diagnostic_mode = patch.dict(os.environ, {'COUNT_BASELINE_DIAGNOSTICS_ONLY': '0'})
+    _diagnostic_mode.start()
+
+
+def tearDownModule():
+    _diagnostic_mode.stop()
 
 
 def retrieval_plan(relevance, sort_keys='nil', index_back='true'):
@@ -385,6 +396,285 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("cache: 'false'", text)
         self.assertIn('CARGO_BUILD_JOBS: \'2\'', text)
         self.assertNotIn('ob_charset.cpp', text.split('permissions:', 1)[0])
+
+    def test_explicit_diagnostic_mode_skips_all_three_candidate_steps(self):
+        path = Path(__file__).resolve().parents[2] / 'workflows/fts-count-only-validation.yml'
+        text = path.read_text(encoding='utf-8')
+        self.assertIn("COUNT_BASELINE_DIAGNOSTICS_ONLY: '1'", text)
+        condition = "if: ${{ env.COUNT_BASELINE_DIAGNOSTICS_ONLY != '1' }}"
+        self.assertEqual(text.count(condition), 3)
+        for name in ('Build the complete candidate once with the original two-job profile',
+                     'Preserve the full candidate before SQL validation',
+                     'Validate native SQL and original nine-metric ABBA'):
+            self.assertIn('      - name: ' + name + '\n        ' + condition, text)
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_matrix_preserves_original_corpus_and_varies_one_named_factor(self):
+        matrices = {row['name']: count_only.diagnostic_fixture(row) for row in count_only.DIAGNOSTIC_FIXTURES}
+        dense = matrices['beng_deleted_dense']
+        expected_setup = count_only.COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(
+            count_only.TABLE, dense['table'])
+        self.assertEqual(dense['setup'], expected_setup)
+        self.assertEqual(dense['positiveRows'], 32)
+        self.assertEqual(dense['totalRows'], 34)
+        no_delete = matrices['beng_dense_no_delete']
+        self.assertEqual(no_delete['positiveRows'], 35)
+        self.assertEqual(no_delete['totalRows'], 37)
+        self.assertNotIn('DELETE FROM', no_delete['setup'])
+        ik = matrices['ik_deleted_dense']
+        self.assertEqual(ik['setup'], dense['setup'].replace(dense['table'], ik['table']).replace('PARSER beng', 'PARSER ik'))
+        mixed = matrices['beng_deleted_mixed']
+        self.assertEqual(mixed['totalRows'], 69)
+        self.assertEqual(mixed['setup'].count("'unrelated zebra orchard'"), 35)
+        for matrix in matrices.values():
+            self.assertEqual(matrix['setup'].count("'database performance audit'"), 35)
+            self.assertEqual(len(matrix['cases']), 15)
+            self.assertEqual(len(matrix['plans']), 18)
+            cases = {name: (query, value) for name, query, value in matrix['cases']}
+            self.assertEqual(cases['limit_20'][1], 20)
+            self.assertIn('SELECT 1 FROM ', cases['projection_constant_limit_2'][0])
+            self.assertEqual(cases['projection_constant_limit_2'][1], 2)
+            self.assertEqual(cases['offset_30'][1], 5 if matrix['name'] == 'beng_dense_no_delete' else 2)
+            self.assertEqual(cases['offset_33'][1], 2 if matrix['name'] == 'beng_dense_no_delete' else 0)
+
+    def owned(self, root, raw=b'[2026-11-12 00:00:00.000001] WARN original root-cause detail\n'):
+        out = root / 'targeted-baseline'
+        log = out / 'database/log/seekdb.log'
+        log.parent.mkdir(parents=True)
+        log.write_bytes(raw)
+        call = SimpleNamespace(base_dir=out / 'database', obclient=Path('/client'), port=7500)
+        return call, out, log
+
+    def capture(self, failure_label=None, connection_code=None):
+        calls = []
+
+        def run(command, path, cwd, timeout, **kwargs):
+            calls.append(path.stem)
+            failed = path.stem == failure_label
+            code = connection_code if failed and connection_code else 4016
+            if failed:
+                raw = f'ERROR {code} (HY000) at line 3: diagnostic server outcome\n'.encode()
+            elif '-explain-' in path.stem:
+                raw = retrieval_plan(True, '[MATCH(docs.body), DESC]').encode()
+            else:
+                raw = b'1\n'
+            path.write_bytes(raw)
+            return dict(exitCode=1 if failed else 0, childrenCleaned=True)
+        return run, calls
+
+    def test_first_sql_error_does_not_truncate_matrix_or_claim_correctness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp))
+            capture, calls = self.capture('diag-beng_deleted_dense-count-limit_2')
+            with patch.object(count_only.common, 'capture_group', side_effect=capture):
+                result = count_only.diagnostic_work(call, out, None, None)
+            data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+            self.assertEqual(len(calls), 138)
+            self.assertEqual(len(data['outcomes']), 138)
+            error = next(row for row in data['outcomes'] if row['label'] == 'diag-beng_deleted_dense-count-limit_2')
+            self.assertEqual(error['serverErrorCode'], 4016)
+            self.assertIn(b'ERROR 4016', bytes.fromhex(error['outputHex']))
+            first = data['tables'][0]['firstErrorServerLog']
+            self.assertTrue(Path(first['path']).is_file())
+            self.assertEqual(data['tables'][0]['firstErrorSqlLabel'], error['label'])
+            self.assertLessEqual(json.loads(Path(first['path']).read_text())['savedRawBytes'], 256 * 1024)
+            self.assertTrue(result['passed'])
+            self.assertTrue(result['diagnosticOnly'])
+            self.assertFalse(result['correctnessPassed'])
+            self.assertFalse(result['candidateBuildAttempted'])
+            self.assertTrue(log.exists())
+            self.assertFalse((out / 'own-stop.log').exists())
+
+    def test_connection_failures_are_checked_after_complete_json_is_saved(self):
+        for code in count_only.CONNECTION_ERRORS:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                call, out, log = self.owned(Path(tmp))
+                capture, calls = self.capture('diag-beng_deleted_dense-count-limit_2', code)
+                with patch.object(count_only.common, 'capture_group', side_effect=capture), self.assertRaises(RuntimeError):
+                    count_only.diagnostic_work(call, out, None, None)
+                data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+                self.assertEqual(len(data['outcomes']), 138)
+                self.assertEqual(len(calls), 138)
+                self.assertTrue(any(row['connectionLost'] for row in data['outcomes']))
+                self.assertTrue((out / 'count-baseline-live-log.json').is_file())
+
+    def test_final_connection_failure_also_preserves_diagnostic_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp))
+            capture, calls = self.capture('diag-final-connection', 2006)
+            with patch.object(count_only.common, 'capture_group', side_effect=capture), self.assertRaises(RuntimeError):
+                count_only.diagnostic_work(call, out, None, None)
+            data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+            self.assertEqual(data['outcomes'][-1]['serverErrorCode'], 2006)
+
+    def test_live_log_keeps_info_error_propagation_and_exact_offsets(self):
+        raw = (b'[2026-11-12 00:00:00.000001] INFO context before\n'
+               b'[2026-11-12 00:00:00.000002] INFO exec_ctx.errcode()=-4016\n'
+               b'[2026-11-12 00:00:00.000003] INFO send_error_packet\n'
+               b'[2026-11-12 00:00:00.000004] WDIAG detail\n'
+               b'[2026-11-12 00:00:00.000005] EDIAG detail\n'
+               b'[2026-11-12 00:00:00.000006] INFO context after\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), raw)
+            row = {'label': 'failed-query', 'serverLogOffsetBefore': 0, 'serverLogOffsetAfter': len(raw)}
+            receipt = count_only.capture_live_diagnostic_log(call, out, [row])
+            data = json.loads(Path(receipt['path']).read_text())
+            self.assertEqual(data['initialSizePrefixSha256'], hashlib.sha256(raw).hexdigest())
+            patterns = set()
+            for record in data['records']:
+                original = raw[record['offset']:record['offset'] + record['bytes']]
+                self.assertEqual(bytes.fromhex(record['rawHex']), original)
+                self.assertEqual(record['sha256'], hashlib.sha256(original).hexdigest())
+                self.assertEqual(record['sqlAssociations'], ['failed-query'])
+                patterns.update(record['matchedPatterns'])
+            self.assertTrue({'error_4016', 'send_error_packet', 'wdiag', 'ediag'} <= patterns)
+            self.assertTrue(data['capturedBeforeOwnedStop'])
+
+    def test_oversized_lines_keep_hash_and_explicit_omission(self):
+        raw = b'WARN ' + b'x' * 200 + b' ret=-4016\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), raw)
+            with patch.object(count_only, 'LIVE_LOG_LINE_CAP', 64):
+                receipt = count_only.capture_live_diagnostic_log(call, out, [])
+            data = json.loads(Path(receipt['path']).read_text())
+            record = data['records'][0]
+            self.assertEqual(record['bytes'], len(raw))
+            self.assertEqual(record['sha256'], hashlib.sha256(raw).hexdigest())
+            self.assertNotIn('rawHex', record)
+            self.assertIn('omittedReason', record)
+            self.assertEqual(data['unsavedByteRanges'], [{'offset': 0, 'bytes': len(raw)}])
+
+    def test_recent_record_eviction_is_bounded_and_accounted(self):
+        raw = b''.join(b'WARN error detail ' + str(i).encode() + b'\n' for i in range(10))
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), raw)
+            with patch.object(count_only, 'LIVE_LOG_RECORD_CAP', 3), patch.object(count_only, 'LIVE_LOG_BYTE_CAP', 60):
+                receipt = count_only.capture_live_diagnostic_log(call, out, [])
+            data = json.loads(Path(receipt['path']).read_text())
+            self.assertLessEqual(len(data['records']), 3)
+            self.assertLessEqual(data['savedRawBytes'], 60)
+            self.assertGreater(data['evictedOlderSelectedRecords'], 0)
+            self.assertEqual(data['matchedLineCount'], 10)
+            self.assertTrue(data['unsavedByteRanges'])
+
+    def test_live_log_snapshot_excludes_bytes_appended_after_initial_size(self):
+        initial = b'WARN original error\nINFO original context\n'
+        appended = b'ERROR appended after snapshot began\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), initial)
+            original_open = Path.open
+
+            class GrowingReader:
+                def __init__(self, stream):
+                    self.stream, self.appended = stream, False
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.stream.close()
+
+                def fileno(self):
+                    return self.stream.fileno()
+
+                def readline(self, size):
+                    raw = self.stream.readline(size)
+                    if not self.appended:
+                        with original_open(log, 'ab') as writer:
+                            writer.write(appended)
+                        self.appended = True
+                    return raw
+
+            def open_path(path, mode='r', *args, **kwargs):
+                stream = original_open(path, mode, *args, **kwargs)
+                return GrowingReader(stream) if path == log and mode == 'rb' else stream
+
+            with patch.object(Path, 'open', open_path):
+                receipt = count_only.capture_live_diagnostic_log(call, out, [])
+            data = json.loads(Path(receipt['path']).read_text())
+            self.assertEqual(data['initialSizeBytes'], len(initial))
+            self.assertEqual(data['finalSizeBytes'], len(initial) + len(appended))
+            self.assertEqual(data['initialSizePrefixSha256'], hashlib.sha256(initial).hexdigest())
+            saved = b''.join(bytes.fromhex(row['rawHex']) for row in data['records'])
+            self.assertEqual(saved, initial)
+
+    def test_diagnostic_prebuild_reuses_generic_status_receipt_and_cleanup_path(self):
+        for code in (None, 2006):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / 'source'
+                source.mkdir()
+                helper = source / '.github/script/seekdb/fts_expr_cache_targeted.py'
+                helper.parent.mkdir(parents=True)
+                helper.write_bytes(b'original helper fixture\n')
+                (root / 'evidence').mkdir()
+                baseline_dir = root / 'runtime/baseline'
+                baseline_dir.mkdir(parents=True)
+                count_only.driver.dump(baseline_dir / 'identity.json', {'binary': str(baseline_dir / 'seekdb')})
+                count_only.driver.dump(root / 'report.json', {'status': 'prepared', 'targeted': {}, 'instances': []})
+                args = SimpleNamespace(root=root, source=source, driver_sha='c' * 40, phase='prebuild')
+                capture, calls = self.capture('diag-beng_deleted_dense-count-limit_2', code)
+                original_digest = count_only.common.digest
+                events = []
+
+                def digest(path):
+                    return count_only.common.CLIENTS[path.name] if path.name in count_only.common.CLIENTS else original_digest(path)
+
+                def owned(args, report, identities, role, name, work, **kwargs):
+                    call, out, log = self.owned(root / 'validation')
+                    row = {'name': name, 'role': role, 'status': 'running'}
+                    try:
+                        row['work'] = work(call, out, 42)
+                        row['status'] = 'passed'
+                    except RuntimeError as error:
+                        row.update(status='infrastructure_error', error=str(error))
+                    finally:
+                        self.assertTrue((out / 'count-baseline-live-log.json').exists())
+                        self.assertTrue((out / 'count-baseline-diagnostics.json').exists())
+                        events.append('owned-stop-and-cleanup')
+                        row['cleanupPassed'] = True
+                        count_only.driver.dump(out / 'result.json', row)
+                        report['instances'].append(row)
+                        count_only.driver.dump(root / 'report.json', report)
+                    return row
+
+                with patch.dict(os.environ, {'COUNT_BASELINE_DIAGNOSTICS_ONLY': '1'}), \
+                        patch.object(count_only.parent, 'prepare_nofile'), \
+                        patch.object(count_only.driver, 'load_plan'), \
+                        patch.object(count_only.driver, 'resource_record'), \
+                        patch.object(count_only.driver, 'build_profile'), \
+                        patch.object(count_only.common, 'digest', side_effect=digest), \
+                        patch.object(count_only.common, 'verify_loader'), \
+                        patch.object(count_only.driver, 'verify_version'), \
+                        patch.object(count_only.driver, 'run_owned', side_effect=owned), \
+                        patch.object(count_only.common, 'capture_group', side_effect=capture):
+                    if code is None:
+                        count_only.prebuild(args)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            count_only.prebuild(args)
+                report = json.loads((root / 'report.json').read_text())
+                self.assertEqual(events, ['owned-stop-and-cleanup'])
+                self.assertTrue(report['instances'][0]['cleanupPassed'])
+                self.assertTrue(report['diagnosticOnly'])
+                self.assertFalse(report['candidateBuildAttempted'])
+                self.assertFalse(report['correctnessPassed'])
+                self.assertEqual(len(report['baselineDiagnostics']['outcomes']), 138)
+                if code is None:
+                    self.assertEqual(report['status'], 'baseline_diagnostics_completed')
+                    self.assertIn('baselineTargetedPreflight', report)
+                else:
+                    self.assertNotEqual(report['status'], 'baseline_diagnostics_completed')
+
+    def test_diagnostic_mode_refuses_candidate_validation(self):
+        with patch.dict(os.environ, {'COUNT_BASELINE_DIAGNOSTICS_ONLY': '1'}), \
+                patch.object(count_only, 'verify_header_dependencies') as headers, \
+                patch.object(count_only, '_validate') as validate:
+            with self.assertRaises(RuntimeError):
+                count_only.validate(None)
+        headers.assert_not_called()
+        validate.assert_not_called()
 
 
 if __name__ == '__main__':

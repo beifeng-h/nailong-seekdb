@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Validate COUNT-consumer rewriting against the exact complete b963 ELF."""
 import argparse
+from collections import deque
+import datetime
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shlex
+import stat
+import time
 
 
 _spec = importlib.util.spec_from_file_location(
@@ -69,6 +74,265 @@ SCORING_CONTROLS = {
     'count_column': limited_count(2, aggregate='COUNT(nullable_value)', projection='id, nullable_value'),
     'parent_filter': limited_count(40, parent_filter=' WHERE counted.id > 30'),
 }
+DIAGNOSTIC_FIXTURES = (
+    dict(name='beng_deleted_dense', parser='beng', deleted=True, mixed=False),
+    dict(name='beng_dense_no_delete', parser='beng', deleted=False, mixed=False),
+    dict(name='ik_deleted_dense', parser='ik', deleted=True, mixed=False),
+    dict(name='beng_deleted_mixed', parser='beng', deleted=True, mixed=True),
+)
+CONNECTION_ERRORS = frozenset((2002, 2003, 2006, 2013, 2055))
+LIVE_LOG_BYTE_CAP = 1024 * 1024
+LIVE_LOG_LINE_CAP = 128 * 1024
+LIVE_LOG_RECORD_CAP = 256
+LIVE_LOG_JSON_CAP = 6 * 1024 * 1024
+LIVE_LOG_PATTERNS = (
+    ('warn', re.compile(rb'\bWARN\b')),
+    ('error', re.compile(rb'\bERROR\b')),
+    ('wdiag', re.compile(rb'\bWDIAG\b')),
+    ('ediag', re.compile(rb'\bEDIAG\b')),
+    ('error_4016', re.compile(rb'-4016\b')),
+    ('send_error_packet', re.compile(rb'\bsend_error_packet\b')),
+)
+
+
+def diagnostics_only():
+    return os.environ.get('COUNT_BASELINE_DIAGNOSTICS_ONLY') == '1'
+
+
+def diagnostic_fixture(fixture):
+    table = 'fts_count_consumer.' + fixture['name']
+    setup = COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(TABLE, table)
+    setup = setup.replace('WITH PARSER beng;', 'WITH PARSER ' + fixture['parser'] + ';')
+    if not fixture['deleted']:
+        setup = setup.replace(f'DELETE FROM {table} WHERE id IN (1, 2, 3);\n', '')
+    if fixture['mixed']:
+        values = ',\n'.join(f"({index}, 'unrelated zebra orchard', NULL)" for index in range(201, 236))
+        setup = setup.replace("(101, NULL, 7), (102, '', 8);", values + ",\n(101, NULL, 7), (102, '', 8);")
+    positive = 32 if fixture['deleted'] else 35
+    expected = {name: value for name, (query, value) in COUNT_CASES}
+    expected.update(rows_remaining=positive + 2 + (35 if fixture['mixed'] else 0),
+                    plain_count=positive, limit_40=positive,
+                    offset_30=max(positive - 30, 0), offset_33=max(positive - 33, 0))
+    cases = [(name, query.replace(TABLE, table), expected[name]) for name, (query, value) in COUNT_CASES]
+    cases.extend((('limit_20', limited_count(20).replace(TABLE, table), min(positive, 20)),
+                  ('projection_constant_limit_2', limited_count(2, projection='1').replace(TABLE, table), 2)))
+    plans = {name: query for name, query, value in cases}
+    plans.update({name: query.replace(TABLE, table) for name, query in SCORING_CONTROLS.items()})
+    return dict(**fixture, table=table, positiveRows=positive, totalRows=expected['rows_remaining'],
+                setup=setup, cases=cases, plans=plans)
+
+
+def log_size(out):
+    try:
+        return (out / 'database/log/seekdb.log').stat().st_size
+    except FileNotFoundError:
+        return None
+
+
+def diagnostic_sql(call, out, label, query, kind, table=None, expected=None):
+    driver.require(re.fullmatch('[A-Za-z0-9_.-]+', label) is not None, 'Unsafe diagnostic label')
+    text = common.SESSION + query + '\n'
+    sql_path, log_path = out / (label + '.sql'), out / (label + '.log')
+    sql_path.write_text(text, encoding='utf-8')
+    record = dict(label=label, kind=kind, table=table, sql=query, sqlPath=str(sql_path),
+                  executedSqlSha256=common.digest(sql_path), expectedCount=expected,
+                  startedUtc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  startedMonotonicNs=time.monotonic_ns(), serverLogOffsetBefore=log_size(out))
+    try:
+        result = common.capture_group(
+            [str(call.obclient), '-h127.0.0.1', '-P' + str(call.port), '-uroot', '-A', '-N', '-B',
+             '--raw', '--default-character-set=utf8mb4', '-Doceanbase'],
+            log_path, Path.cwd(), 120 if kind == 'setup' else 30,
+            env=os.environ.copy(), stdin=text.encode('utf-8'))
+        record.update(exitCode=result['exitCode'], childrenCleaned=result['childrenCleaned'], invocation=result)
+    except Exception as error:
+        record.update(exitCode=None, childrenCleaned=False,
+                      captureError=dict(type=type(error).__name__, message=str(error)))
+    raw = log_path.read_bytes() if log_path.exists() else b''
+    error = re.search(rb'\bERROR\s+(\d+)(?:\s+\(([A-Z0-9]+)\))?', raw)
+    error_code = None if error is None else int(error[1])
+    observed = None
+    if kind == 'count' and record['exitCode'] == 0 and re.fullmatch(rb'\s*[0-9]+\s*', raw):
+        observed = int(raw.strip())
+    record.update(finishedUtc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  finishedMonotonicNs=time.monotonic_ns(), serverLogOffsetAfter=log_size(out),
+                  outputPath=str(log_path), outputBytes=len(raw), outputSha256=hashlib.sha256(raw).hexdigest(),
+                  outputHex=raw.hex(), outputUtf8=raw.decode('utf-8', errors='replace'),
+                  serverErrorCode=error_code,
+                  sqlState=None if error is None or error[2] is None else error[2].decode('ascii'),
+                  connectionLost=error_code in CONNECTION_ERRORS, observedCount=observed,
+                  countMatchesExpected=None if kind != 'count' or observed is None else observed == expected)
+    if kind == 'explain':
+        record['planObservation'] = dict(
+            calcRelevanceValues=[value.decode('ascii') for value in re.findall(rb'calc_relevance\s*=\s*(true|false)', raw)],
+            indexBackValues=[value.decode('ascii') for value in re.findall(rb'is_index_back\s*=\s*(true|false)', raw)],
+            sortKeyLines=[line.decode('utf-8', errors='replace') for line in raw.splitlines() if b'sort_keys' in line])
+    return record
+
+
+def capture_live_diagnostic_log(call, out, outcomes, label='count-baseline-live-log', payload_cap=None):
+    driver.require(re.fullmatch('[A-Za-z0-9_.-]+', label) is not None, 'Unsafe diagnostic log label')
+    payload_cap = LIVE_LOG_BYTE_CAP if payload_cap is None else payload_cap
+    path = out / 'database/log/seekdb.log'
+    driver.require(call.base_dir == out / 'database' and call.base_dir.is_dir()
+                   and not (out / 'own-stop.log').exists(), 'Diagnostic log capture must precede owned stop')
+    common.no_symlinks(path)
+    selected, recent = deque(), deque(maxlen=2)
+    saved_bytes, evicted_count, oversized_count, matching_count = 0, 0, 0, 0
+    evicted_begin, evicted_end, after_context = None, None, 0
+    last_saved_offset = -1
+
+    def save(record, reason):
+        nonlocal saved_bytes, evicted_count, evicted_begin, evicted_end, last_saved_offset
+        if record['offset'] <= last_saved_offset:
+            return
+        entry = dict(record, selectionReason=reason)
+        selected.append(entry)
+        saved_bytes += entry.get('savedBytes', 0)
+        last_saved_offset = entry['offset']
+        while len(selected) > LIVE_LOG_RECORD_CAP or saved_bytes > payload_cap:
+            removed = selected.popleft()
+            saved_bytes -= removed.get('savedBytes', 0)
+            evicted_count += 1
+            evicted_begin = removed['offset'] if evicted_begin is None else evicted_begin
+            evicted_end = removed['offset'] + removed['bytes']
+
+    capture_started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    snapshot_hash = hashlib.sha256()
+    with path.open('rb') as stream:
+        initial = os.fstat(stream.fileno())
+        driver.require(stat.S_ISREG(initial.st_mode) and initial.st_nlink == 1, 'Owned diagnostic log must be regular and unique')
+        remaining, line_offset, line_bytes = initial.st_size, 0, 0
+        line_hash, pieces, matches, overlap = hashlib.sha256(), [], set(), b''
+        while remaining:
+            chunk = stream.readline(min(remaining, LIVE_LOG_LINE_CAP))
+            driver.require(bool(chunk), 'Diagnostic log shortened during initial-size snapshot')
+            remaining -= len(chunk)
+            snapshot_hash.update(chunk)
+            line_hash.update(chunk)
+            line_bytes += len(chunk)
+            if line_bytes <= LIVE_LOG_LINE_CAP:
+                pieces.append(chunk)
+            else:
+                pieces.clear()
+            for name, pattern in LIVE_LOG_PATTERNS:
+                if pattern.search(overlap + chunk):
+                    matches.add(name)
+            overlap = chunk[-64:]
+            if not chunk.endswith(b'\n') and remaining:
+                continue
+            complete = chunk.endswith(b'\n')
+            record = dict(offset=line_offset, bytes=line_bytes, sha256=line_hash.hexdigest(),
+                          endsWithNewline=complete, matchedPatterns=sorted(matches), savedBytes=0)
+            if line_bytes <= LIVE_LOG_LINE_CAP:
+                raw = b''.join(pieces)
+                record.update(rawHex=raw.hex(), savedBytes=len(raw))
+            else:
+                record['omittedReason'] = 'Complete line exceeds the explicit per-line payload cap'
+                oversized_count += 1
+            if matches:
+                matching_count += 1
+                for previous in recent:
+                    save(previous, 'context_before')
+                save(record, 'match')
+                after_context = 2
+            elif after_context:
+                save(record, 'context_after')
+                after_context -= 1
+            recent.append(record)
+            line_offset += line_bytes
+            line_bytes, line_hash, pieces, matches, overlap = 0, hashlib.sha256(), [], set(), b''
+        final = os.fstat(stream.fileno())
+    driver.require(final.st_size >= initial.st_size, 'Diagnostic log truncated during snapshot')
+    ranges, unsaved, cursor = [], [], 0
+    for record in selected:
+        record['sqlAssociations'] = [row['label'] for row in outcomes
+            if row['serverLogOffsetBefore'] is not None and row['serverLogOffsetAfter'] is not None
+            and row['serverLogOffsetBefore'] <= record['offset'] < row['serverLogOffsetAfter']]
+        if record.get('savedBytes'):
+            if cursor < record['offset']:
+                unsaved.append(dict(offset=cursor, bytes=record['offset'] - cursor))
+            ranges.append(dict(offset=record['offset'], bytes=record['bytes']))
+            cursor = record['offset'] + record['bytes']
+    if cursor < initial.st_size:
+        unsaved.append(dict(offset=cursor, bytes=initial.st_size - cursor))
+    proof = dict(sourcePath=str(path), captureStartedUtc=capture_started,
+                 captureFinishedUtc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                 capturedBeforeOwnedStop=True, initialSizeBytes=initial.st_size, finalSizeBytes=final.st_size,
+                 initialSizePrefixSha256=snapshot_hash.hexdigest(), sourceDevice=initial.st_dev, sourceInode=initial.st_ino,
+                 selection='Recent matching lines plus two preceding/following snapshot line records, bounded by payload and record count; endsWithNewline identifies boundary fragments',
+                 patterns=[name for name, pattern in LIVE_LOG_PATTERNS], matchedLineCount=matching_count,
+                 perLineCapBytes=LIVE_LOG_LINE_CAP, payloadCapBytes=payload_cap, recordCap=LIVE_LOG_RECORD_CAP,
+                 savedRawBytes=saved_bytes, records=list(selected), evictedOlderSelectedRecords=evicted_count,
+                 evictedSelectedBoundingRange=None if evicted_begin is None else dict(offset=evicted_begin, bytes=evicted_end - evicted_begin),
+                 oversizedLinesObserved=oversized_count, savedByteRanges=ranges, unsavedByteRanges=unsaved,
+                 associationCaveat='SQL association uses observed byte ranges and does not prove causality. Appended bytes after initialSizeBytes are outside this snapshot.')
+    raw = (json.dumps(proof, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+    driver.require(len(raw) <= LIVE_LOG_JSON_CAP, 'Diagnostic log JSON exceeds its explicit complete-file cap')
+    destination = out / (label + '.json')
+    destination.write_bytes(raw)
+    return dict(path=str(destination), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                initialSizeBytes=initial.st_size, initialSizePrefixSha256=proof['initialSizePrefixSha256'],
+                matchedLineCount=matching_count, savedRecords=len(selected), capturedBeforeOwnedStop=True)
+
+
+def diagnostic_work(call, out, args, sql):
+    outcomes, tables = [], []
+    first_log_errors = []
+
+    def retain(record, table_report=None):
+        outcomes.append(record)
+        if table_report is not None and record['exitCode'] != 0 and not table_report.get('firstErrorCaptureAttempted'):
+            table_report['firstErrorCaptureAttempted'] = True
+            table_report['firstErrorSqlLabel'] = record['label']
+            try:
+                table_report['firstErrorServerLog'] = capture_live_diagnostic_log(
+                    call, out, outcomes, 'count-baseline-first-error-' + table_report['name'], 256 * 1024)
+            except Exception as error:
+                first_log_errors.append(dict(table=table_report['table'], sqlLabel=record['label'],
+                                              type=type(error).__name__, message=str(error)))
+
+    retain(diagnostic_sql(call, out, 'diag-schema',
+        'ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table = true;\nCREATE DATABASE fts_count_consumer;', 'setup'))
+    for fixture in DIAGNOSTIC_FIXTURES:
+        matrix = diagnostic_fixture(fixture)
+        table = matrix['table']
+        table_report = {key: matrix[key] for key in ('name', 'parser', 'deleted', 'mixed', 'positiveRows', 'totalRows', 'table')}
+        tables.append(table_report)
+        retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-setup', matrix['setup'], 'setup', table), table_report)
+        for name, query, expected in matrix['cases']:
+            retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-count-' + name,
+                                   query, 'count', table, expected), table_report)
+        for name, query in matrix['plans'].items():
+            retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-explain-' + name,
+                                   'EXPLAIN ' + query, 'explain', table), table_report)
+    connection = diagnostic_sql(call, out, 'diag-final-connection', 'SELECT 1;', 'connection')
+    outcomes.append(connection)
+    report = dict(diagnosticOnly=True, candidateBuildAttempted=False, correctnessPassed=False,
+                  baselineCommit=BASE, baselineElfSha256=parent.BASE_ELF_SHA, tables=tables, outcomes=outcomes,
+                  firstErrorLogCaptureErrors=first_log_errors,
+                  outputEncoding='outputHex preserves complete original bytes; outputUtf8 is a replacement-decoded display',
+                  interpretation='Observed SQL outcomes only. Parser, deletion and term-density associations require analysis.')
+    log_error = None
+    try:
+        report['liveServerLog'] = capture_live_diagnostic_log(call, out, outcomes)
+    except Exception as error:
+        log_error = error
+        report['liveServerLogError'] = dict(type=type(error).__name__, message=str(error))
+    destination = out / 'count-baseline-diagnostics.json'
+    driver.dump(destination, report)
+    driver.require(connection['exitCode'] == 0 and connection['childrenCleaned']
+                   and bytes.fromhex(connection['outputHex']).strip() == b'1', 'Diagnostic baseline connection failed')
+    driver.require(not any(row['connectionLost'] or row.get('captureError') or not row['childrenCleaned']
+                           or row['exitCode'] not in (0, 1) for row in outcomes),
+                   'Diagnostic SQL encountered a client connection or process failure')
+    driver.require(log_error is None, 'Pre-stop diagnostic server log capture failed')
+    driver.require(not first_log_errors, 'First-error diagnostic server log capture failed')
+    compact = [{key: row[key] for key in ('label', 'kind', 'table', 'exitCode', 'serverErrorCode',
+                'sqlState', 'expectedCount', 'observedCount', 'countMatchesExpected', 'outputSha256')} for row in outcomes]
+    return dict(passed=True, diagnosticOnly=True, correctnessPassed=False, candidateBuildAttempted=False,
+                canonical=dict(diagnosticJsonSha256=common.digest(destination)), rawOutcomes=compact,
+                diagnosticJsonPath=str(destination), liveServerLog=report['liveServerLog'])
 
 
 def source_proof(args):
@@ -124,6 +388,10 @@ def prepare(args):
     driver.dump(args.root / 'plan.json', plan)
     report = json.loads((args.root / 'report.json').read_text())
     report.update(plan=plan, validationScope=SCOPE)
+    if diagnostics_only():
+        report.update(diagnosticOnly=True, candidateBuildAttempted=False, correctnessPassed=False)
+        plan.update(diagnosticOnly=True, candidateBuildsRequired=0)
+        driver.dump(args.root / 'plan.json', plan)
     driver.dump(args.root / 'report.json', report)
 
 
@@ -320,17 +588,43 @@ def prebuild(args):
         result['countOnlyPreflight'] = equality_work(call, out)
         return result
 
-    targeted.run = run
+    diagnostic = diagnostics_only()
+    targeted.run = diagnostic_work if diagnostic else run
     try:
-        return _prebuild(args)
+        result = _prebuild(args)
+        if diagnostic:
+            report = json.loads((args.root / 'report.json').read_text())
+            report.update(status='baseline_diagnostics_completed', diagnosticOnly=True,
+                          candidateBuildAttempted=False, correctnessPassed=False)
+            driver.dump(args.root / 'report.json', report)
+        return result
     finally:
         targeted.run = original
+        if diagnostic:
+            report_path = args.root / 'report.json'
+            if report_path.is_file():
+                report = json.loads(report_path.read_text())
+                report.update(diagnosticOnly=True, candidateBuildAttempted=False, correctnessPassed=False)
+                diagnostic_path = args.root / 'validation/targeted-baseline/count-baseline-diagnostics.json'
+                if diagnostic_path.is_file():
+                    data = json.loads(diagnostic_path.read_text())
+                    report['baselineDiagnostics'] = dict(
+                        path=str(diagnostic_path), sha256=common.digest(diagnostic_path),
+                        outcomes=[{key: row[key] for key in ('label', 'kind', 'table', 'exitCode',
+                                  'serverErrorCode', 'sqlState', 'expectedCount', 'observedCount',
+                                  'countMatchesExpected', 'outputSha256')} for row in data['outcomes']],
+                        liveServerLog=data.get('liveServerLog'), liveServerLogError=data.get('liveServerLogError'))
+                    report['baselineDiagnostics']['firstErrorServerLogs'] = [table['firstErrorServerLog']
+                        for table in data['tables'] if 'firstErrorServerLog' in table]
+                    report['baselineDiagnostics']['firstErrorLogCaptureErrors'] = data.get('firstErrorLogCaptureErrors', [])
+                driver.dump(report_path, report)
 
 
 _validate = parent.validate
 
 
 def validate(args):
+    driver.require(not diagnostics_only(), 'Diagnostic-only mode cannot start candidate validation or ABBA')
     verify_header_dependencies(args)
     _validate(args)
     report = json.loads((args.root / 'report.json').read_text())
