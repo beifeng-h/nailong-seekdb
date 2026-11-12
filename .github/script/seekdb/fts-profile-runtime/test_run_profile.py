@@ -850,6 +850,36 @@ class NoFileLimitChecks(unittest.TestCase):
 
 
 class SampleChecks(unittest.TestCase):
+    def test_real_perf_ipc_trailer_is_excluded_from_symbol_resolution(self):
+        # Selected rows from attempt-6 perf-report.txt, including its IPC columns.
+        symbol = "ob_strnncollsp_utf8mb4(ObCharsetInfo const*, unsigned char const*, unsigned long, unsigned char const*, unsigned long, bool)"
+        address = "0x0000000000188923"
+        text = "# Overhead Samples Shared Object Symbol IPC [IPC Coverage]\n"
+        text += "  3.19%  139  seekdb [.] " + symbol.ljust(1600) + "-      -            \n"
+        text += "  0.62%   27  libc.so.6 [.] " + address.ljust(1600) + "-      -            \n"
+        result = run_profile.report_samples(text)
+        self.assertEqual(result["sampleCount"], 166)
+        self.assertEqual(result["unknownSymbolSamples"], 27)
+        self.assertEqual(result["resolvedSymbolSamples"], 139)
+        self.assertEqual(result["functionHotspots"][0]["symbol"], symbol)
+        self.assertEqual(result["functionHotspots"][1]["symbol"], address)
+
+    def test_unknown_marker_with_perf_ipc_trailer_remains_unknown(self):
+        result = run_profile.report_samples(
+            "# Overhead Samples Shared Object Symbol IPC [IPC Coverage]\n"
+            "  100.00%  3  [unknown] [.] [unknown]                            -      -\n"
+        )
+        self.assertEqual(result["unknownSymbolSamples"], 3)
+        self.assertEqual(result["unknownDsoSamples"], 3)
+
+    def test_raw_64bit_address_is_unresolved(self):
+        result = run_profile.report_samples("  100.00%  3  libc.so.6 [.] 0000000000188923\n")
+        self.assertEqual(result["unknownSymbolSamples"], 3)
+
+    def test_symbol_tail_is_preserved_without_advertised_ipc_columns(self):
+        result = run_profile.report_samples("  100.00%  3  seekdb [.] symbol - -\n")
+        self.assertEqual(result["functionHotspots"][0]["symbol"], "symbol - -")
+
     def test_zero_samples_fail(self):
         with self.assertRaisesRegex(run_profile.AdapterError, "zero samples"):
             run_profile.report_samples("# Samples: 0 of event 'cpu-clock:u'\n")

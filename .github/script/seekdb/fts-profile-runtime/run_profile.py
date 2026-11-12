@@ -327,8 +327,14 @@ def report_samples(text):
     if any(float(value.rstrip("KMGT").replace(",", "")) == 0 for value in headers):
         raise AdapterError("perf report decoded zero samples")
     rows = []
-    pattern = r"^\s*([\d.]+)%\s+([\d,]+)\s+(.+?)\s+\[([.kugh])\]\s+(.+?)\s*$"
+    ipc_columns = re.search(r"^#.*\bSymbol[ \t]+IPC[ \t]+\[IPC Coverage\][ \t]*$", text, re.MULTILINE)
+    pattern = r"^[ \t]*([\d.]+)%[ \t]+([\d,]+)[ \t]+(.+?)[ \t]+\[([.kugh])\][ \t]+(.+)$"
     for overhead, count, dso, context, symbol in re.findall(pattern, text, re.MULTILINE):
+        symbol = symbol.strip()
+        if ipc_columns:
+            columns = symbol.rsplit(None, 2)
+            if len(columns) == 3 and columns[1:] == ["-", "-"]:
+                symbol = columns[0]
         rows.append({"samples": int(count.replace(",", "")), "overheadPercent": float(overhead),
                      "dso": dso, "context": context, "symbol": symbol})
     count = sum(row["samples"] for row in rows)
@@ -336,7 +342,7 @@ def report_samples(text):
         raise AdapterError("perf report did not expose positive integer sample rows with DSO and symbols")
     unknown_symbols = sum(row["samples"] for row in rows
                           if row["symbol"] in {"[unknown]", "??"}
-                          or re.fullmatch(r"0x[\da-fA-F]+", row["symbol"]))
+                          or re.fullmatch(r"(?:0[xX][\da-fA-F]+|[\da-fA-F]{16})", row["symbol"]))
     unknown_dsos = sum(row["samples"] for row in rows if row["dso"] == "[unknown]")
     return {
         "sampleCount": count,
