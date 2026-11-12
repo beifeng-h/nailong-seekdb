@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      COUNT_BASELINE_DIAGNOSTICS_ONLY: '1'
+      COUNT_BASELINE_DIAGNOSTICS_ONLY: '0'
       CARGO_BUILD_JOBS: '2'
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       GIT_TERMINAL_PROMPT: '0'
@@ -306,6 +306,8 @@ jobs:
               'validationScope', 'baselineCountPreflightPassed', 'countOnlySqlParityPassed',
               'countOnlyPlanProofPassed',
               'diagnosticOnly', 'candidateBuildAttempted', 'baselineDiagnostics',
+              'legacyScoredControlErrors', 'newDenseCountExpectedResultsPassed', 'matrixRawSqlCounts',
+              'allMatrixSqlSucceeded', 'inheritedBaselineCountErrors',
           ) if key in report}
           print('COUNT_ONLY_VISIBLE_RESULT', json.dumps(visible))
           with open(sys.argv[2], 'a', encoding='utf-8') as summary:
