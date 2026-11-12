@@ -1,0 +1,87 @@
+name: SeekDB FTS saved recording analysis
+
+on:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+    paths:
+      - .github/workflows/fts-profile-recording-analysis.yml
+      - .github/script/seekdb/fts-profile-recording-analysis/run.sh
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: seekdb-fts-profile-recording-analysis-20261111
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      DEBUGINFOD_URLS: ''
+      LC_ALL: C
+      LANG: C
+    steps:
+      - name: Initialize isolated analysis paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/fts-recording-analysis-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$work" && test ! -L "$work"
+          mkdir -m 0700 "$work"
+          mkdir -m 0700 "$work/evidence" "$work/downloads"
+          printf 'PROFILE_ANALYSIS_WORK_ROOT=%s\n' "$work" >> "$GITHUB_ENV"
+
+      - name: Checkout the exact analysis source directories
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            .github/script/seekdb/fts-profile-runtime
+            .github/script/seekdb/fts-profile-recording-analysis
+          sparse-checkout-cone-mode: false
+
+      - name: Download the exact successful recording ZIP
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 5
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43123455292'
+          artifact-ids: '13901996224'
+          github-token: ${{ github.token }}
+          path: ${{ env.PROFILE_ANALYSIS_WORK_ROOT }}/downloads/recording
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download the exact candidate ELF ZIP
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 5
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '42953505169'
+          artifact-ids: '13828533821'
+          github-token: ${{ github.token }}
+          path: ${{ env.PROFILE_ANALYSIS_WORK_ROOT }}/downloads/candidate
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Verify saved inputs and decode their call chains
+        shell: bash
+        run: bash .github/script/seekdb/fts-profile-recording-analysis/run.sh
+
+      - name: Preserve analysis evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fts-profile-recording-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PROFILE_ANALYSIS_WORK_ROOT }}/evidence/
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 3
+          include-hidden-files: false

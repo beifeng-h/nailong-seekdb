@@ -3,6 +3,9 @@ name: SeekDB FTS profiling diagnostics
 on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
+    paths-ignore:
+      - .github/workflows/fts-profile-recording-analysis.yml
+      - .github/script/seekdb/fts-profile-recording-analysis/**
 
 permissions:
   contents: read
