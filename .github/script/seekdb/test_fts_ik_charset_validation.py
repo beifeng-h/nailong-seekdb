@@ -196,6 +196,17 @@ class CompilationTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.TestCase):
+    METADATA_OUTPUT = (b'ik-long-input-metadata\t1664\t4736\tutf8mb4_general_ci\t1'
+                       b'\t1664\t4736\tutf8mb4_general_ci\t1\n')
+
+    def capture_with_metadata(self, capture):
+        def run(command, path, cwd, timeout, **kwargs):
+            if path.name == 'ik-charset-case-' + ik.METADATA_CASE_NAME + '.log':
+                path.write_bytes(self.METADATA_OUTPUT)
+                return {'exitCode': 0, 'childrenCleaned': True}
+            return capture(command, path, cwd, timeout, **kwargs)
+        return run
+
     def sql(self, call, out, label, text):
         labels = re.findall(r"^SELECT '([^']+)'", text, re.M)
         raw = ''.join(name + '\t[]\n' for name in labels)
@@ -209,13 +220,14 @@ class CallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                 patch.object(ik.driver, 'sql', side_effect=self.sql), \
-                patch.object(ik.common, 'capture_group', side_effect=capture):
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
             result = ik.equality_work(SimpleNamespace(obclient='/client', port=1234), Path(tmp))
         decoded = json.loads(bytes.fromhex(result['canonical']))
         self.assertEqual(decoded['collation'], 'abcd')
         self.assertIn('ik_utf8\t[]', bytes.fromhex(decoded['ikOutput']).decode())
-        self.assertEqual([row['exitCode'] for row in decoded['sqlOutcomes']], [1] * 11)
-        self.assertTrue(all(row['serverErrorCode'] == 1366 for row in decoded['sqlOutcomes']))
+        cases = [row for row in decoded['sqlOutcomes'] if row['name'] != ik.METADATA_CASE_NAME]
+        self.assertEqual([row['exitCode'] for row in cases], [1] * 17)
+        self.assertTrue(all(row['serverErrorCode'] == 1366 for row in cases))
         self.assertTrue(result['repeatedCallsShareConnection'])
 
     def test_malformed_text_may_complete_successfully_and_preserves_that_status(self):
@@ -225,7 +237,7 @@ class CallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                 patch.object(ik.driver, 'sql', side_effect=self.sql), \
-                patch.object(ik.common, 'capture_group', side_effect=capture):
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
             result = ik.equality_work(SimpleNamespace(obclient='/client', port=1234), Path(tmp))
         self.assertTrue(all(row['exitCode'] == 0 for row in result['charsetOutcomes']))
 
@@ -236,9 +248,10 @@ class CallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                 patch.object(ik.driver, 'sql', side_effect=self.sql), \
-                patch.object(ik.common, 'capture_group', side_effect=capture):
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
             result = ik.equality_work(SimpleNamespace(obclient='/client', port=1234), Path(tmp))
-        wide = result['charsetOutcomes'][:len(ik.WIDE_SQL_CASES)]
+        names = {row[0] for row in ik.WIDE_SQL_CASES}
+        wide = [row for row in result['charsetOutcomes'] if row['name'] in names]
         self.assertEqual([row['name'] for row in wide], [row[0] for row in ik.WIDE_SQL_CASES])
         self.assertTrue(all(row['exitCode'] == 1 and row['serverErrorCode'] == 1235
                             and row['unsupportedMessage'] for row in wide))
@@ -255,7 +268,7 @@ class CallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                 patch.object(ik.driver, 'sql', side_effect=self.sql), \
-                patch.object(ik.common, 'capture_group', side_effect=capture):
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
             out = Path(tmp)
             result = ik.equality_work(SimpleNamespace(obclient='/client', port=1234), out)
             path = out / 'ik-charset-case-null-binary-input.log'
@@ -277,27 +290,102 @@ class CallbackTests(unittest.TestCase):
         self.assertIn("SELECT 'ik_empty', TOKENIZE(_utf8mb4 '' COLLATE utf8mb4_general_ci, 'ik');", ik.IK_SQL)
 
     def test_same_connection_suite_covers_both_modes_and_the_real_batch_boundary(self):
-        repeated = re.findall(r"REPEAT\(_utf8mb4 X'([0-9A-F]+)', (\d+)\)", ik.IK_SQL)
-        self.assertEqual(len(repeated), 2)
+        literals = re.findall(r"SELECT 'ik_long_(?:smart|max_word)', TOKENIZE\(_utf8mb4 X'([0-9A-F]+)'", ik.IK_SQL)
+        self.assertEqual(len(literals), 2)
         header = Path(__file__).resolve().parents[3] / 'src/storage/fts/ob_ik_ft_parser.h'
         limit = int(re.search(r'SEGMENT_LIMIT\s*=\s*(\d+)', header.read_text())[1])
-        for value, count in repeated:
-            expanded = bytes.fromhex(value).decode('utf-8') * int(count)
+        for value in literals:
+            data = bytes.fromhex(value)
+            self.assertEqual(data, bytes.fromhex(ik.LONG_SEED_HEX) * 128)
+            self.assertEqual(data, ik.LONG_INPUT)
+            self.assertEqual(len(data), 4736)
+            expanded = data.decode('utf-8')
+            self.assertEqual(len(expanded), 1664)
+            self.assertEqual(expanded.count(' '), 128)
             self.assertGreater(len(expanded), limit)
             self.assertTrue(any(index > limit for index, char in enumerate(expanded) if char == ' '))
+        self.assertNotIn('REPEAT(', ik.IK_SQL)
         for label in ('ik_long_smart', 'ik_long_max_word', 'ik_binary_session', 'ik_repeated_smart'):
             self.assertIn("SELECT '" + label + "'", ik.IK_SQL)
+
+    def test_four_probes_and_original_repeat_boundaries_are_retained(self):
+        probes = dict(ik.LONG_INPUT_PROBES)
+        self.assertEqual(set(probes), {'repeat-below-batch-smart', 'literal-below-batch-smart',
+                                      'literal-long-smart', 'cast-repeat-long-smart'})
+        self.assertEqual(len(ik.SHORT_INPUT.decode('utf-8')), 520)
+        self.assertEqual(len(ik.SHORT_INPUT), 1480)
+        self.assertIn(ik.SHORT_REPEAT, probes['repeat-below-batch-smart'])
+        self.assertIn(ik.SHORT_UTF8_LITERAL, probes['literal-below-batch-smart'])
+        self.assertIn(ik.LONG_UTF8_LITERAL, probes['literal-long-smart'])
+        self.assertIn('AS CHAR(5000) CHARACTER SET utf8mb4', probes['cast-repeat-long-smart'])
+        repeats = dict(ik.REPEAT_SQL_CASES)
+        self.assertIn(ik.LONG_REPEAT, repeats['repeat-long-smart'])
+        self.assertIn(ik.SMART_PROPERTIES, repeats['repeat-long-smart'])
+        self.assertIn(ik.LONG_REPEAT, repeats['repeat-long-max-word'])
+        self.assertIn(ik.MAX_WORD_PROPERTIES, repeats['repeat-long-max-word'])
+
+    def test_all_diagnostics_are_saved_before_a_required_literal_failure(self):
+        def capture(command, path, cwd, timeout, **kwargs):
+            path.write_bytes(b'ERROR 1210 (HY000) at line 2: Invalid argument\n')
+            return {'exitCode': 1, 'childrenCleaned': True}
+        def sql(call, out, label, text):
+            diagnostics = json.loads((out / 'ik-input-diagnostics.json').read_text())
+            self.assertEqual(len(diagnostics['outcomes']), 18)
+            self.assertTrue(diagnostics['metadataVerified'])
+            self.assertEqual(label, 'ik-charset')
+            (out / 'ik-charset.log').write_bytes(b'required literal failed\n')
+            raise RuntimeError('required literal failed')
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
+                patch.object(ik.driver, 'sql', side_effect=sql), \
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
+            out = Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, 'required literal failed'):
+                ik.equality_work(SimpleNamespace(obclient='/client', port=1234), out)
+            names = {row['name'] for row in json.loads((out / 'ik-input-diagnostics.json').read_text())['outcomes']}
+            self.assertTrue(set(dict(ik.LONG_INPUT_PROBES)) <= names)
+            self.assertTrue(set(dict(ik.REPEAT_SQL_CASES)) <= names)
+            self.assertEqual((out / 'ik-charset.log').read_bytes(), b'required literal failed\n')
+
+    def test_bad_metadata_stops_required_sql_after_all_diagnostics_are_saved(self):
+        for mode in ('server-error', 'wrong-length', 'wrong-hex'):
+            def capture(command, path, cwd, timeout, **kwargs):
+                data, code = b'[]\n', 0
+                if path.name == 'ik-charset-case-' + ik.METADATA_CASE_NAME + '.log':
+                    data = self.METADATA_OUTPUT
+                    if mode == 'server-error':
+                        data, code = b'ERROR 1210 (HY000) at line 2: Invalid argument\n', 1
+                    elif mode == 'wrong-length':
+                        data = data.replace(b'\t4736\t', b'\t4735\t', 1)
+                    else:
+                        data = data.replace(b'\t1\n', b'\t0\n')
+                path.write_bytes(data)
+                return {'exitCode': code, 'childrenCleaned': True}
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(ik, '_equality_work') as collation, \
+                    patch.object(ik.driver, 'sql') as required, \
+                    patch.object(ik.common, 'capture_group', side_effect=capture):
+                out = Path(tmp)
+                with self.assertRaises(RuntimeError):
+                    ik.equality_work(SimpleNamespace(obclient='/client', port=1234), out)
+                proof = json.loads((out / 'ik-input-diagnostics.json').read_text())
+                self.assertEqual(len(proof['outcomes']), 18)
+                self.assertFalse(proof['metadataVerified'])
+                collation.assert_not_called()
+                required.assert_not_called()
 
     def test_incomplete_valid_output_and_unexpected_client_failures_are_rejected(self):
         for mode in ('missing-output', 'timeout', 'connection-failure'):
             def capture(command, path, cwd, timeout, **kwargs):
-                path.write_bytes(b'ERROR 2002 (HY000): Connection failed\n')
-                return {'exitCode': 124 if mode == 'timeout' else 1, 'childrenCleaned': True}
+                path.write_bytes(b'[]\n' if mode == 'missing-output' else b'ERROR 2002 (HY000): Connection failed\n')
+                code = 0 if mode == 'missing-output' else 124 if mode == 'timeout' else 1
+                return {'exitCode': code, 'childrenCleaned': True}
             sql = (lambda *args: '') if mode == 'missing-output' else self.sql
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp, \
                     patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                     patch.object(ik.driver, 'sql', side_effect=sql), \
-                    patch.object(ik.common, 'capture_group', side_effect=capture), self.assertRaises(RuntimeError):
+                    patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)), \
+                    self.assertRaisesRegex(RuntimeError, 'Incomplete IK charset' if mode == 'missing-output' else 'Charset-case SQL'):
                 ik.equality_work(SimpleNamespace(obclient='/client', port=1234), Path(tmp))
 
     def test_lost_connection_with_a_line_number_is_rejected_and_raw_log_retained(self):
@@ -308,11 +396,11 @@ class CallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
                 patch.object(ik.driver, 'sql', side_effect=self.sql), \
-                patch.object(ik.common, 'capture_group', side_effect=capture):
+                patch.object(ik.common, 'capture_group', side_effect=self.capture_with_metadata(capture)):
             out = Path(tmp)
             with self.assertRaisesRegex(RuntimeError, 'lost its client connection'):
                 ik.equality_work(SimpleNamespace(obclient='/client', port=1234), out)
-            path = out / ('ik-charset-case-' + ik.WIDE_SQL_CASES[0][0] + '.log')
+            path = out / ('ik-charset-case-' + ik.LONG_INPUT_PROBES[0][0] + '.log')
             self.assertEqual(path.read_bytes(), raw)
 
     def test_prebuild_wraps_existing_baseline_instance_and_restores_callback(self):
