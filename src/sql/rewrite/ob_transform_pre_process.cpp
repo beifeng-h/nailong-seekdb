@@ -3831,6 +3831,62 @@ bool ObTransformPreProcess::is_count_star_parent(
   return true;
 }
 
+int ObTransformPreProcess::prune_count_star_projection(
+    const common::ObIArray<ObParentDMLStmt> &parent_stmts,
+    ObDMLStmt *child,
+    bool &trans_happened)
+{
+  int ret = OB_SUCCESS;
+  trans_happened = false;
+  ObSelectStmt *child_select = static_cast<ObSelectStmt *>(child);
+  ObSelectStmt *parent = static_cast<ObSelectStmt *>(parent_stmts.at(parent_stmts.count() - 1).stmt_);
+  const ObSelectStmt *statements[] = {parent, child_select};
+  const ObHint *project_hints[] = {nullptr, nullptr};
+  const ObQueryHint *query_hint = child_select->get_stmt_hint().query_hint_;
+  bool can_prune = false;
+  ObSqlBitSet<> removed_idxs;
+  if (OB_ISNULL(query_hint)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("missing query hint for count projection pruning", K(ret));
+  } else if (query_hint->has_outline_data()) {
+    // The projection-pruning rule owns outline cursor updates.
+  } else if (OB_FAIL(ObTransformUtils::check_project_pruning_validity(*child_select, can_prune))) {
+    LOG_WARN("failed to check count projection pruning", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && can_prune && i < 2; ++i) {
+    const ObStmtHint &stmt_hint = statements[i]->get_stmt_hint();
+    const ObHint *no_rewrite_hint = stmt_hint.get_no_rewrite_hint();
+    const ObHint *project_hint = stmt_hint.get_normal_hint(T_PROJECT_PRUNE);
+    project_hints[i] = project_hint;
+    if (OB_NOT_NULL(project_hint) && project_hint->is_enable_hint()) {
+    } else if (OB_NOT_NULL(no_rewrite_hint)
+               || (OB_NOT_NULL(project_hint) && project_hint->is_disable_hint())) {
+      can_prune = false;
+      if (OB_FAIL(ctx_->add_used_trans_hint(no_rewrite_hint))) {
+      } else if (OB_FAIL(ctx_->add_used_trans_hint(project_hint))) {
+      }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && can_prune && i < child_select->get_select_item_size(); ++i) {
+    if (OB_FAIL(removed_idxs.add_member(i))) {
+      LOG_WARN("failed to mark unused count projection", K(ret));
+    }
+  }
+  if (OB_SUCC(ret) && can_prune) {
+    const TableItem *view = parent->get_table_item(0);
+    if (OB_FAIL(ObTransformUtils::remove_select_items(ctx_, view->table_id_,
+                                                    *child_select, *parent, removed_idxs))) {
+      LOG_WARN("failed to prune unused count projection", K(ret));
+    } else {
+      trans_happened = true;
+      if (OB_FAIL(ctx_->add_used_trans_hint(project_hints[0]))) {
+      } else if (OB_FAIL(ctx_->add_used_trans_hint(project_hints[1]))) {
+      }
+    }
+  }
+  return ret;
+}
+
 // full-text index queries on a single base table are processed with order preservation.
 // (Order is not preserved in multi-table join scenarios.)
 int ObTransformPreProcess::preserve_order_for_fulltext_search(
@@ -3906,7 +3962,9 @@ int ObTransformPreProcess::preserve_order_for_fulltext_search(
       }  
     }
   } else if (is_count_star_parent(parent_stmts, stmt)) {
-    // Only the derived-table row count is consumed. LIMIT and OFFSET stay in place.
+    if (OB_FAIL(prune_count_star_projection(parent_stmts, stmt, trans_happened))) {
+      LOG_WARN("failed to prune count-only fulltext projection", K(ret));
+    }
   } else {
     const common::ObIArray<ObRawExpr *> &condition_exprs = stmt->get_condition_exprs();
     bool found = false;

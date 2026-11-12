@@ -42,6 +42,13 @@ def accepted_matrix(role):
         rawSqlCounts=dict(total=138, succeeded=138, failed=0), allRawSqlSucceeded=True))
 
 
+def accepted_hint_controls(role):
+    canonical = json.dumps({name: b'2\n'.hex() for name, scope, hint, back in count_only.PROJECTION_HINTS},
+                           sort_keys=True, separators=(',', ':')).encode().hex()
+    return dict(passed=True, role=role, caseCount=6, sqlCount=12, canonical=canonical,
+                outlineReplayExecuted=False, outlineReplayVerified=False)
+
+
 class CountConsumerTests(unittest.TestCase):
     def test_candidate_count_plan_rejects_relevance_and_implicit_sort(self):
         count_only.check_count_plan(retrieval_plan(False), False, True)
@@ -54,6 +61,24 @@ class CountConsumerTests(unittest.TestCase):
         for value in ('true', 'false'):
             proof = count_only.check_count_plan(retrieval_plan(False, index_back=value), False, True)
             self.assertEqual(proof['actualIndexBack'], value == 'true')
+
+    def test_required_index_back_value_rejects_wrong_or_missing_owned_annotation(self):
+        for expected in (False, True):
+            accepted = retrieval_plan(False, index_back=str(expected).lower())
+            proof = count_only.check_count_plan(accepted, False, True, expected_index_back=expected)
+            self.assertEqual(proof['expectedIndexBack'], expected)
+            for rejected in (retrieval_plan(False, index_back=str(not expected).lower()),
+                             accepted.replace('is_index_back=' + str(expected).lower(), 'missing_index_back'),
+                             accepted.replace('is_index_back=' + str(expected).lower(), 'is_index_back=unknown')):
+                with self.subTest(expected=expected), self.assertRaisesRegex(RuntimeError, 'index-back plan mismatch'):
+                    count_only.check_count_plan(rejected, False, True, expected_index_back=expected)
+
+    def test_required_index_back_annotation_must_belong_to_the_retrieval_operator(self):
+        text = retrieval_plan(False).replace(
+            '  0 - output([T_FUN_COUNT(*)]), filter(nil)',
+            '  0 - output([T_FUN_COUNT(*)]), filter(nil)\n      is_index_back=false')
+        with self.assertRaisesRegex(RuntimeError, 'index-back plan mismatch'):
+            count_only.check_count_plan(text, False, True, expected_index_back=False)
 
     def test_count_statements_have_standalone_labels_and_fixed_expected_counts(self):
         expected = dict(count_only.COUNT_CASES)
@@ -83,6 +108,154 @@ class CountConsumerTests(unittest.TestCase):
             '  0 - output([T_FUN_COUNT(*)]), filter(nil)',
             '  0 - output([T_FUN_COUNT(*)]), filter(nil)\n      sort_keys([other_column])')
         self.assertFalse(count_only.check_count_plan(text, False, True)['hasImplicitSortKeys'])
+
+
+class ProjectionHintTests(unittest.TestCase):
+    EXPECTED = {
+        'child_no_rewrite': ('child', 'NO_REWRITE', True),
+        'parent_no_rewrite': ('parent', 'NO_REWRITE', True),
+        'child_no_project_prune': ('child', 'NO_PROJECT_PRUNE', True),
+        'parent_no_project_prune': ('parent', 'NO_PROJECT_PRUNE', True),
+        'child_project_prune_no_rewrite': ('child', 'PROJECT_PRUNE NO_REWRITE', False),
+        'parent_project_prune_no_rewrite': ('parent', 'PROJECT_PRUNE NO_REWRITE', False),
+    }
+
+    def capture(self, role, mutation=None):
+        calls = []
+
+        def run(command, output, cwd, timeout, **kwargs):
+            calls.append(output.stem)
+            is_count = output.stem.endswith('-count')
+            suffix = '-count' if is_count else '-explain'
+            name = output.stem.removeprefix('count-hint-').removesuffix(suffix)
+            expected_back = role == 'baseline' or self.EXPECTED[name][2]
+            raw = b'2\n' if is_count else retrieval_plan(role == 'baseline',
+                '[MATCH(docs.body), DESC]' if role == 'baseline' else 'nil',
+                index_back=str(expected_back).lower()).encode()
+            result = dict(exitCode=0, childrenCleaned=True)
+            if mutation:
+                raw, result = mutation(name, is_count, raw, result)
+            output.write_bytes(raw)
+            return result
+
+        return run, calls
+
+    def execute(self, root, role='candidate', mutation=None):
+        capture, calls = self.capture(role, mutation)
+        call = SimpleNamespace(obclient=Path('/client'), port=7500)
+        with patch.object(count_only, 'matrix_identity', return_value={'role': role}) as identity, \
+                patch.object(count_only.common, 'capture_group', side_effect=capture), \
+                patch.object(count_only, 'matrix_work') as matrix:
+            result = count_only.projection_hint_work(call, root, role)
+        identity.assert_called_once_with(root, role)
+        matrix.assert_not_called()
+        return result, calls
+
+    def test_six_block_local_hints_change_only_the_requested_select_hint(self):
+        plain = ("SELECT COUNT(*) FROM (SELECT id FROM fts_count_consumer.docs WHERE "
+                 "MATCH(body) AGAINST('database performance audit') LIMIT 2) counted;")
+        cases = count_only.projection_hint_queries()
+        self.assertEqual([case['name'] for case in cases], list(self.EXPECTED))
+        self.assertEqual(len(count_only.COUNT_CASES), 13)
+        for case in cases:
+            scope, hint, back = self.EXPECTED[case['name']]
+            if scope == 'child':
+                expected = plain.replace('(SELECT id ', '(SELECT /*+ ' + hint + ' */ id ', 1)
+            else:
+                expected = plain.replace('SELECT COUNT(*) ', 'SELECT /*+ ' + hint + ' */ COUNT(*) ', 1)
+            self.assertEqual(case['sql'], expected)
+            self.assertEqual(case['candidateExpectedIndexBack'], back)
+            self.assertEqual(case['sql'].count('/*+'), 1)
+            self.assertNotIn('OUTLINE', case['sql'])
+
+    def test_each_role_captures_twelve_full_outputs_and_uses_fixed_count_canonical(self):
+        results = {}
+        for role in ('baseline', 'candidate'):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                result, calls = self.execute(root, role)
+                results[role] = result
+                report = json.loads((root / 'count-projection-hint-controls.json').read_text())
+                self.assertTrue(report['passed'])
+                self.assertEqual(len(calls), 12)
+                self.assertEqual(len(report['cases']), 6)
+                self.assertFalse(report['outlineReplayExecuted'])
+                self.assertFalse(report['outlineReplayVerified'])
+                self.assertEqual(result['reportSha256'], hashlib.sha256(
+                    (root / 'count-projection-hint-controls.json').read_bytes()).hexdigest())
+                for case in report['cases']:
+                    self.assertEqual(case['count']['observedCount'], 2)
+                    self.assertEqual(bytes.fromhex(case['count']['outputHex']), b'2\n')
+                    self.assertEqual(Path(case['count']['sqlPath']).read_text(encoding='utf-8'),
+                                     count_only.common.SESSION + case['sql'] + '\n')
+                    plan = case['planVerification']
+                    self.assertEqual(plan['actualCalcRelevance'], role == 'baseline')
+                    self.assertEqual(plan['actualIndexBack'], role == 'baseline' or self.EXPECTED[case['name']][2])
+                    self.assertEqual(plan['expectedIndexBack'], plan['actualIndexBack'])
+                    self.assertEqual(case['explain']['outputSha256'], hashlib.sha256(
+                        Path(case['explain']['outputPath']).read_bytes()).hexdigest())
+        self.assertEqual(results['baseline']['canonical'], results['candidate']['canonical'])
+        self.assertEqual(json.loads(bytes.fromhex(results['candidate']['canonical'])),
+                         {name: b'2\n'.hex() for name in self.EXPECTED})
+
+    def test_wrong_count_preserves_every_case_before_failing(self):
+        def mutation(name, is_count, raw, result):
+            return (b'3\n' if is_count and name == 'child_no_rewrite' else raw), result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, 'hint controls failed'):
+                self.execute(root, mutation=mutation)
+            report = json.loads((root / 'count-projection-hint-controls.json').read_text())
+            self.assertFalse(report['passed'])
+            self.assertEqual(len(report['cases']), 6)
+            self.assertEqual(report['cases'][0]['count']['observedCount'], 3)
+            self.assertTrue(all(case['explain']['outputPath'] for case in report['cases']))
+
+    def test_disable_and_explicit_enable_both_require_their_own_index_back_result(self):
+        for role, name in (('candidate', 'child_no_rewrite'),
+                           ('candidate', 'parent_no_project_prune'),
+                           ('candidate', 'child_project_prune_no_rewrite'),
+                           ('candidate', 'parent_project_prune_no_rewrite'),
+                           ('baseline', 'parent_project_prune_no_rewrite')):
+            def mutation(case, is_count, raw, result):
+                if case == name and not is_count:
+                    expected = role == 'baseline' or self.EXPECTED[name][2]
+                    raw = raw.replace(('is_index_back=' + str(expected).lower()).encode(),
+                                      ('is_index_back=' + str(not expected).lower()).encode())
+                return raw, result
+
+            with self.subTest(role=role, name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with self.assertRaises(RuntimeError):
+                    self.execute(root, role, mutation)
+                report = json.loads((root / 'count-projection-hint-controls.json').read_text())
+                self.assertTrue(any('index-back plan mismatch' in row['reason'] for row in report['violations']))
+
+    def test_hint_control_rejects_candidate_scoring_or_sorting(self):
+        for plan in (retrieval_plan(True), retrieval_plan(False, '[MATCH(docs.body), DESC]')):
+            def mutation(name, is_count, raw, result):
+                return (plan.encode() if name == 'parent_no_rewrite' and not is_count else raw), result
+
+            with self.subTest(plan=plan), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError):
+                    self.execute(Path(tmp), mutation=mutation)
+
+    def test_hint_errors_have_no_inherited_matrix_exception(self):
+        def mutation(name, is_count, raw, result):
+            if name == 'child_no_rewrite' and is_count:
+                return b'ERROR 4016 (HY000): Internal error\n', dict(exitCode=1, childrenCleaned=True)
+            return raw, result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(RuntimeError):
+                self.execute(root, mutation=mutation)
+            report = json.loads((root / 'count-projection-hint-controls.json').read_text())
+            self.assertEqual(len(report['cases']), 6)
+            self.assertEqual(report['cases'][0]['count']['serverErrorCode'], 4016)
+            self.assertEqual(report['cases'][0]['count']['exitCode'], 1)
+            self.assertFalse(report['passed'])
 
 
 class SourceProofTests(unittest.TestCase):
@@ -270,7 +443,7 @@ class CallbackTests(unittest.TestCase):
                     'limit_2\n2\nlimit_32\n32\nlimit_40\n32\nlimit_0\n0\n'
                     'offset_30\n2\noffset_33\n0\nno_match\n0\ncount_column\n0\nparent_filter\n5\n')
 
-    def fixture_sql(self, role, bad_count=False, bad_control=False):
+    def fixture_sql(self, role, bad_count=False, bad_control=False, bad_back=False):
         def sql(call, out, label, query):
             (out / (label + '.sql')).write_text(query, encoding='utf-8')
             if label == 'cs45-equality':
@@ -283,7 +456,9 @@ class CallbackTests(unittest.TestCase):
                 scored = name in count_only.SCORING_CONTROLS or role == 'baseline'
                 if bad_control and name in count_only.SCORING_CONTROLS:
                     scored = False
-                text = retrieval_plan(scored, '[MATCH(docs.body), DESC]' if scored else 'nil')
+                back = role == 'baseline' or name in count_only.SCORING_CONTROLS or bad_back
+                text = retrieval_plan(scored, '[MATCH(docs.body), DESC]' if scored else 'nil',
+                                      index_back=str(back).lower())
             (out / (label + '.log')).write_bytes(text.encode('utf-8'))
             return text
         return sql
@@ -295,22 +470,32 @@ class CallbackTests(unittest.TestCase):
                 out = Path(tmp) / ('equality-' + role)
                 out.mkdir()
                 with patch.object(count_only.driver, 'sql', side_effect=self.fixture_sql(role)), \
+                        patch.object(count_only, 'projection_hint_work', return_value=accepted_hint_controls(role)) as hints, \
                         patch.object(count_only, 'matrix_work', return_value=accepted_matrix(role)) as matrix:
                     results[role] = count_only.equality_work(None, out)
                 matrix.assert_called_once_with(None, out, role, strict=True)
+                hints.assert_called_once_with(None, out, role)
                 self.assertEqual((out / 'count-consumer.log').read_text(), self.COUNT_OUTPUT)
                 self.assertEqual(len(results[role]['countConsumerPlans']), 10)
         self.assertEqual(results['baseline']['canonical'], results['candidate']['canonical'])
+        canonical = json.loads(bytes.fromhex(results['candidate']['canonical']))
+        self.assertEqual(canonical['hintCounts'], accepted_hint_controls('candidate')['canonical'])
+        self.assertNotIn('plan', canonical)
         self.assertTrue(results['baseline']['countConsumerPlans']['limit_2']['actualCalcRelevance'])
         self.assertFalse(results['candidate']['countConsumerPlans']['limit_2']['actualCalcRelevance'])
+        for name in count_only.COUNT_PLAN_CASES:
+            self.assertFalse(results['candidate']['countConsumerPlans'][name]['actualIndexBack'])
+            self.assertFalse(results['candidate']['countConsumerPlans'][name]['expectedIndexBack'])
+        for name in count_only.SCORING_CONTROLS:
+            self.assertTrue(results['candidate']['countConsumerPlans'][name]['actualCalcRelevance'])
 
     def test_wrong_count_and_scored_control_regression_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'equality-candidate'
             out.mkdir()
-            for bad_count, bad_control in ((True, False), (False, True)):
+            for bad_count, bad_control, bad_back in ((True, False, False), (False, True, False), (False, False, True)):
                 with self.subTest(bad_count=bad_count), \
-                        patch.object(count_only.driver, 'sql', side_effect=self.fixture_sql('candidate', bad_count, bad_control)), \
+                        patch.object(count_only.driver, 'sql', side_effect=self.fixture_sql('candidate', bad_count, bad_control, bad_back)), \
                         self.assertRaises(RuntimeError):
                     count_only.equality_work(None, out)
 
@@ -322,7 +507,9 @@ class CallbackTests(unittest.TestCase):
         for role in identities:
             def sql(call, out, label, query):
                 expected = label.startswith('control_') or (label == 'query_limit-explain' and role == 'baseline')
-                return retrieval_plan(expected, '[MATCH(docs.body), DESC]' if expected else 'nil')
+                back = role == 'baseline' or label != 'query_limit-explain'
+                return retrieval_plan(expected, '[MATCH(docs.body), DESC]' if expected else 'nil',
+                                      index_back=str(back).lower())
             with patch.object(count_only.common, 'benchmark_work', return_value=lambda call, out:
                               {'passed': True, 'metrics': {'original': 1}}) as factory, \
                     patch.object(count_only.common, 'queries_from_benchmark', return_value={}), \
@@ -331,6 +518,20 @@ class CallbackTests(unittest.TestCase):
                 result = count_only.benchmark_callback(args, identities, role, {}, None)(None, Path('/out'), 42)
             self.assertFalse(factory.call_args.args[3])
             self.assertEqual(result['roleConsistentPlans']['query_limit']['actualCalcRelevance'], role == 'baseline')
+            self.assertEqual(result['roleConsistentPlans']['query_limit']['actualIndexBack'], role == 'baseline')
+
+    def test_original_query_limit_candidate_rejects_index_back_scoring_or_sorting(self):
+        args = SimpleNamespace(source=Path('/candidate'), root=Path('/owned'), driver_sha='c' * 40)
+        rejected = (retrieval_plan(False, index_back='true'),
+                    retrieval_plan(True, index_back='false'),
+                    retrieval_plan(False, '[MATCH(docs.body), DESC]', index_back='false'))
+        for text in rejected:
+            with self.subTest(plan=text), \
+                    patch.object(count_only.common, 'benchmark_work', return_value=lambda call, out: {'passed': True}), \
+                    patch.object(count_only.common, 'queries_from_benchmark', return_value={}), \
+                    patch.object(count_only.common, 'plan_queries', return_value={'query_limit': 'unchanged original SQL'}), \
+                    patch.object(count_only.driver, 'sql', return_value=text), self.assertRaises(RuntimeError):
+                count_only.benchmark_callback(args, {'candidate': {'binary': '/elf'}}, 'candidate', {}, None)(None, None, 42)
 
     def test_failed_benchmark_does_not_execute_plans(self):
         args = SimpleNamespace(source=Path('/candidate'), root=Path('/owned'), driver_sha='c' * 40)
@@ -353,6 +554,25 @@ class CallbackTests(unittest.TestCase):
             self.assertIs(targeted.run, original)
         equality.assert_called_once()
 
+    def test_prepare_metadata_identifies_unused_projection_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(root=Path(tmp))
+
+            def prepare(values):
+                count_only.driver.dump(values.root / 'plan.json', {'scope': 'parent scope'})
+                count_only.driver.dump(values.root / 'report.json', {'status': 'prepared'})
+
+            with patch.object(count_only, '_prepare', side_effect=prepare), \
+                    patch.object(count_only, 'diagnostics_only', return_value=False):
+                count_only.prepare(args)
+            plan = json.loads((args.root / 'plan.json').read_text())
+            report = json.loads((args.root / 'report.json').read_text())
+            self.assertEqual(plan['candidateFeatures'], ['count_consumer_filter_only_limit',
+                                                         'count_only_unused_projection_pruning'])
+            self.assertEqual(plan['scope'], count_only.SCOPE)
+            self.assertEqual(report['validationScope'], count_only.SCOPE)
+            self.assertEqual(report['plan'], plan)
+
     def test_prebuild_failure_restores_original_targeted_entry(self):
         import fts_expr_cache_targeted as targeted
         original = targeted.run
@@ -374,16 +594,36 @@ class CallbackTests(unittest.TestCase):
             args = SimpleNamespace(root=root)
             for same in (False, True):
                 report = {'targeted': {'baseline': {'countOnlyPreflight': {'canonical': '00'}}},
-                          'equality': {'baseline': {'canonical': '00' if same else '01', 'countMatrix': accepted_matrix('baseline')},
-                                       'candidate': {'countMatrix': accepted_matrix('candidate')}}}
+                          'equality': {'baseline': {'canonical': '00' if same else '01', 'countMatrix': accepted_matrix('baseline'),
+                                                   'countProjectionHintControls': accepted_hint_controls('baseline')},
+                                       'candidate': {'countMatrix': accepted_matrix('candidate'),
+                                                     'countProjectionHintControls': accepted_hint_controls('candidate')}}}
                 count_only.driver.dump(root / 'report.json', report)
                 with patch.object(count_only, 'verify_header_dependencies'), patch.object(count_only, '_validate'):
                     if same:
                         count_only.validate(args)
-                        self.assertTrue(json.loads((root / 'report.json').read_text())['countOnlySqlParityPassed'])
+                        saved = json.loads((root / 'report.json').read_text())
+                        self.assertTrue(saved['countOnlySqlParityPassed'])
+                        self.assertTrue(saved['countOnlyIndexBackProofPassed'])
+                        self.assertTrue(saved['projectionHintControlsPassed'])
+                        self.assertFalse(saved['performanceOutlineReplayVerified'])
                     else:
                         with self.assertRaises(RuntimeError):
                             count_only.validate(args)
+
+    def test_failed_hint_controls_cannot_claim_projection_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = dict(targeted={'baseline': {'countOnlyPreflight': {'canonical': '00'}}},
+                equality={role: dict(canonical='00', countMatrix=accepted_matrix(role),
+                    countProjectionHintControls=dict(accepted_hint_controls(role), passed=role == 'baseline'))
+                    for role in ('baseline', 'candidate')})
+            count_only.driver.dump(root / 'report.json', report)
+            with patch.object(count_only, 'verify_header_dependencies'), patch.object(count_only, '_validate'), \
+                    self.assertRaisesRegex(RuntimeError, 'Both roles must pass projection hint controls'):
+                count_only.validate(SimpleNamespace(root=root))
+            saved = json.loads((root / 'report.json').read_text())
+            self.assertNotIn('projectionHintControlsPassed', saved)
 
     def test_private_module_hooks_keep_existing_bounded_lifecycle(self):
         self.assertIs(count_only.parent.validate, count_only.validate)

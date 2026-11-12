@@ -377,6 +377,9 @@ private:
   int convert_join_preds_vector_to_scalar(JoinedTable &joined_table, bool &trans_happened);
   bool is_count_star_parent(const common::ObIArray<ObParentDMLStmt> &parent_stmts,
                            const ObDMLStmt *child) const;
+  int prune_count_star_projection(const common::ObIArray<ObParentDMLStmt> &parent_stmts,
+                                  ObDMLStmt *child,
+                                  bool &trans_happened);
   int preserve_order_for_fulltext_search(const common::ObIArray<ObParentDMLStmt> &parent_stmts,
                                         ObDMLStmt *stmt,
                                         bool &trans_happened);
