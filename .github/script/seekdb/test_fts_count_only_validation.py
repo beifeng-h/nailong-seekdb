@@ -35,6 +35,13 @@ def retrieval_plan(relevance, sort_keys='nil', index_back='true'):
     )
 
 
+def accepted_matrix(role):
+    return dict(strictCountAndPlanValidation=dict(
+        passed=True, newDenseCountExpectedResultsPassed=True if role == 'candidate' else None,
+        legacyScoredControlErrors=[], inheritedBaselineCountErrors=[],
+        rawSqlCounts=dict(total=138, succeeded=138, failed=0), allRawSqlSucceeded=True))
+
+
 class CountConsumerTests(unittest.TestCase):
     def test_candidate_count_plan_rejects_relevance_and_implicit_sort(self):
         count_only.check_count_plan(retrieval_plan(False), False, True)
@@ -259,7 +266,7 @@ class CompilationTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.TestCase):
-    COUNT_OUTPUT = ('rows_remaining\n34\nnull_rows\n1\nempty_rows\n1\nplain_count\n32\n'
+    COUNT_OUTPUT = ('rows_remaining\n69\nnull_rows\n1\nempty_rows\n1\nplain_count\n32\n'
                     'limit_2\n2\nlimit_32\n32\nlimit_40\n32\nlimit_0\n0\n'
                     'offset_30\n2\noffset_33\n0\nno_match\n0\ncount_column\n0\nparent_filter\n5\n')
 
@@ -287,8 +294,10 @@ class CallbackTests(unittest.TestCase):
             for role in ('baseline', 'candidate'):
                 out = Path(tmp) / ('equality-' + role)
                 out.mkdir()
-                with patch.object(count_only.driver, 'sql', side_effect=self.fixture_sql(role)):
+                with patch.object(count_only.driver, 'sql', side_effect=self.fixture_sql(role)), \
+                        patch.object(count_only, 'matrix_work', return_value=accepted_matrix(role)) as matrix:
                     results[role] = count_only.equality_work(None, out)
+                matrix.assert_called_once_with(None, out, role, strict=True)
                 self.assertEqual((out / 'count-consumer.log').read_text(), self.COUNT_OUTPUT)
                 self.assertEqual(len(results[role]['countConsumerPlans']), 10)
         self.assertEqual(results['baseline']['canonical'], results['candidate']['canonical'])
@@ -365,7 +374,8 @@ class CallbackTests(unittest.TestCase):
             args = SimpleNamespace(root=root)
             for same in (False, True):
                 report = {'targeted': {'baseline': {'countOnlyPreflight': {'canonical': '00'}}},
-                          'equality': {'baseline': {'canonical': '00' if same else '01'}}}
+                          'equality': {'baseline': {'canonical': '00' if same else '01', 'countMatrix': accepted_matrix('baseline')},
+                                       'candidate': {'countMatrix': accepted_matrix('candidate')}}}
                 count_only.driver.dump(root / 'report.json', report)
                 with patch.object(count_only, 'verify_header_dependencies'), patch.object(count_only, '_validate'):
                     if same:
@@ -400,7 +410,7 @@ class WorkflowTests(unittest.TestCase):
     def test_explicit_diagnostic_mode_skips_all_three_candidate_steps(self):
         path = Path(__file__).resolve().parents[2] / 'workflows/fts-count-only-validation.yml'
         text = path.read_text(encoding='utf-8')
-        self.assertIn("COUNT_BASELINE_DIAGNOSTICS_ONLY: '1'", text)
+        self.assertIn("COUNT_BASELINE_DIAGNOSTICS_ONLY: '0'", text)
         condition = "if: ${{ env.COUNT_BASELINE_DIAGNOSTICS_ONLY != '1' }}"
         self.assertEqual(text.count(condition), 3)
         for name in ('Build the complete candidate once with the original two-job profile',
@@ -413,7 +423,7 @@ class DiagnosticTests(unittest.TestCase):
     def test_matrix_preserves_original_corpus_and_varies_one_named_factor(self):
         matrices = {row['name']: count_only.diagnostic_fixture(row) for row in count_only.DIAGNOSTIC_FIXTURES}
         dense = matrices['beng_deleted_dense']
-        expected_setup = count_only.COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(
+        expected_setup = count_only.DENSE_COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(
             count_only.TABLE, dense['table'])
         self.assertEqual(dense['setup'], expected_setup)
         self.assertEqual(dense['positiveRows'], 32)
@@ -427,6 +437,9 @@ class DiagnosticTests(unittest.TestCase):
         mixed = matrices['beng_deleted_mixed']
         self.assertEqual(mixed['totalRows'], 69)
         self.assertEqual(mixed['setup'].count("'unrelated zebra orchard'"), 35)
+        self.assertEqual(count_only.COUNT_SETUP.count("'unrelated zebra orchard'"), 35)
+        self.assertIn('DELETE FROM', count_only.COUNT_SETUP)
+        self.assertEqual(dict(count_only.COUNT_CASES)['rows_remaining'][1], 69)
         for matrix in matrices.values():
             self.assertEqual(matrix['setup'].count("'database performance audit'"), 35)
             self.assertEqual(len(matrix['cases']), 15)
@@ -438,11 +451,21 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(cases['offset_30'][1], 5 if matrix['name'] == 'beng_dense_no_delete' else 2)
             self.assertEqual(cases['offset_33'][1], 2 if matrix['name'] == 'beng_dense_no_delete' else 0)
 
-    def owned(self, root, raw=b'[2026-11-12 00:00:00.000001] WARN original root-cause detail\n'):
-        out = root / 'targeted-baseline'
+    def owned(self, root, raw=b'[2026-11-12 00:00:00.000001] WARN original root-cause detail\n', role='baseline'):
+        out = root / 'validation' / ('targeted-baseline' if role == 'baseline' else 'equality-candidate')
         log = out / 'database/log/seekdb.log'
         log.parent.mkdir(parents=True)
         log.write_bytes(raw)
+        identity = dict(role=role, sourceCommit=count_only.BASE if role == 'baseline' else 'c' * 40,
+                        sourceTree=count_only.BASE_TREE if role == 'baseline' else 'd' * 40,
+                        sha256=count_only.parent.BASE_ELF_SHA if role == 'baseline' else 'e' * 64,
+                        buildId=count_only.parent.BASE_BUILD_ID if role == 'baseline' else 'f' * 40,
+                        binary=str(root / 'runtime' / role / 'seekdb'))
+        identity_path = root / 'runtime' / role / 'identity.json'
+        identity_path.parent.mkdir(parents=True, exist_ok=True)
+        count_only.driver.dump(identity_path, identity)
+        count_only.driver.dump(root / 'plan.json', {'proof': {'driverCommit': 'c' * 40, 'driverTree': 'd' * 40}})
+        count_only.driver.dump(out / 'owned-process.json', dict(role=role, binary=identity['binary'], sha256=identity['sha256']))
         call = SimpleNamespace(base_dir=out / 'database', obclient=Path('/client'), port=7500)
         return call, out, log
 
@@ -469,7 +492,7 @@ class DiagnosticTests(unittest.TestCase):
             capture, calls = self.capture('diag-beng_deleted_dense-count-limit_2')
             with patch.object(count_only.common, 'capture_group', side_effect=capture):
                 result = count_only.diagnostic_work(call, out, None, None)
-            data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+            data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
             self.assertEqual(len(calls), 138)
             self.assertEqual(len(data['outcomes']), 138)
             error = next(row for row in data['outcomes'] if row['label'] == 'diag-beng_deleted_dense-count-limit_2')
@@ -493,7 +516,7 @@ class DiagnosticTests(unittest.TestCase):
                 capture, calls = self.capture('diag-beng_deleted_dense-count-limit_2', code)
                 with patch.object(count_only.common, 'capture_group', side_effect=capture), self.assertRaises(RuntimeError):
                     count_only.diagnostic_work(call, out, None, None)
-                data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+                data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
                 self.assertEqual(len(data['outcomes']), 138)
                 self.assertEqual(len(calls), 138)
                 self.assertTrue(any(row['connectionLost'] for row in data['outcomes']))
@@ -505,8 +528,58 @@ class DiagnosticTests(unittest.TestCase):
             capture, calls = self.capture('diag-final-connection', 2006)
             with patch.object(count_only.common, 'capture_group', side_effect=capture), self.assertRaises(RuntimeError):
                 count_only.diagnostic_work(call, out, None, None)
-            data = json.loads((out / 'count-baseline-diagnostics.json').read_text())
+            data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
             self.assertEqual(data['outcomes'][-1]['serverErrorCode'], 2006)
+
+    def matrix_capture(self, role, wrong_count=False):
+        records = {row['label']: row for row in MatrixPolicyTests().outcomes(role)}
+        calls = []
+
+        def capture(command, path, cwd, timeout, **kwargs):
+            calls.append(path.stem)
+            record = records[path.stem]
+            raw = bytes.fromhex(record['outputHex'])
+            if wrong_count and path.stem == 'diag-beng_deleted_dense-count-limit_2':
+                raw = b'0\n'
+            path.write_bytes(raw)
+            return dict(exitCode=record['exitCode'], childrenCleaned=True)
+
+        return capture, calls
+
+    def test_strict_matrix_captures_all_sql_and_binds_each_actual_role(self):
+        for role in ('baseline', 'candidate'):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:
+                call, out, log = self.owned(Path(tmp), role=role)
+                capture, calls = self.matrix_capture(role)
+                with patch.object(count_only.common, 'capture_group', side_effect=capture):
+                    result = count_only.matrix_work(call, out, role, strict=True)
+                data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
+                self.assertEqual(len(calls), 138)
+                self.assertEqual(len(data['outcomes']), 138)
+                self.assertTrue(result['strictCountAndPlanValidation']['passed'])
+                self.assertFalse(result['diagnosticOnly'])
+                self.assertEqual(result['roleIdentity']['role'], role)
+                self.assertEqual(result['candidateBuildAttempted'], role == 'candidate')
+                self.assertEqual(len(data['strictCountAndPlanValidation']['legacyScoredControlErrors']), 2)
+                self.assertEqual(sum(row['exitCode'] == 1 for row in data['outcomes']), 8 if role == 'baseline' else 2)
+
+    def test_strict_matrix_saves_complete_evidence_before_rejecting_wrong_candidate_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), role='candidate')
+            capture, calls = self.matrix_capture('candidate', wrong_count=True)
+            with patch.object(count_only.common, 'capture_group', side_effect=capture), self.assertRaisesRegex(
+                    RuntimeError, 'COUNT matrix failed'):
+                count_only.matrix_work(call, out, 'candidate', strict=True)
+            data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
+            self.assertEqual(len(calls), 138)
+            self.assertEqual(len(data['outcomes']), 138)
+            self.assertFalse(data['strictCountAndPlanValidation']['passed'])
+            self.assertFalse(data['strictCountAndPlanValidation']['newDenseCountExpectedResultsPassed'])
+            rejected = next(row for row in data['outcomes'] if row['label'] == 'diag-beng_deleted_dense-count-limit_2')
+            self.assertEqual(rejected['observedCount'], 0)
+            self.assertEqual(rejected['expectedCount'], 2)
+            self.assertEqual(bytes.fromhex(rejected['outputHex']), b'0\n')
+            self.assertTrue((out / 'count-baseline-live-log.json').is_file())
 
     def test_live_log_keeps_info_error_propagation_and_exact_offsets(self):
         raw = (b'[2026-11-12 00:00:00.000001] INFO context before\n'
@@ -622,7 +695,7 @@ class DiagnosticTests(unittest.TestCase):
                     return count_only.common.CLIENTS[path.name] if path.name in count_only.common.CLIENTS else original_digest(path)
 
                 def owned(args, report, identities, role, name, work, **kwargs):
-                    call, out, log = self.owned(root / 'validation')
+                    call, out, log = self.owned(root)
                     row = {'name': name, 'role': role, 'status': 'running'}
                     try:
                         row['work'] = work(call, out, 42)
@@ -631,7 +704,7 @@ class DiagnosticTests(unittest.TestCase):
                         row.update(status='infrastructure_error', error=str(error))
                     finally:
                         self.assertTrue((out / 'count-baseline-live-log.json').exists())
-                        self.assertTrue((out / 'count-baseline-diagnostics.json').exists())
+                        self.assertTrue((out / 'count-matrix-diagnostics.json').exists())
                         events.append('owned-stop-and-cleanup')
                         row['cleanupPassed'] = True
                         count_only.driver.dump(out / 'result.json', row)
@@ -675,6 +748,149 @@ class DiagnosticTests(unittest.TestCase):
                 count_only.validate(None)
         headers.assert_not_called()
         validate.assert_not_called()
+
+    def test_capture_only_candidate_uses_its_actual_build_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp), role='candidate')
+            capture, calls = self.capture()
+            with patch.object(count_only.common, 'capture_group', side_effect=capture):
+                result = count_only.diagnostic_work(call, out, None, None)
+            data = json.loads((out / 'count-matrix-diagnostics.json').read_text())
+            self.assertEqual(data['roleIdentity']['role'], 'candidate')
+            self.assertEqual(data['roleIdentity']['sourceCommit'], 'c' * 40)
+            self.assertEqual(data['roleIdentity']['elfSha256'], 'e' * 64)
+            self.assertTrue(data['candidateBuildAttempted'])
+            self.assertTrue(result['candidateBuildAttempted'])
+            self.assertFalse(data['correctnessPassed'])
+            self.assertTrue(data['diagnosticOnly'])
+            self.assertIsNone(data['strictCountAndPlanValidation'])
+
+    def test_matrix_identity_rejects_relabelled_elf_or_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call, out, log = self.owned(Path(tmp))
+            root = out.parent.parent
+            identity_path = root / 'runtime/baseline/identity.json'
+            identity = json.loads(identity_path.read_text())
+            identity['sourceCommit'] = 'c' * 40
+            count_only.driver.dump(identity_path, identity)
+            with self.assertRaises(RuntimeError):
+                count_only.matrix_identity(out, 'baseline')
+
+
+class MatrixPolicyTests(unittest.TestCase):
+    CASES = ('rows_remaining', 'null_rows', 'empty_rows', 'plain_count', 'limit_2', 'limit_32',
+             'limit_40', 'limit_0', 'offset_30', 'offset_33', 'no_match', 'count_column',
+             'parent_filter', 'limit_20', 'projection_constant_limit_2')
+    EXPECTED = {
+        'beng_deleted_dense': (34, 1, 1, 32, 2, 32, 32, 0, 2, 0, 0, 0, 5, 20, 2),
+        'beng_dense_no_delete': (37, 1, 1, 35, 2, 32, 35, 0, 5, 2, 0, 0, 5, 20, 2),
+        'ik_deleted_dense': (34, 1, 1, 32, 2, 32, 32, 0, 2, 0, 0, 0, 5, 20, 2),
+        'beng_deleted_mixed': (69, 1, 1, 32, 2, 32, 32, 0, 2, 0, 0, 0, 5, 20, 2),
+    }
+
+    def outcomes(self, role, inherited=True):
+        def row(label, kind, table=None, case=None, expected=None, sql='SELECT 1;', raw=b'', error=None):
+            return dict(label=label, kind=kind, table=table, caseName=case, sql=sql,
+                        expectedCount=expected, observedCount=None if error else expected,
+                        exitCode=1 if error else 0, serverErrorCode=error, childrenCleaned=True,
+                        connectionLost=False, outputHex=raw.hex(), outputSha256=hashlib.sha256(raw).hexdigest())
+
+        rows = [row('diag-schema', 'setup')]
+        for fixture in count_only.DIAGNOSTIC_FIXTURES:
+            matrix = count_only.diagnostic_fixture(fixture)
+            table = matrix['table']
+            rows.append(row('diag-' + fixture['name'] + '-setup', 'setup', table))
+            expected = dict(zip(self.CASES, self.EXPECTED[fixture['name']]))
+            queries = {name: query for name, query, value in matrix['cases']}
+            for name in self.CASES:
+                allowed_error = inherited and fixture['name'] in count_only.DENSE_TABLES and (
+                    name == 'count_column' or role == 'baseline' and name in ('limit_2', 'limit_20', 'projection_constant_limit_2'))
+                raw = b'ERROR 4016 (HY000): Internal error\n' if allowed_error else (str(expected[name]) + '\n').encode()
+                rows.append(row('diag-' + fixture['name'] + '-count-' + name, 'count', table, name,
+                                expected[name], queries[name], raw, 4016 if allowed_error else None))
+            for name, query in matrix['plans'].items():
+                scored = name in ('count_column', 'parent_filter', 'plain_select_limit', 'score_projection', 'score_order')
+                scored = scored or role == 'baseline' and name != 'plain_count'
+                raw = retrieval_plan(scored, '[MATCH(docs.body), DESC]' if scored else 'nil').encode() if 'MATCH(' in query else b'|0|TABLE SCAN|docs|\n'
+                rows.append(row('diag-' + fixture['name'] + '-explain-' + name, 'explain', table, name,
+                                sql='EXPLAIN ' + query, raw=raw))
+        rows.append(row('diag-final-connection', 'connection', raw=b'1\n'))
+        return rows
+
+    def count_row(self, rows, table, case):
+        return next(row for row in rows if row['kind'] == 'count' and row['table'].endswith('.' + table)
+                    and row['caseName'] == case)
+
+    def test_baseline_accepts_only_observed_dense_4016_and_preserves_raw_errors(self):
+        rows = self.outcomes('baseline')
+        verdict = count_only.matrix_verdict(rows, 'baseline')
+        self.assertTrue(verdict['passed'])
+        self.assertEqual(len(verdict['inheritedBaselineCountErrors']), 6)
+        self.assertEqual(len(verdict['legacyScoredControlErrors']), 2)
+        self.assertEqual(verdict['rawSqlCounts'], {'total': 138, 'succeeded': 130, 'failed': 8})
+        self.assertFalse(verdict['allRawSqlSucceeded'])
+        self.assertIsNone(verdict['newDenseCountExpectedResultsPassed'])
+        self.assertEqual(sum(row['exitCode'] == 1 for row in rows), 8)
+
+    def test_candidate_requires_all_new_dense_counts_and_keeps_only_scored_control_exception(self):
+        rows = self.outcomes('candidate')
+        verdict = count_only.matrix_verdict(rows, 'candidate')
+        self.assertTrue(verdict['passed'])
+        self.assertTrue(verdict['newDenseCountExpectedResultsPassed'])
+        self.assertEqual(len(verdict['legacyScoredControlErrors']), 2)
+        self.assertEqual(verdict['inheritedBaselineCountErrors'], [])
+        self.assertEqual(verdict['rawSqlCounts']['failed'], 2)
+        for case in ('limit_2', 'limit_20', 'projection_constant_limit_2'):
+            rows = self.outcomes('candidate')
+            item = self.count_row(rows, 'beng_deleted_dense', case)
+            item.update(exitCode=1, serverErrorCode=4016, observedCount=None)
+            self.assertFalse(count_only.matrix_verdict(rows, 'candidate')['passed'])
+
+    def test_correct_success_is_accepted_for_previously_failing_baseline_or_control(self):
+        for role in ('baseline', 'candidate'):
+            verdict = count_only.matrix_verdict(self.outcomes(role, inherited=False), role)
+            self.assertTrue(verdict['passed'])
+            self.assertTrue(verdict['allRawSqlSucceeded'])
+            self.assertEqual(verdict['legacyScoredControlErrors'], [])
+
+    def test_wrong_success_and_tampered_expected_metadata_are_rejected(self):
+        for role in ('baseline', 'candidate'):
+            rows = self.outcomes(role)
+            item = self.count_row(rows, 'beng_deleted_mixed', 'limit_2')
+            item.update(observedCount=0, expectedCount=0)
+            self.assertFalse(count_only.matrix_verdict(rows, role)['passed'])
+
+    def test_other_tables_cases_error_codes_and_explain_errors_are_rejected(self):
+        for table, case, code in (('beng_deleted_mixed', 'limit_2', 4016),
+                                  ('beng_dense_no_delete', 'count_column', 4016),
+                                  ('beng_deleted_dense', 'limit_32', 4016),
+                                  ('beng_deleted_dense', 'limit_2', 4008)):
+            rows = self.outcomes('baseline')
+            self.count_row(rows, table, case).update(exitCode=1, serverErrorCode=code, observedCount=None)
+            self.assertFalse(count_only.matrix_verdict(rows, 'baseline')['passed'])
+        rows = self.outcomes('baseline')
+        next(row for row in rows if row['kind'] == 'explain').update(exitCode=1, serverErrorCode=4016)
+        self.assertFalse(count_only.matrix_verdict(rows, 'baseline')['passed'])
+
+    def test_consumer_plan_checks_reject_relevance_or_sorting_regression(self):
+        for text in (retrieval_plan(True, '[MATCH(docs.body), DESC]'),
+                     retrieval_plan(False, '[MATCH(docs.body), DESC]')):
+            rows = self.outcomes('candidate')
+            item = next(row for row in rows if row['kind'] == 'explain' and row['caseName'] == 'limit_2')
+            item['outputHex'] = text.encode().hex()
+            self.assertFalse(count_only.matrix_verdict(rows, 'candidate')['passed'])
+        rows = self.outcomes('candidate')
+        item = next(row for row in rows if row['kind'] == 'explain' and row['caseName'] == 'count_column')
+        item['outputHex'] = retrieval_plan(False).encode().hex()
+        self.assertFalse(count_only.matrix_verdict(rows, 'candidate')['passed'])
+
+    def test_missing_duplicate_or_client_failed_outcome_is_rejected(self):
+        rows = self.outcomes('baseline')
+        self.assertFalse(count_only.matrix_verdict(rows[:-1], 'baseline')['passed'])
+        self.assertFalse(count_only.matrix_verdict(rows + [rows[0]], 'baseline')['passed'])
+        rows = self.outcomes('baseline')
+        rows[0]['childrenCleaned'] = False
+        self.assertFalse(count_only.matrix_verdict(rows, 'baseline')['passed'])
 
 
 if __name__ == '__main__':

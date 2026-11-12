@@ -38,7 +38,7 @@ def limited_count(limit, offset=0, aggregate='COUNT(*)', parent_filter='', proje
 
 
 COUNT_CASES = (
-    ('rows_remaining', (f'SELECT COUNT(*) FROM {TABLE};', 34)),
+    ('rows_remaining', (f'SELECT COUNT(*) FROM {TABLE};', 69)),
     ('null_rows', (f'SELECT COUNT(*) FROM {TABLE} WHERE body IS NULL;', 1)),
     ('empty_rows', (f"SELECT COUNT(*) FROM {TABLE} WHERE body = '';", 1)),
     ('plain_count', (f'SELECT COUNT(*) FROM {TABLE} WHERE {MATCH};', 32)),
@@ -54,7 +54,7 @@ COUNT_CASES = (
     ('parent_filter', (limited_count(40, parent_filter=' WHERE counted.id > 30'), 5)),
 )
 _values = ',\n'.join(f"({index}, 'database performance audit', NULL)" for index in range(1, 36))
-COUNT_SETUP = f"""ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table = true;
+DENSE_COUNT_SETUP = f"""ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table = true;
 CREATE DATABASE fts_count_consumer;
 CREATE TABLE {TABLE} (id BIGINT PRIMARY KEY, body TEXT, nullable_value BIGINT)
 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -64,6 +64,14 @@ INSERT INTO {TABLE} VALUES
 ALTER TABLE {TABLE} ADD FULLTEXT INDEX body_fts(body) WITH PARSER beng;
 DELETE FROM {TABLE} WHERE id IN (1, 2, 3);
 """
+_negative_values = ',\n'.join(f"({index}, 'unrelated zebra orchard', NULL)" for index in range(201, 236))
+
+
+def add_unmatched_documents(setup):
+    return setup.replace("(101, NULL, 7), (102, '', 8);", _negative_values + ",\n(101, NULL, 7), (102, '', 8);")
+
+
+COUNT_SETUP = add_unmatched_documents(DENSE_COUNT_SETUP)
 COUNT_SQL = COUNT_SETUP + ''.join(
     f"SELECT '{name}';\n{query}\n" for name, (query, expected) in COUNT_CASES)
 COUNT_PLAN_CASES = ('limit_2', 'limit_32', 'limit_40', 'offset_30', 'offset_33')
@@ -80,6 +88,8 @@ DIAGNOSTIC_FIXTURES = (
     dict(name='ik_deleted_dense', parser='ik', deleted=True, mixed=False),
     dict(name='beng_deleted_mixed', parser='beng', deleted=True, mixed=True),
 )
+DENSE_TABLES = frozenset(('beng_deleted_dense', 'ik_deleted_dense'))
+INHERITED_BASELINE_CASES = frozenset(('limit_2', 'limit_20', 'projection_constant_limit_2', 'count_column'))
 CONNECTION_ERRORS = frozenset((2002, 2003, 2006, 2013, 2055))
 LIVE_LOG_BYTE_CAP = 1024 * 1024
 LIVE_LOG_LINE_CAP = 128 * 1024
@@ -101,13 +111,12 @@ def diagnostics_only():
 
 def diagnostic_fixture(fixture):
     table = 'fts_count_consumer.' + fixture['name']
-    setup = COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(TABLE, table)
+    setup = DENSE_COUNT_SETUP.replace('CREATE DATABASE fts_count_consumer;\n', '').replace(TABLE, table)
     setup = setup.replace('WITH PARSER beng;', 'WITH PARSER ' + fixture['parser'] + ';')
     if not fixture['deleted']:
         setup = setup.replace(f'DELETE FROM {table} WHERE id IN (1, 2, 3);\n', '')
     if fixture['mixed']:
-        values = ',\n'.join(f"({index}, 'unrelated zebra orchard', NULL)" for index in range(201, 236))
-        setup = setup.replace("(101, NULL, 7), (102, '', 8);", values + ",\n(101, NULL, 7), (102, '', 8);")
+        setup = add_unmatched_documents(setup)
     positive = 32 if fixture['deleted'] else 35
     expected = {name: value for name, (query, value) in COUNT_CASES}
     expected.update(rows_remaining=positive + 2 + (35 if fixture['mixed'] else 0),
@@ -129,12 +138,12 @@ def log_size(out):
         return None
 
 
-def diagnostic_sql(call, out, label, query, kind, table=None, expected=None):
+def diagnostic_sql(call, out, label, query, kind, table=None, expected=None, case_name=None):
     driver.require(re.fullmatch('[A-Za-z0-9_.-]+', label) is not None, 'Unsafe diagnostic label')
     text = common.SESSION + query + '\n'
     sql_path, log_path = out / (label + '.sql'), out / (label + '.log')
     sql_path.write_text(text, encoding='utf-8')
-    record = dict(label=label, kind=kind, table=table, sql=query, sqlPath=str(sql_path),
+    record = dict(label=label, kind=kind, table=table, caseName=case_name, sql=query, sqlPath=str(sql_path),
                   executedSqlSha256=common.digest(sql_path), expectedCount=expected,
                   startedUtc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   startedMonotonicNs=time.monotonic_ns(), serverLogOffsetBefore=log_size(out))
@@ -276,7 +285,85 @@ def capture_live_diagnostic_log(call, out, outcomes, label='count-baseline-live-
                 matchedLineCount=matching_count, savedRecords=len(selected), capturedBeforeOwnedStop=True)
 
 
-def diagnostic_work(call, out, args, sql):
+def matrix_identity(out, role):
+    driver.require(out.parent.name == 'validation' and role in ('baseline', 'candidate'),
+                   'Matrix evidence must bind an owned validation role')
+    root = out.parent.parent
+    identity_path = root / 'runtime' / role / 'identity.json'
+    identity = json.loads(identity_path.read_text())
+    proof = json.loads((root / 'plan.json').read_text())['proof']
+    owned_path = out / 'owned-process.json'
+    owned = json.loads(owned_path.read_text())
+    expected_commit = BASE if role == 'baseline' else proof['driverCommit']
+    expected_tree = BASE_TREE if role == 'baseline' else proof['driverTree']
+    driver.require(identity['role'] == role and identity['sourceCommit'] == expected_commit
+                   and identity['sourceTree'] == expected_tree, 'Matrix build source/role identity mismatch')
+    driver.require(role != 'baseline' or identity['sha256'] == parent.BASE_ELF_SHA,
+                   'Matrix baseline must be the exact b963 ELF')
+    driver.require(owned['role'] == role and owned['binary'] == identity['binary']
+                   and owned['sha256'] == identity['sha256'], 'Matrix owned process differs from role ELF')
+    return dict(role=role, sourceCommit=expected_commit, sourceTree=expected_tree,
+                elfSha256=identity['sha256'], buildId=identity['buildId'], binary=identity['binary'],
+                validationDriverCommit=proof['driverCommit'], identitySha256=common.digest(identity_path),
+                ownedProcessEvidenceSha256=common.digest(owned_path),
+                candidateBuildAttempted=(root / 'runtime/candidate/identity.json').is_file())
+
+
+def matrix_verdict(outcomes, role):
+    violations, inherited, controls, expected_inventory, actual_inventory = [], [], [], set(), []
+    expected_counts = {}
+    for fixture in DIAGNOSTIC_FIXTURES:
+        matrix = diagnostic_fixture(fixture)
+        expected_inventory.add(('setup', matrix['table'], None))
+        expected_inventory.update(('count', matrix['table'], name) for name, query, expected in matrix['cases'])
+        expected_counts.update({('count', matrix['table'], name): expected for name, query, expected in matrix['cases']})
+        expected_inventory.update(('explain', matrix['table'], name) for name in matrix['plans'])
+    expected_inventory.update((('setup', None, None), ('connection', None, None)))
+    for row in outcomes:
+        case = row.get('caseName')
+        if case is None and row['kind'] in ('count', 'explain'):
+            case = row['label'].split('-' + row['kind'] + '-', 1)[-1]
+        actual_inventory.append((row['kind'], row['table'], case))
+        if not row['childrenCleaned'] or row['connectionLost'] or row.get('captureError'):
+            violations.append(dict(label=row['label'], reason='SQL client connection and process completion must remain valid'))
+        table = '' if row['table'] is None else row['table'].rsplit('.', 1)[-1]
+        if row['kind'] == 'count':
+            expected_count = expected_counts.get(('count', row['table'], case))
+            if expected_count is None or row['expectedCount'] != expected_count:
+                violations.append(dict(label=row['label'], reason='Recorded expected count differs from the independent fixed corpus'))
+            allowed = (table in DENSE_TABLES and row['exitCode'] == 1 and row['serverErrorCode'] == 4016
+                       and (case == 'count_column' or (role == 'baseline' and case in INHERITED_BASELINE_CASES)))
+            if allowed:
+                row['acceptance'] = 'inherited_scored_control_error' if case == 'count_column' else 'inherited_baseline_count_error'
+                (controls if case == 'count_column' else inherited).append(dict(
+                    role=role, table=row['table'], caseName=case, exitCode=row['exitCode'],
+                    serverErrorCode=row['serverErrorCode'], expectedCount=row['expectedCount'],
+                    outputSha256=row['outputSha256'], label=row['label']))
+            elif row['exitCode'] == 0 and row['serverErrorCode'] is None and row['observedCount'] == expected_count:
+                row['acceptance'] = 'independent_expected_count_matched'
+            else:
+                row['acceptance'] = 'rejected_count_outcome'
+                violations.append(dict(label=row['label'], reason='Count must succeed with its independent expected value or match the exact inherited error policy'))
+        elif row['exitCode'] != 0 or row['serverErrorCode'] is not None:
+            violations.append(dict(label=row['label'], reason='Setup, EXPLAIN and connection SQL must succeed'))
+        elif row['kind'] == 'explain' and 'MATCH(' in row['sql']:
+            expected = case in SCORING_CONTROLS or (case != 'plain_count' and role == 'baseline')
+            try:
+                row['planVerification'] = check_count_plan(bytes.fromhex(row['outputHex']).decode('utf-8'), expected, not expected)
+            except (RuntimeError, UnicodeError, ValueError, StopIteration) as error:
+                violations.append(dict(label=row['label'], reason=str(error)))
+    if len(actual_inventory) != len(expected_inventory) or set(actual_inventory) != expected_inventory:
+        violations.append(dict(label='matrix-inventory', reason='Exactly one execution of every fixed matrix SQL case is required'))
+    return dict(passed=not violations, violations=violations,
+                inheritedBaselineCountErrors=inherited, legacyScoredControlErrors=controls,
+                newDenseCountExpectedResultsPassed=(not violations) if role == 'candidate' else None,
+                allRawSqlSucceeded=all(row['exitCode'] == 0 for row in outcomes),
+                rawSqlCounts=dict(total=len(outcomes), succeeded=sum(row['exitCode'] == 0 for row in outcomes),
+                                  failed=sum(row['exitCode'] != 0 for row in outcomes)))
+
+
+def matrix_work(call, out, role, strict=False):
+    identity = matrix_identity(out, role)
     outcomes, tables = [], []
     first_log_errors = []
 
@@ -293,7 +380,7 @@ def diagnostic_work(call, out, args, sql):
                                               type=type(error).__name__, message=str(error)))
 
     retain(diagnostic_sql(call, out, 'diag-schema',
-        'ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table = true;\nCREATE DATABASE fts_count_consumer;', 'setup'))
+        'ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table = true;\nCREATE DATABASE IF NOT EXISTS fts_count_consumer;', 'setup'))
     for fixture in DIAGNOSTIC_FIXTURES:
         matrix = diagnostic_fixture(fixture)
         table = matrix['table']
@@ -302,14 +389,15 @@ def diagnostic_work(call, out, args, sql):
         retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-setup', matrix['setup'], 'setup', table), table_report)
         for name, query, expected in matrix['cases']:
             retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-count-' + name,
-                                   query, 'count', table, expected), table_report)
+                                   query, 'count', table, expected, name), table_report)
         for name, query in matrix['plans'].items():
             retain(diagnostic_sql(call, out, 'diag-' + fixture['name'] + '-explain-' + name,
-                                   'EXPLAIN ' + query, 'explain', table), table_report)
+                                   'EXPLAIN ' + query, 'explain', table, case_name=name), table_report)
     connection = diagnostic_sql(call, out, 'diag-final-connection', 'SELECT 1;', 'connection')
     outcomes.append(connection)
-    report = dict(diagnosticOnly=True, candidateBuildAttempted=False, correctnessPassed=False,
-                  baselineCommit=BASE, baselineElfSha256=parent.BASE_ELF_SHA, tables=tables, outcomes=outcomes,
+    verdict = matrix_verdict(outcomes, role) if strict else None
+    report = dict(diagnosticOnly=not strict, candidateBuildAttempted=identity['candidateBuildAttempted'], correctnessPassed=False,
+                  roleIdentity=identity, strictCountAndPlanValidation=verdict, tables=tables, outcomes=outcomes,
                   firstErrorLogCaptureErrors=first_log_errors,
                   outputEncoding='outputHex preserves complete original bytes; outputUtf8 is a replacement-decoded display',
                   interpretation='Observed SQL outcomes only. Parser, deletion and term-density associations require analysis.')
@@ -319,7 +407,7 @@ def diagnostic_work(call, out, args, sql):
     except Exception as error:
         log_error = error
         report['liveServerLogError'] = dict(type=type(error).__name__, message=str(error))
-    destination = out / 'count-baseline-diagnostics.json'
+    destination = out / 'count-matrix-diagnostics.json'
     driver.dump(destination, report)
     driver.require(connection['exitCode'] == 0 and connection['childrenCleaned']
                    and bytes.fromhex(connection['outputHex']).strip() == b'1', 'Diagnostic baseline connection failed')
@@ -328,11 +416,20 @@ def diagnostic_work(call, out, args, sql):
                    'Diagnostic SQL encountered a client connection or process failure')
     driver.require(log_error is None, 'Pre-stop diagnostic server log capture failed')
     driver.require(not first_log_errors, 'First-error diagnostic server log capture failed')
-    compact = [{key: row[key] for key in ('label', 'kind', 'table', 'exitCode', 'serverErrorCode',
+    driver.require(not strict or verdict['passed'], 'COUNT matrix failed independent count or consumer-plan validation')
+    compact = [{key: row[key] for key in ('label', 'kind', 'table', 'caseName', 'exitCode', 'serverErrorCode',
                 'sqlState', 'expectedCount', 'observedCount', 'countMatchesExpected', 'outputSha256')} for row in outcomes]
-    return dict(passed=True, diagnosticOnly=True, correctnessPassed=False, candidateBuildAttempted=False,
+    return dict(passed=True, diagnosticOnly=not strict, correctnessPassed=False,
+                candidateBuildAttempted=identity['candidateBuildAttempted'], roleIdentity=identity,
                 canonical=dict(diagnosticJsonSha256=common.digest(destination)), rawOutcomes=compact,
-                diagnosticJsonPath=str(destination), liveServerLog=report['liveServerLog'])
+                diagnosticJsonPath=str(destination), liveServerLog=report['liveServerLog'],
+                strictCountAndPlanValidation=verdict)
+
+
+def diagnostic_work(call, out, args, sql):
+    role = {'targeted-baseline': 'baseline', 'equality-baseline': 'baseline',
+            'equality-candidate': 'candidate'}.get(out.name)
+    return matrix_work(call, out, role, strict=False)
 
 
 def source_proof(args):
@@ -544,6 +641,7 @@ def equality_work(call, out):
                      outputSha256=common.digest(out / (label + '.log')))
         plans[name] = proof
     driver.dump(out / 'count-consumer-plans.json', dict(role=role, passed=True, queries=plans))
+    matrix = matrix_work(call, out, role, strict=True)
     output = (out / 'count-consumer.log').read_bytes()
     canonical = json.dumps(dict(collation=collation['canonical'], counts=output.hex()),
                            sort_keys=True, separators=(',', ':')).encode()
@@ -551,7 +649,7 @@ def equality_work(call, out):
                 countOutputBytes=len(output), countOutputSha256=hashlib.sha256(output).hexdigest(),
                 countSqlSha256=hashlib.sha256(COUNT_SQL.encode()).hexdigest(),
                 expectedCounts={name: value for name, (query, value) in COUNT_CASES},
-                countConsumerPlans=plans)
+                countConsumerPlans=plans, countMatrix=matrix)
 
 
 def benchmark_callback(args, identities, role, baseline, scorer):
@@ -605,12 +703,12 @@ def prebuild(args):
             if report_path.is_file():
                 report = json.loads(report_path.read_text())
                 report.update(diagnosticOnly=True, candidateBuildAttempted=False, correctnessPassed=False)
-                diagnostic_path = args.root / 'validation/targeted-baseline/count-baseline-diagnostics.json'
+                diagnostic_path = args.root / 'validation/targeted-baseline/count-matrix-diagnostics.json'
                 if diagnostic_path.is_file():
                     data = json.loads(diagnostic_path.read_text())
                     report['baselineDiagnostics'] = dict(
                         path=str(diagnostic_path), sha256=common.digest(diagnostic_path),
-                        outcomes=[{key: row[key] for key in ('label', 'kind', 'table', 'exitCode',
+                        outcomes=[{key: row[key] for key in ('label', 'kind', 'table', 'caseName', 'exitCode',
                                   'serverErrorCode', 'sqlState', 'expectedCount', 'observedCount',
                                   'countMatchesExpected', 'outputSha256')} for row in data['outcomes']],
                         liveServerLog=data.get('liveServerLog'), liveServerLogError=data.get('liveServerLogError'))
@@ -631,8 +729,17 @@ def validate(args):
     preflight = report['targeted']['baseline']['countOnlyPreflight']
     driver.require(preflight['canonical'] == report['equality']['baseline']['canonical'],
                    'Baseline COUNT prebuild SQL differs from the later fresh-instance output')
+    matrices = {role: report['equality'][role]['countMatrix']['strictCountAndPlanValidation']
+                for role in ('baseline', 'candidate')}
+    driver.require(matrices['candidate']['newDenseCountExpectedResultsPassed'],
+                   'New dense COUNT target results must pass independently')
     report.update(validationScope=SCOPE, baselineCountPreflightPassed=True,
-                  countOnlySqlParityPassed=True, countOnlyPlanProofPassed=True)
+                  countOnlySqlParityPassed=True, countOnlyPlanProofPassed=True, candidateBuildAttempted=True,
+                  newDenseCountExpectedResultsPassed=True,
+                  legacyScoredControlErrors=[row for matrix in matrices.values() for row in matrix['legacyScoredControlErrors']],
+                  inheritedBaselineCountErrors=matrices['baseline']['inheritedBaselineCountErrors'],
+                  matrixRawSqlCounts={role: matrix['rawSqlCounts'] for role, matrix in matrices.items()},
+                  allMatrixSqlSucceeded=all(matrix['allRawSqlSucceeded'] for matrix in matrices.values()))
     driver.dump(args.root / 'report.json', report)
 
 
