@@ -6,6 +6,11 @@ on:
     paths-ignore:
       - .github/workflows/fts-profile-recording-analysis.yml
       - .github/script/seekdb/fts-profile-recording-analysis/**
+      - .github/workflows/fts-profile-diagnostics.yml
+      - .github/workflows/fts-cs45-equality-validation.yml
+      - .github/script/seekdb/fts_cs45_equality_validation.py
+      - .github/script/seekdb/test_fts_cs45_equality_validation.py
+      - src/oblib/lib/charset/ob_charset.cpp
 
 permissions:
   contents: read
