@@ -98,15 +98,34 @@ class CompilationTests(unittest.TestCase):
         with patch.object(ik, '_build_profile', side_effect=self.original_profile):
             return ik.build_profile(self.args)
 
-    def test_snapshot_proves_all_three_compilation_sources_and_two_headers(self):
+    def test_snapshot_and_validation_cover_three_compilation_sources_and_two_headers(self):
         self.run_profile()
         self.args.phase = 'snapshot'
         self.run_profile()
         proof = json.loads((self.args.root / 'evidence/candidate/affected-ik-objects.json').read_text())
         self.assertEqual(set(proof['sourceToObject']), set(ik.COMPILATION_SOURCES))
         self.assertEqual(len(proof['objects']), 3)
-        for obj in proof['objects'][1:]:
+        self.assertFalse((self.args.root / 'evidence/candidate/ik-header-dependencies.json').exists())
+        ik.verify_header_dependencies(self.args)
+        headers = json.loads((self.args.root / 'evidence/candidate/ik-header-dependencies.json').read_text())
+        self.assertTrue(headers['passed'])
+        self.assertEqual(headers['phase'], 'validate')
+        for obj in headers['objects']:
             self.assertEqual(obj['headerDependencies']['headers'], list(ik.PRODUCTS[1:3]))
+
+    def test_dependency_format_failure_occurs_after_snapshot_and_before_parent_validation(self):
+        self.run_profile()
+        self.args.phase = 'snapshot'
+        path = Path(self.rows[1]['arguments'][2])
+        Path(str(path) + '.d').write_text('unrelated.o: unrelated-header.h\n')
+        self.run_profile()
+        with patch.object(ik, '_validate') as parent:
+            with self.assertRaisesRegex(RuntimeError, 'compiler dependencies'):
+                ik.validate(self.args)
+        parent.assert_not_called()
+        proof = json.loads((self.args.root / 'evidence/candidate/ik-header-dependencies.json').read_text())
+        self.assertFalse(proof['passed'])
+        self.assertEqual(proof['checkingObject'], str(path))
 
     def test_shared_unity_object_is_deduplicated_and_maps_both_ik_sources(self):
         unity = self.build / 'CMakeFiles/fixture.dir/Unity/combined.cxx'
@@ -195,7 +214,7 @@ class CallbackTests(unittest.TestCase):
         decoded = json.loads(bytes.fromhex(result['canonical']))
         self.assertEqual(decoded['collation'], 'abcd')
         self.assertIn('ik_utf8\t[]', bytes.fromhex(decoded['ikOutput']).decode())
-        self.assertEqual([row['exitCode'] for row in decoded['sqlOutcomes']], [1] * 10)
+        self.assertEqual([row['exitCode'] for row in decoded['sqlOutcomes']], [1] * 11)
         self.assertTrue(all(row['serverErrorCode'] == 1366 for row in decoded['sqlOutcomes']))
         self.assertTrue(result['repeatedCallsShareConnection'])
 
@@ -226,11 +245,46 @@ class CallbackTests(unittest.TestCase):
         self.assertNotIn('_utf16 ', ik.IK_SQL)
         self.assertNotIn('_utf16le ', ik.IK_SQL)
 
-    def test_same_connection_suite_covers_both_modes_beyond_one_thousand_characters(self):
+    def test_null_binary_boundary_retains_exact_server_error_and_skips_required_success(self):
+        raw = b'ERROR 1235 (0A000) at line 3: ik with the binary charset is not supported\n'
+        submitted = []
+        def capture(command, path, cwd, timeout, **kwargs):
+            submitted.append(kwargs['stdin'])
+            path.write_bytes(raw)
+            return {'exitCode': 1, 'childrenCleaned': True}
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(ik, '_equality_work', return_value={'canonical': 'abcd'}), \
+                patch.object(ik.driver, 'sql', side_effect=self.sql), \
+                patch.object(ik.common, 'capture_group', side_effect=capture):
+            out = Path(tmp)
+            result = ik.equality_work(SimpleNamespace(obclient='/client', port=1234), out)
+            path = out / 'ik-charset-case-null-binary-input.log'
+            self.assertEqual(path.read_bytes(), raw)
+        self.assertIsNone(re.search(r'TOKENIZE\s*\(\s*NULL', ik.IK_SQL, re.I))
+        boundary = next(row for row in result['charsetOutcomes'] if row['name'] == 'null-binary-input')
+        self.assertEqual(boundary['exitCode'], 1)
+        self.assertEqual(boundary['serverErrorCode'], 1235)
+        self.assertEqual(boundary['sqlState'], '0A000')
+        self.assertEqual(bytes.fromhex(boundary['output']), raw)
+        self.assertTrue(boundary['unsupportedMessage'])
+        self.assertEqual(submitted[-1].decode().splitlines()[2], "SELECT TOKENIZE(NULL, 'ik');")
+        decoded = json.loads(bytes.fromhex(result['canonical']))
+        self.assertIn(boundary, decoded['sqlOutcomes'])
+
+    def test_required_null_case_declares_the_supported_utf8_string_type(self):
+        self.assertIn("SELECT 'ik_typed_null', TOKENIZE(CAST(NULL AS CHAR CHARACTER SET utf8mb4) "
+                      "COLLATE utf8mb4_general_ci, 'ik');", ik.IK_SQL)
+        self.assertIn("SELECT 'ik_empty', TOKENIZE(_utf8mb4 '' COLLATE utf8mb4_general_ci, 'ik');", ik.IK_SQL)
+
+    def test_same_connection_suite_covers_both_modes_and_the_real_batch_boundary(self):
         repeated = re.findall(r"REPEAT\(_utf8mb4 X'([0-9A-F]+)', (\d+)\)", ik.IK_SQL)
         self.assertEqual(len(repeated), 2)
-        self.assertTrue(all(len(bytes.fromhex(value).decode('utf-8')) * int(count) > 1000
-                            for value, count in repeated))
+        header = Path(__file__).resolve().parents[3] / 'src/storage/fts/ob_ik_ft_parser.h'
+        limit = int(re.search(r'SEGMENT_LIMIT\s*=\s*(\d+)', header.read_text())[1])
+        for value, count in repeated:
+            expanded = bytes.fromhex(value).decode('utf-8') * int(count)
+            self.assertGreater(len(expanded), limit)
+            self.assertTrue(any(index > limit for index, char in enumerate(expanded) if char == ' '))
         for label in ('ik_long_smart', 'ik_long_max_word', 'ik_binary_session', 'ik_repeated_smart'):
             self.assertIn("SELECT '" + label + "'", ik.IK_SQL)
 
@@ -306,7 +360,7 @@ class CallbackTests(unittest.TestCase):
                 report = {'targeted': {'baseline': {'ikCharsetPreflight': {'canonical': 'same'}}},
                           'equality': {'baseline': {'canonical': canonical}}}
                 ik.driver.dump(args.root / 'report.json', report)
-                with patch.object(ik, '_validate'):
+                with patch.object(ik, '_validate'), patch.object(ik, 'verify_header_dependencies'):
                     if canonical == 'same':
                         ik.validate(args)
                         result = json.loads((args.root / 'report.json').read_text())
