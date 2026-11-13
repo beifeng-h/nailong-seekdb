@@ -39,6 +39,13 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("OPERATION_TYPE='PHY_SORT'", query)
         self.assertIn('CHILD_NUMBER=331', query)
 
+    def test_permutation_preserves_doc_groups_and_regenerates_physical_ids(self):
+        sql = diagnostic.permutation_sql('fti_content_ik')
+        self.assertIn('ORDER BY doc_id,CRC32(word),word', sql)
+        self.assertIn('(doc_id,word,word_count,doc_length)', sql)
+        self.assertNotIn('SELECT id', sql)
+        self.assertEqual(diagnostic.AREAS, ('24M',))
+
 
 if __name__ == '__main__':
     unittest.main()
