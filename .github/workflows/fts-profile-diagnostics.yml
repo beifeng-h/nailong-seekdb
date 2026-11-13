@@ -4,6 +4,9 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - .github/script/seekdb/fts_docword_sort_diagnostics.py
+      - .github/script/seekdb/test_fts_docword_sort_diagnostics.py
+      - .github/workflows/fts-docword-sort-diagnostics.yml
       - src/rootserver/ddl_task/ob_ddl_common_rs_impl.cpp
       - .github/workflows/fts-encoded-sort-validation.yml
       - .github/script/seekdb/fts_encoded_sort_revalidation.py
