@@ -69,6 +69,17 @@ def work(driver, common, call, out, pid, position):
     orders = ('word ASC, doc_id ASC, id ASC', 'doc_id ASC, word ASC, id ASC',
               'word DESC, doc_id DESC, id DESC', 'doc_id DESC, word DESC, id DESC')
     try:
+        # This excluded short-binary domain is a negative activation control.
+        driver.sql(call, out, 'negative-setup',
+            'CREATE TABLE fts_sort_probe.short_binary (id BIGINT PRIMARY KEY, '
+            'word VARCHAR(16) CHARACTER SET binary, '
+            'doc_id VARCHAR(16) CHARACTER SET binary NOT NULL);\n'
+            "INSERT INTO fts_sort_probe.short_binary VALUES (1,X'',REPEAT(X'41',16)),"
+            "(2,X'00',REPEAT(X'41',16));")
+        negative = {enabled: driver.sql(call, out, 'negative-new' + str(int(enabled)),
+            query('short_binary', 'word ASC, doc_id ASC, id ASC', enabled, True))
+            for enabled in (False, True)}
+        result['excludedShortBinaryControl'] = compare_rows(negative[False], negative[True], 2)
         for table in ('keys_ci', 'keys_bin'):
             for batch in (False, True):
                 for index, order in enumerate(orders):
@@ -100,14 +111,18 @@ def work(driver, common, call, out, pid, position):
                           f'SELECT id+{current}, word, doc_id FROM fts_sort_probe.keys_ci;')
             current *= 2
         driver.sql(call, out, 'expand', '\n'.join(expand))
-        driver.sql(call, out, 'spill-setting', "ALTER SYSTEM SET _sort_area_size='2M';")
+        driver.sql(call, out, 'spill-setting',
+                   "ALTER SYSTEM SET _sort_area_size='2M';\n"
+                   "ALTER SYSTEM SET workarea_size_policy='MANUAL';\n"
+                   "SHOW PARAMETERS LIKE 'workarea_size_policy';\n"
+                   "SHOW PARAMETERS LIKE '_sort_area_size';")
         result['spillAttempted'] = True
         for index, order in enumerate(orders[:2]):
             outputs = {}
             times = {}
             for enabled in ((False, True) if position == 0 else (True, False)):
                 label = f'spill-order{index}-new{int(enabled)}'
-                sql = "SET workarea_size_policy='manual';\n" + query('keys_ci', order, enabled, True)
+                sql = query('keys_ci', order, enabled, True)
                 started = time.monotonic_ns()
                 outputs[enabled] = driver.sql(call, out, label, sql)
                 times[str(enabled)] = (time.monotonic_ns() - started) / 1e6
