@@ -1,9 +1,9 @@
 # hipVS/cuVS GPU vector backend
 
-Status: **V5 source integration with a query-workspace reuse candidate** for AMD
-`gfx1100` with ROCm 7.2.4. Candidate GPU compilation, persistence/reload acceptance
-and paired performance measurements remain pending. This directory documents
-the integration and its validation assets.
+Status: **V5 source integration with retained query workspaces and bounded host
+build teams** for AMD `gfx1100` with ROCm 7.2.4. This directory documents the
+integration and its validation assets. Candidate acceptance requires paired
+GPU and SQL measurements; individual run evidence is kept outside this source tree.
 
 ## Scope
 
@@ -143,11 +143,16 @@ The no-GPU DDL contract remains covered by
 ## Current limitations
 
 - Dense float32 L2 indexes are supported.
-- V5 implements graph, ID and vector snapshots and GPU graph reload; candidate
-  persistence/reload acceptance still needs the actual fixed GPU environment.
-- Query workspaces are retained per handle under a mutex. This candidate does
-  not optimize the first allocation or graph construction, and has no measured
-  GPU speedup yet.
+- V5 implements graph, ID and vector snapshots and GPU graph reload. Validate
+  persistence/reload against the fixed GPU runtime for each candidate.
+- Query workspaces are retained per handle under a mutex.
+- The first AMD build/load initializes process-wide ROCm libomp defaults when
+  `OMP_NUM_THREADS` is absent. NN-descent overlaps host teams in separate threads;
+  each team receives half the available CPU budget, at least one and at most eight
+  threads. The cgroup-v2 root quota bounds the affinity-derived CPU count when
+  available. Explicit `OMP_NUM_THREADS` settings are respected. This changes the
+  default for other users of the same libomp runtime too, and preserves the frozen
+  graph/search parameters. Environments already limiting threads may see no gain.
 - Query input, CAGRA search and result copies use the handle's resource stream.
   Search waits for completion before destroying parameters or unlocking, including
   error exits after work was queued. A failed wait disables further use of the

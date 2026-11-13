@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <mutex>
 // Host-logic shim only: Windows long matches the production local shape arrays.
 // This intentionally does not validate the Linux DLPack ABI.
 enum { kDLCPU=1, kDLCUDA=2, kDLFloat=2, kDLUInt=1 };
@@ -49,3 +50,6 @@ int pthread_mutex_init(pthread_mutex_t*,const void*);
 int pthread_mutex_destroy(pthread_mutex_t*);
 int pthread_mutex_lock(pthread_mutex_t*);
 int pthread_mutex_unlock(pthread_mutex_t*);
+typedef std::once_flag pthread_once_t;
+#define PTHREAD_ONCE_INIT {}
+int pthread_once(pthread_once_t*, void (*)(void));

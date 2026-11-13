@@ -16,6 +16,8 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 
 ## What is checked
 
+- `--runtime-defaults` checks one-time libomp default configuration across repeated builds, without modifying the process environment. Run again with `OMP_NUM_THREADS=3` to check that explicit settings are preserved. The host double exposes 16 CPUs; Linux cgroup parsing and actual nested SDK threads require the GPU integration test.
+
 - Repeated requests that fit an existing workspace perform zero further RMM allocations; growth and shrink preserve query/ID/distance copying, including null distance output.
 - Graph and search parameter values remain those of the frozen source in this model.
 - Allocation failures at each of the three growth positions return failure, leave the handle usable and balance all model allocations at teardown.

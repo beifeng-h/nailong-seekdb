@@ -5,6 +5,7 @@
 #include <dlpack/dlpack.h>
 #ifdef __HIP_PLATFORM_AMD__
 #include <cuvs/cuda_runtime.h>
+#include <omp.h>
 #else
 #include <cuda_runtime.h>
 #endif
@@ -12,6 +13,37 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
+
+#ifdef __HIP_PLATFORM_AMD__
+static pthread_once_t sk_cuvs_runtime_once = PTHREAD_ONCE_INIT;
+
+static void sk_cuvs_initialize_runtime(void)
+{
+  /* NN-descent overlaps two host teams, including one in a new std::thread.
+   * A caller-local omp_set_num_threads does not configure that second team.
+   * The fixed ROCm libomp exposes kmp_set_defaults for future host threads. */
+  if (getenv("OMP_NUM_THREADS") == NULL) {
+    int cpu_budget = omp_get_num_procs();
+#if defined(__linux__)
+    FILE* limit = fopen("/sys/fs/cgroup/cpu.max", "r");
+    if (limit) {
+      long long quota = 0, period = 0;
+      if (fscanf(limit, "%lld %lld", &quota, &period) == 2 && quota > 0 && period > 0) {
+        long long quota_cpus = quota / period;
+        if (quota_cpus < 1) quota_cpus = 1;
+        if (cpu_budget <= 0 || quota_cpus < cpu_budget) cpu_budget = (int)quota_cpus;
+      }
+      fclose(limit);
+    }
+#endif
+    int threads = cpu_budget > 1 ? cpu_budget / 2 : 1;
+    if (threads > 8) threads = 8;
+    char setting[48];
+    snprintf(setting, sizeof(setting), "OMP_NUM_THREADS=%d", threads);
+    kmp_set_defaults(setting);
+  }
+}
+#endif
 
 typedef struct {
   cuvsResources_t        res;
@@ -59,6 +91,9 @@ static int sk_cuvs_release(sk_cuvs_index* index, void* buffer, size_t bytes)
 
 static sk_cuvs_index* sk_cuvs_index_alloc(void)
 {
+#ifdef __HIP_PLATFORM_AMD__
+  pthread_once(&sk_cuvs_runtime_once, sk_cuvs_initialize_runtime);
+#endif
   sk_cuvs_index* index = (sk_cuvs_index*)calloc(1, sizeof(*index));
   if (index && pthread_mutex_init(&index->search_mutex, NULL) != 0) {
     free(index);

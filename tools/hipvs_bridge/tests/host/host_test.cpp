@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 #include <io.h>
+#include <omp.h>
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(std::string(__func__)+": "+#x); } while (0)
 struct PendingWork {
  enum class Kind { Copy, Search, Free };
@@ -63,6 +64,17 @@ struct State {
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
 static thread_local const char* sdk_error=nullptr;
+static int runtime_defaults_calls=0;
+static std::string runtime_defaults;
+extern "C" int omp_get_num_procs(void) { return 16; }
+extern "C" void kmp_set_defaults(const char* value) {
+ ++runtime_defaults_calls;
+ runtime_defaults=value;
+}
+int pthread_once(pthread_once_t* once, void (*initialize)(void)) {
+ std::call_once(*once,initialize);
+ return 0;
+}
 static int api_ok() { sdk_error=nullptr; return CUVS_SUCCESS; }
 static int api_error(const char* detail) { sdk_error=detail; return CUVS_ERROR; }
 static const char* failure_text(ApiFailure failure) {
@@ -584,14 +596,30 @@ static void stream_ordering() {
  std::cout<<"PASS stream-ordering regression suite (HOST ONLY)\n";
 }
 int main(int argc,char** argv) {
+ const bool runtime_only=argc==2 && std::string(argv[1])=="--runtime-defaults";
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
  const bool before_only=argc==2 && std::string(argv[1])=="--release-failure-before";
  const bool after_only=argc==2 && std::string(argv[1])=="--release-failure-after";
  const bool diagnostic_only=argc==2 && std::string(argv[1])=="--lifecycle-diagnostics";
  const bool copy_only=argc==2 && std::string(argv[1])=="--copy-serialize-diagnostics";
  const bool stream_only=argc==2 && std::string(argv[1])=="--stream-ordering";
- if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only && !stream_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics|--stream-ordering]\n"; return 2;}
+ if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only && !stream_only && !runtime_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics|--stream-ordering|--runtime-defaults]\n"; return 2;}
  try {
+  if(runtime_only) {
+   const char* configured=std::getenv("OMP_NUM_THREADS");
+   const std::string original=configured?configured:"";
+   void* handle=build();
+   CHECK(runtime_defaults_calls==(configured?0:1));
+   if(!configured) CHECK(runtime_defaults=="OMP_NUM_THREADS=8");
+   seekdb_cuvs_free(handle);
+   handle=build(); seekdb_cuvs_free(handle);
+   CHECK(runtime_defaults_calls==(configured?0:1));
+   const char* after=std::getenv("OMP_NUM_THREADS");
+   CHECK((configured && after && original==after) || (!configured && !after));
+   clean_state();
+   std::cout<<"PASS runtime defaults initialized once; explicit environment preserved\n";
+   return 0;
+  }
   if(before_only || after_only) {release_failure_disables_handle(after_only); return 0;}
   if(diagnostic_only) {lifecycle_diagnostics(); return 0;}
   if(copy_only) {copy_serialize_diagnostics(); return 0;}
