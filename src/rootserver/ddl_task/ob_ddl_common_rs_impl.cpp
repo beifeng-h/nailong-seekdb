@@ -307,6 +307,35 @@ int ObDDLTaskUtil::generate_order_by_str(
   return ret;
 }
 
+static bool can_encode_fts_build_sort(const ObTableSchema &table_schema,
+                                    const ObIArray<int64_t> &order_column_ids)
+{
+  bool has_doc_id = false;
+  bool has_word = false;
+  bool can_encode = (table_schema.is_fts_index_aux() || table_schema.is_fts_doc_word_aux())
+      && order_column_ids.count() == 2;
+  for (int64_t i = 0; can_encode && i < order_column_ids.count(); ++i) {
+    const ObColumnSchemaV2 *column = table_schema.get_column_schema(order_column_ids.at(i));
+    if (nullptr == column || column->get_data_type() != ObVarcharType) {
+      can_encode = false;
+    } else if (column->is_doc_id_column()) {
+      // Generated document IDs have a fixed byte length. Arbitrary short binary
+      // strings are not safe to concatenate in an encoded composite sort key.
+      can_encode = !has_doc_id && !column->is_nullable()
+          && column->get_data_length() == OB_DOC_ID_COLUMN_BYTE_LENGTH
+          && column->get_collation_type() == CS_TYPE_BINARY;
+      has_doc_id = true;
+    } else if (column->is_word_segment_column()) {
+      can_encode = !has_word && (column->get_collation_type() == CS_TYPE_UTF8MB4_GENERAL_CI
+          || column->get_collation_type() == CS_TYPE_UTF8MB4_BIN);
+      has_word = true;
+    } else {
+      can_encode = false;
+    }
+  }
+  return can_encode && has_doc_id && has_word;
+}
+
 int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
     const int64_t dest_table_id,
     const int64_t schema_version,
@@ -534,8 +563,11 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
         }
         if (OB_FAIL(ret)) {
         } else {
-          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', 'false') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
+          const bool encode_fts_sort = !use_heap_table_ddl_plan
+              && can_encode_fts_build_sort(*dest_table_schema, order_column_ids);
+          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', '%s') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
               real_parallelism, execution_id, task_id,
+              encode_fts_sort ? "true" : "false",
               static_cast<int>(strlen(io_read_hint)), io_read_hint,
               static_cast<int>(new_dest_database_name.length()), new_dest_database_name.ptr(), static_cast<int>(new_dest_table_name.length()), new_dest_table_name.ptr(),
               static_cast<int>(partition_names.length()), partition_names.ptr(),
