@@ -30,6 +30,11 @@ WORKAREA_COLUMNS = ('SQL_ID', 'OPERATION_ID', 'LAST_MEMORY_USED', 'LAST_EXECUTIO
                     'MAX_TEMPSEG_SIZE')
 
 
+def workarea_query(sql_id, plan_id):
+    return ('SELECT ' + ','.join(WORKAREA_COLUMNS) + ' FROM oceanbase.V$SQL_WORKAREA '
+            f"WHERE SQL_ID='{sql_id}' AND CHILD_NUMBER={plan_id} AND OPERATION_TYPE='PHY_SORT';")
+
+
 def source_proof(source, commit):
     identity = common.source_identity(source, commit)
     changed = set(common.git(source, 'diff', '--name-only', ANCHOR, commit, '--').decode().splitlines())
@@ -125,8 +130,7 @@ def measure(call, out, pid, table, order, enabled, tag, rows):
     driver.require(raw.count(b'\n') == rows, 'Incomplete sorted row stream: ' + tag)
     measured = stats_delta(previous, snapshot(call, out, tag + '-after'))
     workarea_raw = driver.sql(call, out, tag + '-workarea',
-        'SELECT ' + ','.join(WORKAREA_COLUMNS) + ' FROM oceanbase.V$SQL_WORKAREA '
-        f"WHERE SQL_ID='{measured['SQL_ID']}' AND CHILD_NUMBER={measured['PLAN_ID']} AND OPERATION_TYPE='SORT';")
+                             workarea_query(measured['SQL_ID'], measured['PLAN_ID']))
     workarea = parse_workarea(workarea_raw, measured['SQL_ID'])
     return dict(tag=tag, enabled=enabled, wallMsIncludingClient=wall_ms,
                 processCpuMsIncludingBackground=cpu_ms, planStats=measured, workarea=workarea,

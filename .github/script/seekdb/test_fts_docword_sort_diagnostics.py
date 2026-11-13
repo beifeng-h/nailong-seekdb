@@ -34,6 +34,11 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(Exception):
             diagnostic.parse_workarea('\t'.join(('B' * 32, '1', '123', 'OPTIMAL', '1', '0', '0', 'NULL')), 'A' * 32)
 
+    def test_workarea_filter_matches_preserved_native_operator_name(self):
+        query = diagnostic.workarea_query('A' * 32, 331)
+        self.assertIn("OPERATION_TYPE='PHY_SORT'", query)
+        self.assertIn('CHILD_NUMBER=331', query)
+
 
 if __name__ == '__main__':
     unittest.main()
