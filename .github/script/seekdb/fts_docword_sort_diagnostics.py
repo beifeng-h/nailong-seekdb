@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Isolate sorting of original FTS postings using the preserved bd5d program."""
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+
+import fts_encoded_sort_diagnostics as runtime
+
+driver, common = runtime.driver, runtime.common
+ANCHOR = '2795c7c73e53303b08c2dc18c02db10ad4689f87'
+ALLOWED = {
+    '.github/script/seekdb/fts_docword_sort_diagnostics.py',
+    '.github/script/seekdb/test_fts_docword_sort_diagnostics.py',
+    '.github/workflows/fts-docword-sort-diagnostics.yml',
+    '.github/workflows/fts-profile-diagnostics.yml',
+}
+AREAS = ('2M', '256M')
+ORDERS = {'doc_word': 'doc_id, word', 'inverted': 'word, doc_id'}
+AUDIT_COLUMNS = ('REQUEST_ID', 'SQL_ID', 'PLAN_ID', 'RET_CODE', 'RETURN_ROWS',
+                 'ELAPSED_TIME', 'EXECUTE_TIME', 'TOTAL_WAIT_TIME_MICRO', 'GET_PLAN_TIME',
+                 'DISK_READS', 'IS_HIT_PLAN')
+WORKAREA_COLUMNS = ('SQL_ID', 'OPERATION_ID', 'LAST_MEMORY_USED', 'LAST_EXECUTION',
+                    'OPTIMAL_EXECUTIONS', 'ONEPASS_EXECUTIONS', 'MULTIPASSES_EXECUTIONS',
+                    'MAX_TEMPSEG_SIZE')
+
+
+def source_proof(source, commit):
+    identity = common.source_identity(source, commit)
+    changed = set(common.git(source, 'diff', '--name-only', ANCHOR, commit, '--').decode().splitlines())
+    driver.require(changed <= ALLOWED, 'Diagnostic edits exceed the frozen driver scope')
+    inputs = driver.inventory(source)
+    driver.require(common.git(source, 'rev-parse', runtime.CANDIDATE + '^{tree}').decode().strip()
+                   == runtime.CANDIDATE_TREE, 'Preserved ELF source tree differs')
+    return dict(driverCommit=commit, driverTree=identity['tree'], driverAnchor=ANCHOR,
+                elfSourceCommit=runtime.CANDIDATE, elfSourceTree=runtime.CANDIDATE_TREE,
+                diagnosticChanges=sorted(changed), originalInputCount=len(inputs),
+                originalInputHashes=inputs, originalInputInventorySha256=driver.INVENTORY,
+                newBuilds=0, productChangeInThisExperiment=False)
+
+
+def ident(value):
+    driver.require(re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', value) is not None,
+                   'Unexpected catalog identifier')
+    return '`' + value + '`'
+
+
+def parse_audit(raw, expected_rows):
+    lines = [line.split('\t') for line in raw.splitlines()]
+    driver.require(len(lines) == 1 and len(lines[0]) == len(AUDIT_COLUMNS),
+                   'Expected one complete audit record for this tagged query')
+    result = dict(zip(AUDIT_COLUMNS, lines[0]))
+    for key in AUDIT_COLUMNS:
+        if key != 'SQL_ID':
+            result[key] = int(result[key])
+    driver.require(result['RET_CODE'] == 0 and result['RETURN_ROWS'] == expected_rows
+                   and result['EXECUTE_TIME'] > 0
+                   and re.fullmatch('[0-9A-Fa-f]{32}', result['SQL_ID']) is not None,
+                   'Audit result status, row count or SQL identity differs')
+    result['executeMinusWaitUs'] = result['EXECUTE_TIME'] - result['TOTAL_WAIT_TIME_MICRO']
+    return result
+
+
+def parse_workarea(raw, sql_id):
+    rows = [line.split('\t') for line in raw.splitlines()]
+    driver.require(len(rows) == 1 and len(rows[0]) == len(WORKAREA_COLUMNS),
+                   'Expected one SORT workarea record')
+    result = dict(zip(WORKAREA_COLUMNS, rows[0]))
+    driver.require(result['SQL_ID'] == sql_id and result['LAST_EXECUTION'] in
+                   ('OPTIMAL', 'ONE PASS', 'MULTI-PASS'), 'Workarea identity or execution class differs')
+    for key in WORKAREA_COLUMNS:
+        if key not in ('SQL_ID', 'LAST_EXECUTION'):
+            result[key] = None if result[key] == 'NULL' else int(result[key])
+    return result
+
+
+def measure(call, out, pid, table, order, enabled, tag, rows):
+    flag = str(enabled).lower()
+    query = (f"SELECT /*+ NO_REWRITE FULL(t) PARALLEL(1) "
+             f"OPT_PARAM('enable_newsort','{flag}') OPT_PARAM('ROWSETS_MAX_ROWS',256) */ /*{tag}*/ "
+             'doc_id, word, word_count, doc_length '
+             f'FROM fts_docword_probe.{ident(table)} t ORDER BY {ORDERS[order]};')
+    # The regular client escapes binary doc IDs, so every returned row has one newline.
+    sql_text = common.SESSION + query + '\n'
+    (out / (tag + '.sql')).write_text(sql_text, encoding='utf-8')
+    if tag.split('_')[-2] in ('0', '1'):
+        plan = driver.sql(call, out, tag + '-plan', 'EXPLAIN EXTENDED ' + query)
+        driver.require('SORT' in plan, 'Explicit full sort operator missing: ' + tag)
+    output = out / (tag + '.rows')
+    before_cpu, before = driver.cpu_ticks(pid), time.monotonic_ns()
+    receipt = common.capture_group([str(call.obclient), '-h127.0.0.1', '-P' + str(call.port),
+        '-uroot', '-A', '-N', '-B', '--default-character-set=utf8mb4', '-Doceanbase'],
+        output, Path.cwd(), 120, env=os.environ.copy(), stdin=sql_text.encode())
+    wall_ms = (time.monotonic_ns() - before) / 1e6
+    cpu_ms = (driver.cpu_ticks(pid) - before_cpu) * 1000 / os.sysconf('SC_CLK_TCK')
+    driver.require(receipt['exitCode'] == 0 and receipt['childrenCleaned'], 'Sort query failed: ' + tag)
+    raw = output.read_bytes()
+    driver.require(raw.count(b'\n') == rows, 'Incomplete sorted row stream: ' + tag)
+    audit_raw = driver.sql(call, out, tag + '-audit',
+        'SELECT ' + ','.join(AUDIT_COLUMNS) + ' FROM oceanbase.V$OB_SQL_AUDIT '
+        f"WHERE QUERY_SQL LIKE 'SELECT /*+% /*{tag}*/%' AND IS_EXECUTOR_RPC=0 ORDER BY REQUEST_ID DESC LIMIT 1;")
+    audit = parse_audit(audit_raw, rows)
+    workarea_raw = driver.sql(call, out, tag + '-workarea',
+        'SELECT ' + ','.join(WORKAREA_COLUMNS) + ' FROM oceanbase.V$SQL_WORKAREA '
+        f"WHERE SQL_ID='{audit['SQL_ID']}' AND OPERATION_TYPE='SORT';")
+    workarea = parse_workarea(workarea_raw, audit['SQL_ID'])
+    return dict(tag=tag, enabled=enabled, wallMsIncludingClient=wall_ms,
+                processCpuMsIncludingBackground=cpu_ms, audit=audit, workarea=workarea,
+                outputBytes=len(raw), outputSha256=hashlib.sha256(raw).hexdigest(),
+                rows=rows, query=query, receipt=receipt), output
+
+
+def setup(runtime_args, call, out):
+    source = runtime_args.source
+    driver.sql(call, out, 'setup', (source / 'tools/benchmark/fts_large_bench_setup.sql').read_text())
+    data = subprocess.check_output([os.sys.executable, str(source / 'tools/benchmark/fts_large_bench_gen.py'),
+                                   '--rows', '20000', '--batch', '500', '--seed', '42'], timeout=60)
+    driver.require(hashlib.sha256(data).hexdigest() == driver.DATA_SHA, 'Original 20K input differs')
+    driver.sql(call, out, 'load', data.decode())
+    driver.sql(call, out, 'enable-fts', 'ALTER SYSTEM SET _enable_add_fulltext_index_to_existing_table=true;')
+    for label, ddl in driver.DDL:
+        driver.sql(call, out, label, 'USE fts_large_bench; ' + ddl)
+    driver.sql(call, out, 'probe-db', 'CREATE DATABASE fts_docword_probe;')
+    metadata = driver.sql(call, out, 'catalog',
+        'SELECT t.table_name,c.column_name FROM oceanbase.__all_table t '
+        'JOIN oceanbase.__all_database d ON t.database_id=d.database_id '
+        'JOIN oceanbase.__all_column c ON c.table_id=t.table_id '
+        "WHERE d.database_name='fts_large_bench' AND t.index_type=14 ORDER BY t.table_name,c.column_id;")
+    tables = {}
+    for line in metadata.splitlines():
+        table, column = line.split('\t')
+        tables.setdefault(table, []).append(column)
+    driver.require(len(tables) == 3, 'Expected three original doc_word auxiliary tables')
+    result = []
+    for table, columns in sorted(tables.items()):
+        fields = []
+        for prefix in ('__doc_id_', '__word_segment_', '__word_count_', '__doc_length_'):
+            matches = [column for column in columns if column.startswith(prefix)]
+            driver.require(len(matches) == 1, 'Missing or ambiguous auxiliary column')
+            fields.append(ident(matches[0]))
+        name = next((key for key in ('fti_all_ik', 'fti_content_ik', 'fti_en_beng')
+                     if table.endswith(key + '_fts_doc_word')), None)
+        driver.require(name is not None, 'Unexpected auxiliary table')
+        target = 'fts_docword_probe.' + ident(name)
+        original_count = int(driver.sql(call, out, name + '-original-count',
+            "SET ob_enable_index_direct_select='ON';\n"
+            f'SELECT COUNT(*) FROM fts_large_bench.{ident(table)};').strip())
+        driver.sql(call, out, name + '-materialize',
+            f'CREATE TABLE {target} (id BIGINT AUTO_INCREMENT PRIMARY KEY, '
+            'doc_id VARCHAR(16) CHARACTER SET binary NOT NULL, '
+            'word VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL, '
+            'word_count BIGINT, doc_length BIGINT);\n'
+            "SET ob_enable_index_direct_select='ON';\n"
+            f'INSERT INTO {target}(doc_id,word,word_count,doc_length) '
+            "SELECT /*+ OPT_PARAM('hidden_column_visible','true') */ " + ','.join(fields) +
+            f' FROM fts_large_bench.{ident(table)} ORDER BY {fields[0]}, {fields[1]};')
+        stats = driver.sql(call, out, name + '-counts',
+            f'SELECT COUNT(*),COUNT(DISTINCT doc_id),MIN(OCTET_LENGTH(doc_id)),MAX(OCTET_LENGTH(doc_id)), '
+            f'MAX(OCTET_LENGTH(word)) FROM {target};').strip().split('\t')
+        driver.require(len(stats) == 5 and int(stats[0]) == original_count > 20000
+                       and stats[1:4] == ['20000','16','16'],
+                       'Unexpected original postings shape')
+        result.append(dict(table=name, rows=int(stats[0]), sourceTable=table,
+                           documents=20000, docIdBytes=16, maximumWordBytes=int(stats[4])))
+    return result
+
+
+def work_factory(runtime_args, identities, role, position, baseline, scorer):
+    def work(call, out, pid):
+        result = dict(passed=False, position=position, measurements=[], inputTables=[],
+                      formalContestRun=False, originalNineMetricResult=False, newBuilds=0,
+                      scope='Materialized original postings; full scan and sort, excludes tokenization and DDL writes',
+                      cpuProxy='EXECUTE_TIME minus TOTAL_WAIT_TIME_MICRO; not hardware CPU cycles')
+        try:
+            result['inputTables'] = setup(runtime_args, call, out)
+            driver.sql(call, out, 'audit-schema', 'DESCRIBE oceanbase.V$OB_SQL_AUDIT;')
+            driver.sql(call, out, 'manual-workarea', "ALTER SYSTEM SET workarea_size_policy='MANUAL';")
+            canonical = {}
+            for area in (AREAS if position == 0 else tuple(reversed(AREAS))):
+                driver.sql(call, out, 'area-' + area,
+                    f"ALTER SYSTEM SET _sort_area_size='{area}';\nSHOW PARAMETERS LIKE '_sort_area_size';")
+                for corpus in (result['inputTables'] if position == 0 else list(reversed(result['inputTables']))):
+                    table, rows = corpus['table'], corpus['rows']
+                    for order in (tuple(ORDERS) if position == 0 else tuple(reversed(ORDERS))):
+                        sequence = (False, True, False, True, True, False)
+                        if position:
+                            sequence = tuple(not item for item in sequence)
+                        for sample, enabled in enumerate(sequence):
+                            tag = f'dw{position}_{table}_{order}_{area}_{sample}_{int(enabled)}'
+                            record, output = measure(call, out, pid, table, order, enabled, tag, rows)
+                            record.update(table=table, order=order, area=area, sample=sample,
+                                          warmup=sample < 2)
+                            result['measurements'].append(record)
+                            key = (table, order)
+                            if key not in canonical:
+                                canonical[key] = record['outputSha256']
+                                saved = out / (table + '-' + order + '-canonical.rows.gz')
+                                with output.open('rb') as incoming, gzip.open(saved, 'wb') as outgoing:
+                                    shutil.copyfileobj(incoming, outgoing)
+                            driver.require(record['outputSha256'] == canonical[key],
+                                           'Ordered output differs across sort paths or memory limits: ' + tag)
+                            output.unlink()
+                            driver.dump(out / 'docword-sort-diagnostics.json', result)
+            driver.require(len(result['measurements']) == 72, 'Incomplete diagnostic schedule')
+            result.update(passed=True, allRowOrdersEqual=True, significanceClaimed=False)
+            return result
+        finally:
+            driver.dump(out / 'docword-sort-diagnostics.json', result)
+    return work
+
+
+ORIGINAL_PREPARE = runtime.prepare
+ORIGINAL_COLLECT = driver.collect
+
+
+def prepare(args, report):
+    prepared = ORIGINAL_PREPARE(args, report)
+    plan = json.loads((args.root / 'plan.json').read_text())
+    plan['diagnosticConfig'] = dict(originalDocuments=20000, areas=list(AREAS),
+        sortKeyOrders=ORDERS, measuredSamplesPerPathPerInstance=2, instances=2,
+        warmupPerPathPerCell=1, newBuilds=0)
+    driver.dump(args.root / 'plan.json', plan)
+    return prepared
+
+
+def collect(args):
+    ORIGINAL_COLLECT(args)
+    records = []
+    for source in sorted((args.root / 'validation').glob('*/*-canonical.rows.gz')):
+        destination = args.out / 'canonical-rows' / source.parent.name / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        driver.require(source.stat().st_size <= 32 * 1024**2, 'Canonical compressed rows exceed cap')
+        shutil.copyfile(source, destination)
+        records.append(dict(path=destination.relative_to(args.out).as_posix(),
+                            bytes=source.stat().st_size, sha256=common.digest(source)))
+    driver.dump(args.out / 'canonical-rows-manifest.json', records)
+
+
+def main():
+    runtime.SCOPE = 'PRESERVED_ELF_ORIGINAL_POSTINGS_DOCWORD_SORT_DIAGNOSTICS'
+    runtime.diagnostic_source_proof = source_proof
+    runtime.diagnostic_work = work_factory
+    runtime.prepare = prepare
+    driver.collect = collect
+    runtime.main()
+
+
+if __name__ == '__main__':
+    main()
