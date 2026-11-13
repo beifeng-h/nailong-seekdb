@@ -27,12 +27,12 @@ class EvidenceTests(unittest.TestCase):
     def test_workarea_distinguishes_optimal_and_external_execution(self):
         for mode, temp in (('OPTIMAL', 'NULL'), ('ONE PASS', '8000000'), ('MULTI-PASS', '9000000')):
             result = diagnostic.parse_workarea('\t'.join(('A' * 32, '1', '2097152', mode,
-                                                         '0', '1', '0', temp)) + '\n', 'A' * 32)
+                                                         '0', '1', '0', temp, temp)) + '\n', 'A' * 32)
             self.assertEqual(result['LAST_EXECUTION'], mode)
 
     def test_rejects_wrong_query_workarea(self):
         with self.assertRaises(Exception):
-            diagnostic.parse_workarea('\t'.join(('B' * 32, '1', '123', 'OPTIMAL', '1', '0', '0', 'NULL')), 'A' * 32)
+            diagnostic.parse_workarea('\t'.join(('B' * 32, '1', '123', 'OPTIMAL', '1', '0', '0', 'NULL', 'NULL')), 'A' * 32)
 
     def test_workarea_filter_matches_preserved_native_operator_name(self):
         query = diagnostic.workarea_query('A' * 32, 331)

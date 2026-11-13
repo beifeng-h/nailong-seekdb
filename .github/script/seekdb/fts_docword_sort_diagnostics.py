@@ -27,7 +27,7 @@ STAT_COLUMNS = ('PLAN_ID', 'SQL_ID', 'EXECUTIONS', 'ELAPSED_TIME', 'CPU_TIME',
                 'APPLICATION_WAIT_TIME', 'CONCURRENCY_WAIT_TIME', 'USER_IO_WAIT_TIME')
 WORKAREA_COLUMNS = ('SQL_ID', 'OPERATION_ID', 'LAST_MEMORY_USED', 'LAST_EXECUTION',
                     'OPTIMAL_EXECUTIONS', 'ONEPASS_EXECUTIONS', 'MULTIPASSES_EXECUTIONS',
-                    'MAX_TEMPSEG_SIZE')
+                    'MAX_TEMPSEG_SIZE', 'LAST_TEMPSEG_SIZE')
 
 
 def workarea_query(sql_id, plan_id):
@@ -125,6 +125,8 @@ def measure(call, out, pid, table, order, enabled, tag, rows):
         output, Path.cwd(), 120, env=os.environ.copy(), stdin=sql_text.encode())
     wall_ms = (time.monotonic_ns() - before) / 1e6
     cpu_ms = (driver.cpu_ticks(pid) - before_cpu) * 1000 / os.sysconf('SC_CLK_TCK')
+    if receipt['exitCode'] != 0:
+        shutil.copyfile(output, out / (tag + '-failed-output.log'))
     driver.require(receipt['exitCode'] == 0 and receipt['childrenCleaned'], 'Sort query failed: ' + tag)
     raw = output.read_bytes()
     driver.require(raw.count(b'\n') == rows, 'Incomplete sorted row stream: ' + tag)
@@ -140,6 +142,10 @@ def measure(call, out, pid, table, order, enabled, tag, rows):
 
 def setup(runtime_args, call, out):
     source = runtime_args.source
+    # Three additional posting copies plus sustained external sorts exceed the original 2G data cap.
+    driver.sql(call, out, 'diagnostic-storage-capacity',
+        "ALTER SYSTEM SET datafile_maxsize='6G';\n"
+        "SHOW PARAMETERS LIKE 'datafile%';\nSHOW PARAMETERS LIKE 'enable_perf_event';")
     driver.sql(call, out, 'setup', (source / 'tools/benchmark/fts_large_bench_setup.sql').read_text())
     data = subprocess.check_output([os.sys.executable, str(source / 'tools/benchmark/fts_large_bench_gen.py'),
                                    '--rows', '20000', '--batch', '500', '--seed', '42'], timeout=60)
@@ -198,7 +204,8 @@ def work_factory(runtime_args, identities, role, position, baseline, scorer):
         result = dict(passed=False, position=position, measurements=[], inputTables=[],
                       formalContestRun=False, originalNineMetricResult=False, newBuilds=0,
                       scope='Materialized original postings; full scan and sort, excludes tokenization and DDL writes',
-                      cpuMetric='Delta of V$OB_PLAN_CACHE_PLAN_STAT.CPU_TIME for exactly one execution')
+                      cpuMetric='Plan CPU_TIME is an elapsed-minus-recorded-waits estimate, not hardware CPU time',
+                      diagnosticDatafileMaxsize='6G')
         try:
             result['inputTables'] = setup(runtime_args, call, out)
             driver.sql(call, out, 'statistics-schema', 'DESCRIBE oceanbase.V$OB_PLAN_CACHE_PLAN_STAT;')
