@@ -4,17 +4,25 @@ import fts_docword_sort_diagnostics as diagnostic
 
 
 class EvidenceTests(unittest.TestCase):
-    def audit(self, rows='100', status='0'):
-        return '\t'.join(('7', 'A' * 32, '4', status, rows, '2000', '1200', '200', '300', '0', '1')) + '\n'
+    def stats(self, executions=1, elapsed=2000, cpu=1200, plan=7):
+        return '\t'.join(map(str, (plan, 'A' * 32, executions, elapsed, cpu, 0, 0, 100, 100, 0, 0, 200))) + '\n'
 
-    def test_exact_query_audit_and_cpu_proxy(self):
-        result = diagnostic.parse_audit(self.audit(), 100)
-        self.assertEqual(result['executeMinusWaitUs'], 1000)
+    def test_new_plan_delta(self):
+        result = diagnostic.stats_delta({}, diagnostic.parse_stats(self.stats()))
+        self.assertEqual(result['CPU_TIME'], 1200)
 
-    def test_rejects_incomplete_wrong_or_failed_audit(self):
-        for raw in ('', self.audit() + self.audit(), self.audit(rows='99'), self.audit(status='-1')):
+    def test_cached_plan_uses_single_execution_difference(self):
+        result = diagnostic.stats_delta(diagnostic.parse_stats(self.stats()),
+            diagnostic.parse_stats(self.stats(executions=2, elapsed=4000, cpu=2400)))
+        self.assertEqual(result['CPU_TIME'], 1200)
+        self.assertEqual(result['EXECUTIONS'], 1)
+
+    def test_rejects_missing_duplicate_and_multi_execution_deltas(self):
+        for raw in ('', self.stats(executions=2), self.stats() + self.stats(plan=8)):
             with self.assertRaises(Exception):
-                diagnostic.parse_audit(raw, 100)
+                diagnostic.stats_delta({}, diagnostic.parse_stats(raw))
+        with self.assertRaises(Exception):
+            diagnostic.parse_stats(self.stats() + self.stats())
 
     def test_workarea_distinguishes_optimal_and_external_execution(self):
         for mode, temp in (('OPTIMAL', 'NULL'), ('ONE PASS', '8000000'), ('MULTI-PASS', '9000000')):
