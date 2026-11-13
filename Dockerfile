@@ -15,21 +15,15 @@ RUN printf '%s\n' \
     && apt-get install --yes --no-install-recommends ca-certificates=20240203 \
     && printf '%s\n' \
       'Types: deb' \
-      'URIs: https://archive.ubuntu.com/ubuntu/' \
-      'Suites: noble noble-updates' \
-      'Components: main universe' \
-      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-      '' \
-      'Types: deb' \
-      'URIs: https://security.ubuntu.com/ubuntu/' \
-      'Suites: noble-security' \
+      'URIs: https://snapshot.ubuntu.com/ubuntu/20261109T000000Z/' \
+      'Suites: noble noble-updates noble-security' \
       'Components: main universe' \
       'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
       > /etc/apt/sources.list.d/ubuntu.sources \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get update --error-on=any \
+    && apt-get -o Acquire::Retries=3 update --error-on=any \
     && awk -F '\t' '{ print $1 "=" $2 }' /ubuntu-packages.lock \
-       | xargs apt-get install --yes --no-install-recommends --no-remove \
+       | xargs apt-get -o Acquire::Retries=3 install --yes --no-install-recommends --no-remove \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
