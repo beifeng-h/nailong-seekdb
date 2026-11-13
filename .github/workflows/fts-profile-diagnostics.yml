@@ -4,6 +4,10 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - .github/workflows/fts-encoded-sort-diagnostics.yml
+      - .github/script/seekdb/fts_encoded_sort_diagnostics.py
+      - .github/script/seekdb/fts_encoded_sort_cases.py
+      - .github/script/seekdb/test_fts_encoded_sort_diagnostics.py
       - .github/workflows/fts-profile-recording-analysis.yml
       - .github/script/seekdb/fts-profile-recording-analysis/**
       - .github/workflows/fts-profile-diagnostics.yml
