@@ -22,9 +22,9 @@ ALLOWED = {
 }
 AREAS = ('2M', '256M')
 ORDERS = {'doc_word': 'doc_id, word', 'inverted': 'word, doc_id'}
-AUDIT_COLUMNS = ('REQUEST_ID', 'SQL_ID', 'PLAN_ID', 'RET_CODE', 'RETURN_ROWS',
-                 'ELAPSED_TIME', 'EXECUTE_TIME', 'TOTAL_WAIT_TIME_MICRO', 'GET_PLAN_TIME',
-                 'DISK_READS', 'IS_HIT_PLAN')
+STAT_COLUMNS = ('PLAN_ID', 'SQL_ID', 'EXECUTIONS', 'ELAPSED_TIME', 'CPU_TIME',
+                'DISK_READS', 'DIRECT_WRITES', 'BUFFER_GETS', 'ROWS_PROCESSED',
+                'APPLICATION_WAIT_TIME', 'CONCURRENCY_WAIT_TIME', 'USER_IO_WAIT_TIME')
 WORKAREA_COLUMNS = ('SQL_ID', 'OPERATION_ID', 'LAST_MEMORY_USED', 'LAST_EXECUTION',
                     'OPTIMAL_EXECUTIONS', 'ONEPASS_EXECUTIONS', 'MULTIPASSES_EXECUTIONS',
                     'MAX_TEMPSEG_SIZE')
@@ -50,20 +50,41 @@ def ident(value):
     return '`' + value + '`'
 
 
-def parse_audit(raw, expected_rows):
-    lines = [line.split('\t') for line in raw.splitlines()]
-    driver.require(len(lines) == 1 and len(lines[0]) == len(AUDIT_COLUMNS),
-                   'Expected one complete audit record for this tagged query')
-    result = dict(zip(AUDIT_COLUMNS, lines[0]))
-    for key in AUDIT_COLUMNS:
-        if key != 'SQL_ID':
-            result[key] = int(result[key])
-    driver.require(result['RET_CODE'] == 0 and result['RETURN_ROWS'] == expected_rows
-                   and result['EXECUTE_TIME'] > 0
-                   and re.fullmatch('[0-9A-Fa-f]{32}', result['SQL_ID']) is not None,
-                   'Audit result status, row count or SQL identity differs')
-    result['executeMinusWaitUs'] = result['EXECUTE_TIME'] - result['TOTAL_WAIT_TIME_MICRO']
+def parse_stats(raw):
+    result = {}
+    for line in raw.splitlines():
+        fields = line.split('\t')
+        driver.require(len(fields) == len(STAT_COLUMNS), 'Incomplete plan statistics')
+        row = dict(zip(STAT_COLUMNS, fields))
+        for key in STAT_COLUMNS:
+            if key != 'SQL_ID':
+                row[key] = int(row[key])
+        driver.require(re.fullmatch('[0-9A-Fa-f]{32}', row['SQL_ID']) is not None
+                       and row['PLAN_ID'] not in result, 'Invalid or duplicate plan identity')
+        result[row['PLAN_ID']] = row
     return result
+
+
+def stats_delta(before, after):
+    changed = []
+    for plan_id, row in after.items():
+        previous = before.get(plan_id, {})
+        delta = {key: row[key] - previous.get(key, 0) for key in STAT_COLUMNS
+                 if key not in ('PLAN_ID', 'SQL_ID')}
+        if delta['EXECUTIONS']:
+            driver.require(not previous or previous['SQL_ID'] == row['SQL_ID'], 'Plan identity changed')
+            changed.append(dict(PLAN_ID=plan_id, SQL_ID=row['SQL_ID'], **delta))
+    driver.require(len(changed) == 1 and changed[0]['EXECUTIONS'] == 1
+                   and changed[0]['ELAPSED_TIME'] > 0 and changed[0]['CPU_TIME'] > 0,
+                   'Expected exactly one measured plan execution delta')
+    return changed[0]
+
+
+def snapshot(call, out, label):
+    raw = driver.sql(call, out, label, 'SELECT ' + ','.join(STAT_COLUMNS) +
+        ' FROM oceanbase.V$OB_PLAN_CACHE_PLAN_STAT '
+        "WHERE QUERY_SQL LIKE 'SELECT /*+%FROM fts_docword_probe.%';")
+    return parse_stats(raw)
 
 
 def parse_workarea(raw, sql_id):
@@ -91,6 +112,7 @@ def measure(call, out, pid, table, order, enabled, tag, rows):
     if tag.split('_')[-2] in ('0', '1'):
         plan = driver.sql(call, out, tag + '-plan', 'EXPLAIN EXTENDED ' + query)
         driver.require('SORT' in plan, 'Explicit full sort operator missing: ' + tag)
+    previous = snapshot(call, out, tag + '-before')
     output = out / (tag + '.rows')
     before_cpu, before = driver.cpu_ticks(pid), time.monotonic_ns()
     receipt = common.capture_group([str(call.obclient), '-h127.0.0.1', '-P' + str(call.port),
@@ -101,16 +123,13 @@ def measure(call, out, pid, table, order, enabled, tag, rows):
     driver.require(receipt['exitCode'] == 0 and receipt['childrenCleaned'], 'Sort query failed: ' + tag)
     raw = output.read_bytes()
     driver.require(raw.count(b'\n') == rows, 'Incomplete sorted row stream: ' + tag)
-    audit_raw = driver.sql(call, out, tag + '-audit',
-        'SELECT ' + ','.join(AUDIT_COLUMNS) + ' FROM oceanbase.V$OB_SQL_AUDIT '
-        f"WHERE QUERY_SQL LIKE 'SELECT /*+% /*{tag}*/%' AND IS_EXECUTOR_RPC=0 ORDER BY REQUEST_ID DESC LIMIT 1;")
-    audit = parse_audit(audit_raw, rows)
+    measured = stats_delta(previous, snapshot(call, out, tag + '-after'))
     workarea_raw = driver.sql(call, out, tag + '-workarea',
         'SELECT ' + ','.join(WORKAREA_COLUMNS) + ' FROM oceanbase.V$SQL_WORKAREA '
-        f"WHERE SQL_ID='{audit['SQL_ID']}' AND OPERATION_TYPE='SORT';")
-    workarea = parse_workarea(workarea_raw, audit['SQL_ID'])
+        f"WHERE SQL_ID='{measured['SQL_ID']}' AND CHILD_NUMBER={measured['PLAN_ID']} AND OPERATION_TYPE='SORT';")
+    workarea = parse_workarea(workarea_raw, measured['SQL_ID'])
     return dict(tag=tag, enabled=enabled, wallMsIncludingClient=wall_ms,
-                processCpuMsIncludingBackground=cpu_ms, audit=audit, workarea=workarea,
+                processCpuMsIncludingBackground=cpu_ms, planStats=measured, workarea=workarea,
                 outputBytes=len(raw), outputSha256=hashlib.sha256(raw).hexdigest(),
                 rows=rows, query=query, receipt=receipt), output
 
@@ -175,10 +194,10 @@ def work_factory(runtime_args, identities, role, position, baseline, scorer):
         result = dict(passed=False, position=position, measurements=[], inputTables=[],
                       formalContestRun=False, originalNineMetricResult=False, newBuilds=0,
                       scope='Materialized original postings; full scan and sort, excludes tokenization and DDL writes',
-                      cpuProxy='EXECUTE_TIME minus TOTAL_WAIT_TIME_MICRO; not hardware CPU cycles')
+                      cpuMetric='Delta of V$OB_PLAN_CACHE_PLAN_STAT.CPU_TIME for exactly one execution')
         try:
             result['inputTables'] = setup(runtime_args, call, out)
-            driver.sql(call, out, 'audit-schema', 'DESCRIBE oceanbase.V$OB_SQL_AUDIT;')
+            driver.sql(call, out, 'statistics-schema', 'DESCRIBE oceanbase.V$OB_PLAN_CACHE_PLAN_STAT;')
             driver.sql(call, out, 'manual-workarea', "ALTER SYSTEM SET workarea_size_policy='MANUAL';")
             canonical = {}
             for area in (AREAS if position == 0 else tuple(reversed(AREAS))):
