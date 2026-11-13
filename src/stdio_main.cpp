@@ -21,6 +21,8 @@ int run(const std::filesystem::path& directory) {
     return 1;
   }
 #endif
+  std::ios::sync_with_stdio(false);
+  std::cin.tie(nullptr);
   try {
     minivectordb::stdio::run(directory, std::cin, std::cout);
     return 0;

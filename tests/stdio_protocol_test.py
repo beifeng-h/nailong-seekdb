@@ -199,8 +199,29 @@ def protocol_edges(driver, root):
     finally:
         client.abort()
     assert sorted(path.name for path in data.iterdir()) == ['pages.bin', 'redo.wal']
+
+    client = Client(driver, data)
+    workspace = data / '.minivectordb-response.tmp'
+    try:
+        workspace.mkdir()
+        client.execute('SELECT id FROM docs;', {'rows': [[2**63-1]]})
+        response = client.request(dict(id='spill-failure', op='execute', search_mode='exact',
+                                       sql='SELECT id, content FROM large_rows ORDER BY id;'))
+        assert response['ok'] is False and response['error']['code'] == 'execution_error', response
+        assert 'rows' not in response, response
+        client.execute('SELECT id FROM docs;', {'rows': [[2**63-1]]})
+        workspace.rmdir()
+        client.execute('SELECT id, content FROM large_rows ORDER BY id;',
+                       {'rows': [[key, payload] for key in range(600)]})
+        client.finish()
+    finally:
+        client.abort()
+        if workspace.is_dir():
+            workspace.rmdir()
+    assert sorted(path.name for path in data.iterdir()) == ['pages.bin', 'redo.wal']
     return dict(id_type_checks=id_checks, malformed_request_checks=malformed_checks,
-                single_response_rows=600, shutdown_and_eof_rollback=True)
+                single_response_rows=600, shutdown_and_eof_rollback=True,
+                bounded_response_spill_and_failure_recovery=True)
 
 
 def main():

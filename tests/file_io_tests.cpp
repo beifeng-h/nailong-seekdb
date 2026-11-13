@@ -95,6 +95,7 @@ struct TestDirectory {
     std::error_code error;
     std::filesystem::remove(path / "mixed.bin", error);
     std::filesystem::remove(path / "large.bin", error);
+    std::filesystem::remove(path / "reopen.bin", error);
     std::filesystem::remove(path, error);
   }
 };
@@ -140,11 +141,14 @@ int main(int argc, char** argv) {
     for (std::size_t index = 0; index < expected.size(); ++index) expected[index] = std::byte((index * 7 + 3) & 255);
     std::array<std::byte, 37> actual{};
     minivectordb::File file(directory.path / "mixed.bin");
+    require(file.size() == 0, "New file length differs");
     file.write(0, expected.data(), expected.size());
+    require(file.size() == expected.size(), "Written file length differs");
     file.read(0, actual.data(), actual.size());
     require(actual == expected, "Immediate read missed an unbuffered write");
     const std::array patch{std::byte{41}, std::byte{42}, std::byte{43}};
     file.write(9, patch.data(), patch.size());
+    require(file.size() == expected.size(), "Overwrite changed the file length");
     std::copy(patch.begin(), patch.end(), expected.begin() + 9);
     file.read(19, actual.data() + 19, 7);
     file.read(0, actual.data(), actual.size());
@@ -195,6 +199,18 @@ int main(int argc, char** argv) {
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "Out-of-range file extent was accepted");
     file.read(0, nullptr, 0);
+    file.write(100, nullptr, 0);
+    require(file.size() == expected.size(), "Zero-length write extended the file");
+    {
+      {
+        minivectordb::File original(directory.path / "reopen.bin");
+        original.write(0, expected.data(), expected.size());
+      }
+      minivectordb::File reopened(directory.path / "reopen.bin");
+      require(reopened.size() == expected.size(), "Reopened file length differs");
+      reopened.read(0, actual.data(), actual.size());
+      require(actual == expected, "Reopened file data differs");
+    }
     pass("offset_range_and_zero_length");
 
     const auto large_path = directory.path / "large.bin";

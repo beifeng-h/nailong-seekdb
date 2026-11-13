@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <locale>
 #include <optional>
+#include <streambuf>
 #include <unordered_set>
 
 namespace minivectordb::stdio {
@@ -19,53 +20,81 @@ using Json = nlohmann::json;
 constexpr std::string_view response_file_name = ".minivectordb-response.tmp";
 
 // A failed query can discard its rows before publishing a single response.
-class ResponseRows {
+class ResponseRows : private std::streambuf {
  public:
   explicit ResponseRows(const std::filesystem::path& directory)
-      : path_(directory / response_file_name),
-        file_(path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc) {
-    if (!file_) throw std::runtime_error("Cannot open response workspace");
-    file_.imbue(std::locale::classic());
-    file_ << std::setprecision(17);
+      : path_(directory / response_file_name), output_(this) {
+    setp(buffer_.data(), buffer_.data() + buffer_.size());
+    output_.imbue(std::locale::classic());
+    output_ << std::setprecision(17);
   }
 
   ~ResponseRows() {
-    file_.close();
-    std::error_code error;
-    std::filesystem::remove(path_, error);
+    if (file_.is_open()) {
+      file_.close();
+      std::error_code error;
+      std::filesystem::remove(path_, error);
+    }
   }
 
   void append(std::span<const SqlValue> row) {
-    if (has_rows_) file_ << ',';
-    file_ << '[';
+    if (has_rows_) output_ << ',';
+    output_ << '[';
     for (std::size_t i = 0; i < row.size(); ++i) {
-      if (i != 0) file_ << ',';
-      development::write_value(file_, row[i]);
+      if (i != 0) output_ << ',';
+      development::write_value(output_, row[i]);
     }
-    file_ << ']';
-    if (!file_) throw std::runtime_error("Cannot write response workspace");
+    output_ << ']';
+    if (!output_) throw std::runtime_error("Cannot write response workspace");
     has_rows_ = true;
   }
 
   void finish() {
+    if (!file_.is_open()) return;
+    spill();
     file_.flush();
     file_.seekg(0);
     if (!file_) throw std::runtime_error("Cannot rewind response workspace");
   }
 
   void copy_to(std::ostream& output) {
-    std::array<char, 65536> buffer{};
+    if (!file_.is_open()) {
+      output.write(buffer_.data(), pptr() - pbase());
+      if (!output) throw std::runtime_error("Cannot write protocol response");
+      return;
+    }
     while (file_) {
-      file_.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-      output.write(buffer.data(), file_.gcount());
+      file_.read(buffer_.data(), static_cast<std::streamsize>(buffer_.size()));
+      output.write(buffer_.data(), file_.gcount());
       if (!output) throw std::runtime_error("Cannot write protocol response");
     }
     if (!file_.eof()) throw std::runtime_error("Cannot read response workspace");
   }
 
  private:
+  void spill() {
+    if (!file_.is_open()) {
+      file_.open(path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+      if (!file_) throw std::runtime_error("Cannot open response workspace");
+    }
+    file_.write(pbase(), pptr() - pbase());
+    if (!file_) throw std::runtime_error("Cannot write response workspace");
+    setp(buffer_.data(), buffer_.data() + buffer_.size());
+  }
+
+  int_type overflow(int_type character) override {
+    spill();
+    if (!traits_type::eq_int_type(character, traits_type::eof())) {
+      *pptr() = traits_type::to_char_type(character);
+      pbump(1);
+    }
+    return traits_type::not_eof(character);
+  }
+
   std::filesystem::path path_;
+  std::array<char, 65536> buffer_{};
   std::fstream file_;
+  std::ostream output_;
   bool has_rows_ = false;
 };
 

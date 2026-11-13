@@ -99,26 +99,39 @@ std::vector<std::byte> encode_row(const Row& row) {
   return bytes;
 }
 
-Row decode_row(const Schema& schema, const std::vector<std::byte>& bytes) {
-  Decoder input{bytes}; Row row;
-  row.reserve(schema.columns.size());
-  for (const auto& column : schema.columns) {
-    if (column.type == Type::bigint) row.emplace_back(std::bit_cast<std::int64_t>(input.u64()));
-    else if (column.type == Type::varchar) row.emplace_back(input.string());
-    else {
+void decode_row(const Schema& schema, const std::vector<std::byte>& bytes, Row& row) {
+  Decoder input{bytes};
+  row.resize(schema.columns.size());
+  for (std::size_t i = 0; i < schema.columns.size(); ++i) {
+    const auto& column = schema.columns[i];
+    if (column.type == Type::bigint) row[i] = std::bit_cast<std::int64_t>(input.u64());
+    else if (column.type == Type::varchar) {
+      const auto length = input.u32();
+      input.need(length);
+      if (!std::holds_alternative<std::string>(row[i])) row[i] = std::string{};
+      std::get<std::string>(row[i]).assign(reinterpret_cast<const char*>(bytes.data() + input.offset), length);
+      input.offset += length;
+    } else {
       const auto length = std::size_t(column.extent) * sizeof(float);
       input.need(length);
-      Vector vector(column.extent);
+      if (!std::holds_alternative<Vector>(row[i])) row[i] = Vector{};
+      auto& vector = std::get<Vector>(row[i]);
+      vector.resize(column.extent);
       if constexpr (std::endian::native == std::endian::little) {
         std::memcpy(vector.data(), input.data.data() + input.offset, length);
         input.offset += length;
       } else {
         for (auto& number : vector) number = std::bit_cast<float>(input.u32());
       }
-      row.emplace_back(std::move(vector));
     }
   }
-  input.complete(); return row;
+  input.complete();
+}
+
+Row decode_row(const Schema& schema, const std::vector<std::byte>& bytes) {
+  Row row;
+  decode_row(schema, bytes, row);
+  return row;
 }
 
 struct Table {
@@ -428,8 +441,9 @@ struct Database::Impl {
     return next;
   }
 
-  std::vector<std::byte> blob(std::uint64_t id) {
-    std::vector<std::byte> result; std::uint64_t visited = 0;
+  void blob(std::uint64_t id, std::vector<std::byte>& result) {
+    result.clear();
+    std::uint64_t visited = 0;
     while (id != 0) {
       if (++visited > pages.size()) invalid("Cyclic record pages");
       const auto page = pages.read(id); const auto used = get64(page.data() + 8);
@@ -437,6 +451,11 @@ struct Database::Impl {
       result.insert(result.end(), page.begin() + 16, page.begin() + 16 + static_cast<std::size_t>(used));
       id = get64(page.data());
     }
+  }
+
+  std::vector<std::byte> blob(std::uint64_t id) {
+    std::vector<std::byte> result;
+    blob(id, result);
     return result;
   }
 
@@ -646,8 +665,11 @@ struct Database::Impl {
   void each_vector(const Table& table, SearchMode mode, const Predicate& predicate, Function function) {
     if (mode == SearchMode::exact) {
       const auto column = vector_column(table.schema);
+      std::vector<std::byte> bytes;
+      Row row;
       each_entry(table, [&](std::int64_t key, std::uint64_t record) {
-        const auto row = decode_row(table.schema, blob(record));
+        blob(record, bytes);
+        decode_row(table.schema, bytes, row);
         if (predicate && !predicate(row)) return true;
         return function(key, record, std::get<Vector>(row[column]));
       });

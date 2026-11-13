@@ -53,12 +53,19 @@ class File {
 #endif
     if (!stream_) fail("Cannot open " + path.string() + ": " + std::generic_category().message(open_error));
     if (std::setvbuf(stream_, nullptr, _IONBF, 0) != 0) fail("Cannot disable file buffering");
+    size_ = std::filesystem::file_size(path_);
+#ifdef _WIN32
+    descriptor_ = _fileno(stream_);
+    handle_ = reinterpret_cast<HANDLE>(_get_osfhandle(descriptor_));
+#else
+    descriptor_ = fileno(stream_);
+#endif
   }
   ~File() { if (stream_) std::fclose(stream_); }
   File(const File&) = delete;
   File& operator=(const File&) = delete;
 
-  std::uint64_t size() const { return std::filesystem::file_size(path_); }
+  std::uint64_t size() const { return size_; }
 
   void seek(std::uint64_t offset) {
     if (offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
@@ -77,11 +84,6 @@ class File {
     auto* output = static_cast<std::byte*>(data);
     std::size_t completed = 0;
     // Unbuffered writes always establish their absolute position explicitly.
-#ifdef _WIN32
-    const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stream_)));
-#else
-    const auto descriptor = fileno(stream_);
-#endif
     while (completed < length) {
       const auto position = offset + completed;
 #ifdef _WIN32
@@ -90,11 +92,11 @@ class File {
       request.OffsetHigh = static_cast<DWORD>(position >> 32);
       const auto count = static_cast<DWORD>(std::min<std::size_t>(length - completed, std::numeric_limits<DWORD>::max()));
       DWORD transferred = 0;
-      if (!ReadFile(handle, output + completed, count, &transferred, &request) || transferred == 0)
+      if (!ReadFile(handle_, output + completed, count, &transferred, &request) || transferred == 0)
         fail("Incomplete file read: " + path_.string());
 #else
       const auto count = std::min<std::size_t>(length - completed, std::numeric_limits<ssize_t>::max());
-      const auto transferred = pread(descriptor, output + completed, count, static_cast<off_t>(position));
+      const auto transferred = pread(descriptor_, output + completed, count, static_cast<off_t>(position));
       if (transferred < 0 && errno == EINTR) continue;
       if (transferred <= 0) fail("Incomplete file read: " + path_.string());
 #endif
@@ -103,28 +105,32 @@ class File {
   }
 
   void write(std::uint64_t offset, const void* data, std::size_t length) {
+    const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    if (offset > maximum || length > maximum - offset) fail("File offset overflow");
     seek(offset);
-    if (length != 0 && std::fwrite(data, 1, length, stream_) != length)
-      fail("Incomplete file write: " + path_.string());
+    const auto written = length == 0 ? 0 : std::fwrite(data, 1, length, stream_);
+    if (written != 0) size_ = std::max(size_, offset + written);
+    if (written != length) fail("Incomplete file write: " + path_.string());
   }
 
   void resize(std::uint64_t size) {
     if (size > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
       fail("File size overflow");
 #ifdef _WIN32
-    const int result = _chsize_s(_fileno(stream_), size);
+    const int result = _chsize_s(descriptor_, size);
 #else
-    const int result = ftruncate(fileno(stream_), static_cast<off_t>(size));
+    const int result = ftruncate(descriptor_, static_cast<off_t>(size));
 #endif
     if (result != 0) fail("File resize failed: " + path_.string());
+    size_ = size;
   }
 
   void sync() {
 #ifdef _WIN32
-    const int result = _commit(_fileno(stream_));
+    const int result = _commit(descriptor_);
 #else
     int result;
-    do { result = fsync(fileno(stream_)); } while (result != 0 && errno == EINTR);
+    do { result = fsync(descriptor_); } while (result != 0 && errno == EINTR);
 #endif
     if (result != 0) fail("File synchronization failed: " + path_.string());
   }
@@ -132,6 +138,11 @@ class File {
  private:
   std::filesystem::path path_;
   std::FILE* stream_ = nullptr;
+  std::uint64_t size_ = 0;
+  int descriptor_ = -1;
+#ifdef _WIN32
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+#endif
 };
 
 constexpr auto crc_table = [] {

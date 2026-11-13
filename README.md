@@ -183,12 +183,19 @@ including integer identifiers beyond uint64 and nested identifier values.
 Duplicate object keys are rejected before SQL execution. Identifier extraction
 uses the validated envelope and preserves JSON string escapes and number spelling.
 
-Each query writes its rows incrementally to the reserved
-`/data/.minivectordb-response.tmp` workspace. Successful execution publishes one
-JSON response through a 64 KiB copy buffer. Failed execution discards the
-workspace and returns an error response. The workspace is removed after the
-request and on recovery. SQL parsing, transaction visibility, and numeric
-serialization reuse the existing engine.
+Query rows are serialized into a bounded 64 KiB buffer. Larger responses spill
+incrementally to the reserved `/data/.minivectordb-response.tmp` workspace.
+Successful execution publishes the completed JSON response, using the same
+buffer to copy spilled data. Failed execution discards the buffered rows and
+returns an error response. The workspace is removed after the request and on
+recovery. SQL parsing, transaction visibility, and numeric serialization reuse
+the existing engine.
+
+Exact vector scans reuse a record buffer and a decoded row throughout each
+scan. Page files retain their opened operating-system handle and current
+length. Writes update the length using the number of bytes transferred, and
+successful truncations set the new length. Each file has a single owning
+writer, and reopening reads its current length from the filesystem.
 
 `shutdown` closes the database, rolls back uncommitted changes, acknowledges
 the request, flushes, and exits with code zero. EOF also closes the database.
