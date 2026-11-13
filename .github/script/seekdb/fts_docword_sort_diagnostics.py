@@ -20,7 +20,8 @@ ALLOWED = {
     '.github/workflows/fts-docword-sort-diagnostics.yml',
     '.github/workflows/fts-profile-diagnostics.yml',
 }
-AREAS = ('2M', '256M')
+AREAS = ('24M',)
+LAYOUTS = ('word_ordered', 'word_crc32')
 ORDERS = {'doc_word': 'doc_id, word', 'inverted': 'word, doc_id'}
 STAT_COLUMNS = ('PLAN_ID', 'SQL_ID', 'EXECUTIONS', 'ELAPSED_TIME', 'CPU_TIME',
                 'DISK_READS', 'DIRECT_WRITES', 'BUFFER_GETS', 'ROWS_PROCESSED',
@@ -53,6 +54,16 @@ def ident(value):
     driver.require(re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', value) is not None,
                    'Unexpected catalog identifier')
     return '`' + value + '`'
+
+
+def permutation_sql(table):
+    source = 'fts_docword_probe.' + ident(table)
+    target = 'fts_docword_probe.' + ident(table + '_permuted')
+    return (f'CREATE TABLE {target} LIKE {source};\n'
+            f'ALTER TABLE {target} AUTO_INCREMENT=1;\n'
+            f'INSERT INTO {target}(doc_id,word,word_count,doc_length) '
+            f'SELECT doc_id,word,word_count,doc_length FROM {source} '
+            'ORDER BY doc_id,CRC32(word),word;')
 
 
 def parse_stats(raw):
@@ -194,8 +205,22 @@ def setup(runtime_args, call, out):
         driver.require(len(stats) == 5 and int(stats[0]) == original_count > 20000
                        and stats[1:4] == ['20000','16','16'],
                        'Unexpected original postings shape')
-        result.append(dict(table=name, rows=int(stats[0]), sourceTable=table,
-                           documents=20000, docIdBytes=16, maximumWordBytes=int(stats[4])))
+        row = dict(table=name, corpus=name, layout='word_ordered', rows=int(stats[0]), sourceTable=table,
+                   documents=20000, docIdBytes=16, maximumWordBytes=int(stats[4]))
+        result.append(row)
+        driver.sql(call, out, name + '-permutation', permutation_sql(name))
+        permuted = 'fts_docword_probe.' + ident(name + '_permuted')
+        parity = driver.sql(call, out, name + '-permutation-proof',
+            f'SELECT COUNT(*),COUNT(DISTINCT doc_id) FROM {permuted};\n'
+            'SELECT COUNT(*),SUM(a.doc_id<>b.doc_id),SUM(BINARY a.word<>BINARY b.word) '
+            f'FROM {target} a JOIN {permuted} b ON a.id=b.id;').splitlines()
+        joined = parity[1].split('\t') if len(parity) == 2 else []
+        driver.require(len(parity) == 2 and parity[0] == str(row['rows']) + '\t20000'
+                       and len(joined) == 3 and joined[:2] == [str(row['rows']), '0']
+                       and int(joined[2]) > 0,
+                       'Permutation must preserve document groups and change word order')
+        result.append(dict(row, table=name + '_permuted', layout='word_crc32',
+                           wordPositionsChanged=int(joined[2])))
     return result
 
 
@@ -203,7 +228,7 @@ def work_factory(runtime_args, identities, role, position, baseline, scorer):
     def work(call, out, pid):
         result = dict(passed=False, position=position, measurements=[], inputTables=[],
                       formalContestRun=False, originalNineMetricResult=False, newBuilds=0,
-                      scope='Materialized original postings; full scan and sort, excludes tokenization and DDL writes',
+                      scope='Original postings at 24M in ordered and CRC32-permuted word layouts; not native unnest replay',
                       cpuMetric='Plan CPU_TIME is an elapsed-minus-recorded-waits estimate, not hardware CPU time',
                       diagnosticDatafileMaxsize='6G')
         try:
@@ -223,13 +248,14 @@ def work_factory(runtime_args, identities, role, position, baseline, scorer):
                         for sample, enabled in enumerate(sequence):
                             tag = f'dw{position}_{table}_{order}_{area}_{sample}_{int(enabled)}'
                             record, output = measure(call, out, pid, table, order, enabled, tag, rows)
-                            record.update(table=table, order=order, area=area, sample=sample,
+                            record.update(table=table, corpus=corpus['corpus'], layout=corpus['layout'],
+                                          order=order, area=area, sample=sample,
                                           warmup=sample < 2)
                             result['measurements'].append(record)
-                            key = (table, order)
+                            key = (corpus['corpus'], order)
                             if key not in canonical:
                                 canonical[key] = record['outputSha256']
-                                saved = out / (table + '-' + order + '-canonical.rows.gz')
+                                saved = out / (corpus['corpus'] + '-' + order + '-canonical.rows.gz')
                                 with output.open('rb') as incoming, gzip.open(saved, 'wb') as outgoing:
                                     shutil.copyfileobj(incoming, outgoing)
                             driver.require(record['outputSha256'] == canonical[key],
@@ -252,6 +278,7 @@ def prepare(args, report):
     prepared = ORIGINAL_PREPARE(args, report)
     plan = json.loads((args.root / 'plan.json').read_text())
     plan['diagnosticConfig'] = dict(originalDocuments=20000, areas=list(AREAS),
+        inputLayouts=list(LAYOUTS), nativeUnnestOrderReplayed=False,
         sortKeyOrders=ORDERS, measuredSamplesPerPathPerInstance=2, instances=2,
         warmupPerPathPerCell=1, newBuilds=0)
     driver.dump(args.root / 'plan.json', plan)
@@ -272,7 +299,7 @@ def collect(args):
 
 
 def main():
-    runtime.SCOPE = 'PRESERVED_ELF_ORIGINAL_POSTINGS_DOCWORD_SORT_DIAGNOSTICS'
+    runtime.SCOPE = 'PRESERVED_ELF_POSTINGS_SORT_24M_LAYOUT_DIAGNOSTICS'
     runtime.diagnostic_source_proof = source_proof
     runtime.diagnostic_work = work_factory
     runtime.prepare = prepare
