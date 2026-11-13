@@ -6,6 +6,9 @@ on:
     paths-ignore:
       - src/rootserver/ddl_task/ob_ddl_common_rs_impl.cpp
       - .github/workflows/fts-encoded-sort-validation.yml
+      - .github/script/seekdb/fts_encoded_sort_revalidation.py
+      - .github/script/seekdb/test_fts_encoded_sort_revalidation.py
+      - .github/workflows/fts-encoded-sort-revalidation.yml
       - .github/script/seekdb/fts_encoded_sort_validation.py
       - .github/script/seekdb/test_fts_encoded_sort_validation.py
       - .github/workflows/fts-encoded-sort-diagnostics.yml

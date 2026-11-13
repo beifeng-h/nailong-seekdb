@@ -1,0 +1,218 @@
+name: SeekDB preserved ELF encoded sort revalidation
+
+on:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+    paths:
+      - .github/script/seekdb/fts_encoded_sort_revalidation.py
+      - .github/script/seekdb/test_fts_encoded_sort_revalidation.py
+      - .github/workflows/fts-encoded-sort-revalidation.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: seekdb-fts-free-linux-validation
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      GIT_TERMINAL_PROMPT: '0'
+      LC_ALL: C
+      LANG: C
+    steps:
+      - name: Fetch exact diagnostic and frozen ELF source objects
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          work="$RUNNER_TEMP/seekdb-encoded-sort-revalidation-$suffix"
+          metadata="$RUNNER_TEMP/seekdb-encoded-sort-revalidation-metadata-$suffix"
+          downloads="$RUNNER_TEMP/seekdb-encoded-sort-revalidation-downloads-$suffix"
+          for directory in "$work" "$metadata" "$downloads"; do
+            test ! -e "$directory" && test ! -L "$directory"
+          done
+          mkdir -m 0700 "$metadata" "$downloads"
+          python3 -B - "$GITHUB_ENV" "$work" "$metadata" "$downloads" <<'PY'
+          import datetime, pathlib, sys
+          started = datetime.datetime.now(datetime.timezone.utc)
+          values = dict(ENCODED_SORT_ROOT=sys.argv[2], ENCODED_SORT_META=sys.argv[3],
+                        ENCODED_SORT_DOWNLOADS=sys.argv[4],
+                        ENCODED_SORT_OUT=sys.argv[2] + '-evidence',
+                        ENCODED_SORT_STOP_UTC=(started + datetime.timedelta(minutes=85)).isoformat())
+          with pathlib.Path(sys.argv[1]).open('a', encoding='utf-8') as output:
+              for key, value in values.items():
+                  output.write(key + '=' + value + '\n')
+          PY
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" config core.autocrlf false
+          git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
+            fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
+            "$GITHUB_SHA" \
+            b9637d5e792cce0e461a06eee2df91036a3ff37a:refs/heads/codex/frozen-b963 \
+            bd5d28fda9552daca40ab81a2ef32b8ca663d426:refs/heads/codex/frozen-bd5d \
+            c3d798873b700987b6983043d2abf0defd8e2500:refs/heads/codex/frozen-c3d7988 \
+            5bce9e06d1281347ad61344e4b01fab9158c58a2:refs/heads/codex/frozen-official
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Check diagnostic regressions
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/script/seekdb \
+            -p test_fts_encoded_sort_revalidation.py -v \
+            2>&1 | tee "$ENCODED_SORT_META/offline-tests.log"
+
+      - name: Reuse installed runtime tools and verify the official client RPMs
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$ENCODED_SORT_META/prerequisites.log") 2>&1
+          ready=true
+          for tool in python3 readelf ldd; do
+            if ! command -v "$tool" || ! "$tool" --version; then ready=false; fi
+          done
+          if ! test -r /lib/x86_64-linux-gnu/libaio.so.1t64; then ready=false; fi
+          if test "$ready" != true; then
+            for host in archive.ubuntu.com security.ubuntu.com; do
+              timeout --signal=TERM --kill-after=2s 10s getent ahostsv4 "$host"
+            done
+            apt_sources="$ENCODED_SORT_META/apt-sources.list"
+            apt_parts="$ENCODED_SORT_META/apt-sourceparts"
+            mkdir -m 0700 "$apt_parts"
+            cat > "$apt_sources" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe
+          SOURCES
+            apt_options=(-o "Dir::Etc::sourcelist=$apt_sources" -o "Dir::Etc::sourceparts=$apt_parts"
+              -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            sudo -n timeout --signal=TERM --kill-after=5s 120s apt-get "${apt_options[@]}" update --error-on=any
+            sudo -n timeout --signal=TERM --kill-after=5s 120s env DEBIAN_FRONTEND=noninteractive \
+              apt-get "${apt_options[@]}" install -y --no-install-recommends libaio1t64 binutils python3
+          fi
+          mkdir -m 0700 "$ENCODED_SORT_META/client-downloads"
+          cd -- "$ENCODED_SORT_META/client-downloads"
+          for name in obclient libobclient; do
+            curl --fail --location --proto '=https' --proto-redir '=https' \
+              --connect-timeout 15 --max-time 120 --output "$name-2.2.3-1.el8.x86_64.rpm" \
+              "https://mirrors.oceanbase.com/oceanbase/community/stable/el/8/x86_64/$name-2.2.3-1.el8.x86_64.rpm"
+          done
+          printf '%s\n' \
+            '35e38b580996fc583b0eaa961bd78911feff08981624154851db51d7e5aa935d  obclient-2.2.3-1.el8.x86_64.rpm' \
+            'e53cadb0d91c1a0d78369f0c9488be8d774f03ea09346e7b218799a5318a9a68  libobclient-2.2.3-1.el8.x86_64.rpm' | sha256sum --check -
+          python3 -B "$GITHUB_WORKSPACE/.github/script/seekdb/fts-profile-runtime/extract_official_obclient.py" \
+            --output official-client
+
+      - name: Download the preserved complete bd5d ELF ZIP
+        timeout-minutes: 4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: '13941216422'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43204498012'
+          github-token: ${{ github.token }}
+          path: ${{ env.ENCODED_SORT_DOWNLOADS }}/baseline
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download the complete c3d7988 candidate ZIP
+        timeout-minutes: 4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: '14006965532'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43350361661'
+          github-token: ${{ github.token }}
+          path: ${{ env.ENCODED_SORT_DOWNLOADS }}/candidate
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download original build and failed-fixture evidence
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: '14006931540'
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43350361661'
+          github-token: ${{ github.token }}
+          path: ${{ env.ENCODED_SORT_DOWNLOADS }}/build-evidence
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Reuse both complete programs for native SQL and original ABBA
+        timeout-minutes: 65
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t baseline < <(find "$ENCODED_SORT_DOWNLOADS/baseline" -mindepth 1 -maxdepth 1 -print0)
+          mapfile -d '' -t candidate < <(find "$ENCODED_SORT_DOWNLOADS/candidate" -mindepth 1 -maxdepth 1 -print0)
+          mapfile -d '' -t evidence < <(find "$ENCODED_SORT_DOWNLOADS/build-evidence" -mindepth 1 -maxdepth 1 -print0)
+          test "${#baseline[@]}" -eq 1 && test "${#candidate[@]}" -eq 1 && test "${#evidence[@]}" -eq 1
+          for archive in "${baseline[0]}" "${candidate[0]}" "${evidence[0]}"; do
+            test -f "$archive" && test ! -L "$archive"
+          done
+          timeout --signal=TERM --kill-after=180s 60m \
+            python3 -B .github/script/seekdb/fts_encoded_sort_revalidation.py --phase run \
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
+            --frozen-source "$ENCODED_SORT_ROOT-frozen-candidate" \
+            --baseline-zip "${baseline[0]}" --candidate-zip "${candidate[0]}" \
+            --build-evidence-zip "${evidence[0]}" \
+            --client-rpm "$ENCODED_SORT_META/client-downloads/obclient-2.2.3-1.el8.x86_64.rpm" \
+            2>&1 | tee "$ENCODED_SORT_META/driver.log"
+
+      - name: Collect success or failure evidence with cleanup receipts
+        if: ${{ always() }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d "${ENCODED_SORT_ROOT:-}/evidence"; then
+            timeout --signal=TERM --kill-after=10s 90s \
+              python3 -B .github/script/seekdb/fts_encoded_sort_revalidation.py --phase collect \
+              --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --out "$ENCODED_SORT_OUT"
+          fi
+
+      - name: Preserve independent diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: seekdb-encoded-sort-revalidation-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.ENCODED_SORT_OUT }}/
+            ${{ env.ENCODED_SORT_META }}/*.log
+            ${{ env.ENCODED_SORT_META }}/client-downloads/official-client/receipt.json
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Show the saved diagnostic result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 -B - "$ENCODED_SORT_ROOT/report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          if not path.is_file():
+              raise SystemExit(0)
+          report = json.loads(path.read_text())
+          visible = {key: report[key] for key in (
+              'scope', 'status', 'passed', 'newBuilds', 'originalNineMetricResult', 'formalContestRun',
+              'correctnessPassed', 'sameHostPerformance', 'error', 'failure') if key in report}
+          print(json.dumps(visible))
+          with pathlib.Path(sys.argv[2]).open('a', encoding='utf-8') as output:
+              output.write('## Preserved ELF encoded sort diagnostics\n\n```json\n')
+              output.write(json.dumps(visible, indent=2) + '\n```\n')
+          PY
