@@ -294,6 +294,18 @@ statements and assistant-executed validation retain their source attribution.
 Material input checks establish file identity and parseability. Assessment of
 the student's learning evidence uses the platform's independent evaluation.
 
+The selected record's `interaction_order` lists exact string pointers in
+conversation order, including the assistant questions needed to interpret
+short answers. The original student explanation at `/conversations/1/content`
+and its result at `/experiments/0/output` retain their positions and text.
+Experiments are ordered by the known task sequence and identify their source
+revision; receipt verification times are distinguished from message times.
+The status snapshot separates the historical 7b Linux/public validation and
+formal Agent null result from the revised material, which has not been
+formally assessed. These context corrections do not establish the cause of
+the platform's null result. Historical query timings through the development
+judge process do not measure the default stdio response-spooling path.
+
 ## Numeric serialization comparison
 
 The M10 workflow uses the runner's installed CMake and C++ compiler to build
