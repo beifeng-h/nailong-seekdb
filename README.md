@@ -296,17 +296,17 @@ statements and assistant-executed validation retain their source attribution.
 Material input checks establish file identity and parseability. Assessment of
 the student's learning evidence uses the platform's independent evaluation.
 
-The selected record's `interaction_order` lists exact string pointers in
-conversation order, including the assistant questions needed to interpret
-short answers. The original student explanation at `/conversations/1/content`
-and its result at `/experiments/0/output` retain their positions and text.
-Experiments are ordered by the known task sequence and identify their source
-revision; receipt verification times are distinguished from message times.
-The status snapshot separates the historical 7b Linux/public validation and
-formal Agent null result from the revised material, which has not been
-formally assessed. These context corrections do not establish the cause of
-the platform's null result. Historical query timings through the development
-judge process do not measure the default stdio response-spooling path.
+All nine files under `agent/` reproduce the passed formal reference
+`d8d894ff918c04751ecdf32f229454fa48b2f808`. The assessed JSON is exactly
+7,686 bytes with SHA256
+`60fd7d525cf72d78d14c09218c9ab5bfa43e3a285d6f16487667a8df5f7373b0`.
+Its original student explanation and experiment result remain at
+`/conversations/1/content` and `/experiments/0/output`. These files preserve
+the reference's historical record. The four sections in `learning_record.md`
+are its historical outline; the current detailed assessment rubric has five
+dimensions and reads `agent/conversation.json`. This candidate's combination
+of the original material and the default stdio entrypoint requires its own
+formal evaluation.
 
 ## Numeric serialization comparison
 

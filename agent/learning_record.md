@@ -1,10 +1,7 @@
 # MiniVectorDB 学习记录
 
-本文件保留 `2026-competition-round2`「实现 MiniVectorDB」此前阶段的助手复盘，
-下列四节是本文的组织方式。参考手册的正式量表为五维：问题理解与自主拆解、
-技术理解与迁移、独立验证与质疑、实验与反馈迭代、取舍与反思。
-评审只读取 `agent/conversation.json`，本文件与配套报告不会自动进入评分。
-各项历史结果只适用于所标注的提交；后续状态以 JSON 的版本记录为准。
+本文件是 `2026-competition-round2`「实现 MiniVectorDB」赛题的学习材料，
+按题目要求展示四个维度：
 
 1. [问题理解与学习规划](#1-问题理解与学习规划)
 2. [Prompt 设计与迭代](#2-prompt-设计与迭代)
@@ -16,7 +13,7 @@
 - [`AGENT_PROMPT.md`](AGENT_PROMPT.md)——实际使用的 Agent Prompt；
 - [`prompt_iteration.json`](prompt_iteration.json)——Prompt 各版本的结构化
   演进记录（规则 → 触发它的真实缺陷 → 证据）；
-- [`conversation.json`](conversation.json)——选取的真实对话与实验证据；
+- [`conversation.json`](conversation.json)——已获批准的对话与实验证据；
 - [`verification/`](verification/)——本地差分验证的原始报告。
 
 **关于归属的说明**：本材料严格区分"本人（参赛学生）的独立判断"与
@@ -284,7 +281,7 @@ python3 protocol_check/run.py --image minivectordb-m11 ...
 | 结论 | 出处 |
 | --- | --- |
 | 提测分支实现了组织方正式 JSONL 协议 | `e4c8c178c`、`5247fd706`、`63055c809` |
-| e158a338f 历史 CI：握手 PASS、公开用例 20/20 PASS | CI `42941464341`，结论 `success`，`head_sha=e158a338f`；逐用例状态见 `verification/submission_ci_public_check.json` |
+| **携带本材料的那次提测：握手 PASS、公开用例 20/20 PASS** | CI `42941464341`，结论 `success`，`head_sha=e158a338f`；逐用例状态见 `verification/submission_ci_public_check.json` |
 | 组织方原版驱动在提测镜像上跑通握手 + 全部公开用例 | CI `42819609767`，结论 `success`，`head_sha=e4c8c178c` |
 | M11 分支同样通过组织方原版协议验证 | CI `42804710742`，结论 `success`，`head_sha=5247fd706` |
 | 数值序列化字节级回归通过 | CI `42618083030`，`head_sha=a33ea6e05` |
