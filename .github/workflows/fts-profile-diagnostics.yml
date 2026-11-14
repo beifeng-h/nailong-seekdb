@@ -53,6 +53,8 @@ on:
       - .github/script/seekdb/fts_ik_result_array_validation.py
       - .github/script/seekdb/test_fts_ik_result_array_validation.py
       - .github/workflows/fts-ik-result-array-validation.yml
+      - .github/script/seekdb/fts_match_baseline_profile.py
+      - .github/workflows/fts-match-baseline-profile.yml
       - .github/workflows/fts-count-only-validation.yml
       - .github/script/seekdb/fts_count_only_validation.py
       - .github/script/seekdb/test_fts_count_only_validation.py
