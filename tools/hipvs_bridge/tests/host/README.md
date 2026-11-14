@@ -17,7 +17,7 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 ## What is checked
 
 - Repeated requests that fit an existing workspace perform zero further RMM allocations; growth and shrink preserve query/ID/distance copying, including null distance output.
-- Graph parameters use 4 NN-Descent iterations, intermediate degree 128 and output degree 128. Search parameters explicitly select `MULTI_CTA`, width 4 and `max(1536, 4 * topk)` intermediate results.
+- Graph parameters use 4 NN-Descent iterations, intermediate degree 64 and output degree 64. Search parameters explicitly select `MULTI_CTA`, width 4 and `max(3072, 4 * topk)` intermediate results.
 - Allocation failures at each of the three growth positions return failure, leave the handle usable and balance all model allocations at teardown.
 - An injected distance-copy failure returns an error after the ID copy, and the handle remains usable for a later successful search.
 - Workspace-release failures before and after model deallocation are tested at query, neighbor and distance growth in 128 and 256 dimensions. They return failure before CAGRA, disable further search/serialization, and never retry the ambiguous pointer. Other known-owned buffers are each freed once. Model allocations left live by a failure before deallocation remain explicitly unknown; they are not counted as recovered GPU memory.

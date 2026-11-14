@@ -120,8 +120,8 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
     sk_cuvs_report_error("build params"); goto fail_res;
   }
   h->ip->build_algo = NN_DESCENT;
-  h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 128;
+  h->ip->graph_degree = 64;
+  h->ip->intermediate_graph_degree = 64;
   h->ip->nn_descent_niter = 4;
   if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) {
     sk_cuvs_report_error("build index"); goto fail_ip;
@@ -177,7 +177,7 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { sk_cuvs_report_error("search params"); rc=14; goto done; }
     {
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 1536) required_itopk = 1536;
+      if (required_itopk < 3072) required_itopk = 3072;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
       sp->algo = MULTI_CTA;

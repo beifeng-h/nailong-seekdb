@@ -146,8 +146,8 @@ The no-GPU DDL contract remains covered by
 - V5 implements graph, ID and vector snapshots and GPU graph reload.
 - Query workspaces are retained per handle under a mutex.
 - Graph construction uses NN-Descent with at most 4 iterations, intermediate
-  degree 128 and output degree 128. CAGRA searches explicitly use `MULTI_CTA`,
-  search width 4 and at least 1536 intermediate results. The fixed SDK's C
+  degree 64 and output degree 64. CAGRA searches explicitly use `MULTI_CTA`,
+  search width 4 and at least 3072 intermediate results. The fixed SDK's C
   parameter constructor leaves its algorithm field at `SINGLE_CTA`, whose
   intermediate-result limit is 512. The explicit mode supports the larger
   search candidate set used with the lower-iteration graph.
