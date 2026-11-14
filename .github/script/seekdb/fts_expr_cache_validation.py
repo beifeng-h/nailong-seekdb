@@ -28,6 +28,7 @@ from fts_plan_compatibility import classify_plan_metadata_compatibility
 
 BASE = 'b14755bed10d1399cf7d1dca6444cfa757727b21'
 BASE_TREE = 'e7ef67d5fc1b15cbdd15f893fe3ff19c476a98bd'
+BASE_ARCHIVE_COMMIT = None
 KERNEL = 'afa3e3540c5830555d59bf7fe871bf361536a441'
 KERNEL_TREE = '2933c65f932a10beb1b509fab2e36587d611a287'
 PATCH_SHA = '12b654df178f5d13bfb22507ccc35ab7957384bb295712c9f15e0d75ad8ec55e'
@@ -261,7 +262,7 @@ def prebuild(args):
     binary=args.root/'runtime/baseline/seekdb'
     common.verify_loader(binary,args.root/'evidence/baseline/prebuild-ldd.log',args.source,
                          common.runtime_env(args.source,binary))
-    verify_version(args,binary,args.root/'evidence/baseline/version.log',BASE)
+    verify_version(args,binary,args.root/'evidence/baseline/version.log',BASE_ARCHIVE_COMMIT or BASE)
     import fts_expr_cache_targeted as targeted
     report=json.loads((args.root/'report.json').read_text())
     require('baseline' not in report['targeted'],'Baseline SQL preflight must execute once, not be retried silently')

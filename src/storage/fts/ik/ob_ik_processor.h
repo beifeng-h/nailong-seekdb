@@ -19,6 +19,7 @@
 
 #include "lib/allocator/ob_allocator.h"
 #include "lib/charset/ob_charset.h"
+#include "lib/container/ob_se_array.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "storage/fts/ik/ob_ik_char_util.h"
 #include "storage/fts/ik/ob_ik_token.h"
@@ -69,7 +70,9 @@ public:
 
   ObFTSortList &token_list() { return token_list_; }
 
-  ObList<ObIKToken, ObIAllocator> &result_list() { return result_list_; }
+  using ResultArray = common::ObSEArray<ObIKToken, 64, common::ObIAllocator &>;
+  ResultArray &result_list() { return result_list_; }
+  bool has_result() const { return result_index_ < result_list_.count(); }
 
   int32_t handle_size() const { return handle_size_; }
 
@@ -88,7 +91,8 @@ private:
   bool is_smart_;
 
   ObFTSortList token_list_;
-  ObList<ObIKToken, ObIAllocator> result_list_;
+  ResultArray result_list_;
+  int64_t result_index_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(TokenizeContext);

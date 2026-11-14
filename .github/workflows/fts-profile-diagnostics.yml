@@ -48,6 +48,11 @@ on:
       - src/storage/fts/ik/ob_ik_processor.h
       - src/storage/fts/ik/ob_ik_processor.cpp
       - src/storage/fts/ik/ob_ik_arbitrator.cpp
+      - src/storage/fts/ob_ik_ft_parser.cpp
+      - .github/script/seekdb/fts_expr_cache_validation.py
+      - .github/script/seekdb/fts_ik_result_array_validation.py
+      - .github/script/seekdb/test_fts_ik_result_array_validation.py
+      - .github/workflows/fts-ik-result-array-validation.yml
       - .github/workflows/fts-count-only-validation.yml
       - .github/script/seekdb/fts_count_only_validation.py
       - .github/script/seekdb/test_fts_count_only_validation.py

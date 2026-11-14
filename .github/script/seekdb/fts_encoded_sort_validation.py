@@ -26,6 +26,8 @@ common = driver.common
 
 BASE = 'bd5d28fda9552daca40ab81a2ef32b8ca663d426'
 BASE_TREE = 'c82876324f044cd66f5d707815c1a3a4dbd3f448'
+BASE_ARCHIVE_COMMIT = None
+BASE_ARCHIVE_TREE = None
 PRODUCT = 'src/rootserver/ddl_task/ob_ddl_common_rs_impl.cpp'
 BASE_ZIP_SHA = 'aa61f704b2af0cfb070473123f984f457b9145050ac3913e90f6430cb67d8ea2'
 BASE_TAR_SHA = '33df822f7840d6829b739bb2e0c568c1c492268496dfb99ced8915d107430c21'
@@ -68,7 +70,7 @@ def source_proof(args, products=None):
     driver.require(re.fullmatch('[0-9a-f]{40}', commit) is not None, 'Full source SHA required')
     identity = common.source_identity(source, commit)
     driver.require(common.git(source, 'rev-parse', BASE + '^{tree}').decode().strip() == BASE_TREE,
-                   'Exact bd5d source tree mismatch')
+                   'Exact baseline source tree mismatch')
     changed = set(common.git(source, 'diff', '--name-only', BASE, commit, '--').decode().splitlines())
     product_changes = {path for path in changed if not path.startswith('.github/')}
     expected_products = {PRODUCT} if products is None else set(products)
@@ -101,12 +103,15 @@ def source_proof(args, products=None):
 
 def prepare(args):
     root = args.root
+    archive_commit = BASE_ARCHIVE_COMMIT or BASE
+    archive_tree = BASE_ARCHIVE_TREE or BASE_TREE
+    driver.require(archive_tree == BASE_TREE, 'Archived and checked-out baseline trees must match')
     common.no_symlinks(root)
     driver.require(not root.exists() and args.source != root and args.source not in root.parents
                    and root not in args.source.parents, 'Fresh disjoint validation root required')
     proof = source_proof(args)
     driver.require(args.artifact_zip is not None and args.artifact_zip.stat().st_size == BASE_ZIP_BYTES
-                   and common.digest(args.artifact_zip) == BASE_ZIP_SHA, 'Exact bd5d ZIP mismatch')
+                   and common.digest(args.artifact_zip) == BASE_ZIP_SHA, 'Exact baseline ZIP mismatch')
     root.mkdir()
     for name in ('runtime/baseline', 'runtime/candidate', 'evidence/baseline',
                  'evidence/candidate', 'validation', 'sources'):
@@ -116,30 +121,30 @@ def prepare(args):
     with zipfile.ZipFile(args.artifact_zip) as archive:
         driver.require(set(archive.namelist()) == {'candidate-artifact-manifest.json',
                        'candidate-identity.json', 'candidate-elf.tar.gz'}
-                       and len(archive.infolist()) == 3, 'Unexpected exact bd5d ZIP inventory')
+                       and len(archive.infolist()) == 3, 'Unexpected baseline ZIP inventory')
         identity_raw = archive.read('candidate-identity.json')
         original = json.loads(identity_raw)
         manifest = json.loads(archive.read('candidate-artifact-manifest.json'))
-        driver.require(original['sourceCommit'] == BASE and original['sourceTree'] == BASE_TREE
+        driver.require(original['sourceCommit'] == archive_commit and original['sourceTree'] == archive_tree
                        and original['sha256'] == BASE_ELF_SHA and original['bytes'] == BASE_ELF_BYTES
                        and original['buildId'] == BASE_BUILD_ID
                        and original['officialInputHashes'] == proof['originalInputHashes']
                        and manifest['identity'] == original
                        and manifest['fullBytes'] is True and manifest['stripped'] is False
-                       and manifest['truncated'] is False, 'Archived bd5d identity mismatch')
+                       and manifest['truncated'] is False, 'Archived baseline identity mismatch')
         payload = archive.read('candidate-elf.tar.gz')
         driver.require(len(payload) == BASE_TAR_BYTES and hashlib.sha256(payload).hexdigest() == BASE_TAR_SHA,
-                       'Exact bd5d tar identity mismatch')
+                       'Exact baseline tar identity mismatch')
     baseline = root / 'runtime/baseline/seekdb'
     with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
         members = archive.getmembers()
         driver.require(len(members) == 1 and members[0].name == 'candidate/seekdb'
                        and members[0].isreg() and members[0].size == BASE_ELF_BYTES,
-                       'Expected one regular exact bd5d ELF member')
+                       'Expected one regular baseline ELF member')
         with archive.extractfile(members[0]) as source, baseline.open('xb') as output:
             shutil.copyfileobj(source, output)
     baseline.chmod(0o555)
-    driver.safe_elf(baseline, BASE_ELF_SHA, BASE_ELF_BYTES, BASE_BUILD_ID, BASE)
+    driver.safe_elf(baseline, BASE_ELF_SHA, BASE_ELF_BYTES, BASE_BUILD_ID, archive_commit)
     (root / 'evidence/baseline/archived-identity.json').write_bytes(identity_raw)
     driver.dump(root / 'runtime/baseline/identity.json', dict(
         original, role='baseline', binary=str(baseline), archiveRole='candidate',
@@ -361,7 +366,7 @@ def validate(args):
                   for role in ('baseline', 'candidate')}
     for role, identity in identities.items():
         driver.safe_elf(Path(identity['binary']), identity['sha256'], identity['bytes'],
-                        identity['buildId'], BASE if role == 'baseline' else args.driver_sha)
+                        identity['buildId'], (BASE_ARCHIVE_COMMIT or BASE) if role == 'baseline' else args.driver_sha)
     report.update(status='running', builds=identities)
     driver.dump(args.root / 'report.json', report)
     driver.check_baseline_targeted(args, report)

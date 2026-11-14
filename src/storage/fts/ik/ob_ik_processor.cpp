@@ -53,7 +53,7 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  bool is_smart)
     : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
-      result_list_(allocator)
+      result_list_(OB_MALLOC_NORMAL_BLOCK_SIZE, allocator), result_index_(0)
 {
 }
 
@@ -71,7 +71,8 @@ int TokenizeContext::init()
 int TokenizeContext::reset_resource()
 {
   handle_size_ = 0;
-  result_list_.reset();
+  result_list_.reuse();
+  result_index_ = 0;
   token_list_.reset();
   return OB_SUCCESS;
 }
@@ -182,10 +183,9 @@ int TokenizeContext::get_next_token(const char *&word,
                                     int64_t &char_cnt)
 {
   int ret = OB_SUCCESS;
-  if (!result_list_.empty()) {
-    ObIKToken &token = result_list_.get_first();
-    result_list_.pop_front();
-    if (!result_list_.empty()) {
+  if (has_result()) {
+    ObIKToken &token = result_list_.at(result_index_++);
+    if (has_result()) {
       if (OB_FAIL(compound(token))) {
       } else {
         // pass
@@ -206,11 +206,10 @@ int TokenizeContext::get_next_token(const char *&word,
 int TokenizeContext::compound(ObIKToken &token)
 {
   int ret = OB_SUCCESS;
-  ObList<ObIKToken, ObIAllocator> &list = result_list_;
   if (is_smart_) {
-    if (!list.empty()) {
+    if (has_result()) {
       if (ObIKTokenType::IK_ARABIC_TOKEN == token.type_) {
-        ObIKToken &next = list.get_first();
+        const ObIKToken &next = result_list_.at(result_index_);
         bool append = false;
 
         if (ObIKTokenType::IK_CNNUM_TOKEN == next.type_) {
@@ -233,12 +232,12 @@ int TokenizeContext::compound(ObIKToken &token)
           // pass
         }
         if (append) {
-          list.pop_front();
+          ++result_index_;
         }
       }
       // There may be another round of append
-      if (OB_SUCC(ret)) {
-        ObIKToken next = list.get_first();
+      if (OB_SUCC(ret) && has_result()) {
+        const ObIKToken &next = result_list_.at(result_index_);
         bool append = false;
         if (ObIKTokenType::IK_COUNT_TOKEN == next.type_) {
           if (token.offset_ + token.length_ == next.offset_) {
@@ -248,7 +247,7 @@ int TokenizeContext::compound(ObIKToken &token)
           }
         }
         if (append) {
-          list.pop_front();
+          ++result_index_;
         }
       }
     }
