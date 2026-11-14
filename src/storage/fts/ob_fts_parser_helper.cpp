@@ -336,11 +336,30 @@ int ObFTParseHelper::init(
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
   } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
-  } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
+  } else if (OB_FAIL(init(allocator, parser_name_, parser_property_))) {
+  }
+  if (OB_FAIL(ret) && OB_UNLIKELY(!is_inited_)) {
+    reset();
+  }
+  return ret;
+}
+
+int ObFTParseHelper::init(common::ObIAllocator *allocator,
+                        const ObFTParser &parser,
+                        const ObFTParserProperty &property)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = OB_INIT_TWICE;
+  } else if (OB_ISNULL(allocator) || OB_UNLIKELY(!parser.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(parser.get_desc(parser_desc_))) {
   } else if (OB_ISNULL(parser_desc_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
+    parser_name_ = parser;
+    parser_property_ = property;
     allocator_ = allocator;
     is_inited_ = true;
   }

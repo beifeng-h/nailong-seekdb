@@ -4,6 +4,13 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - src/sql/engine/expr/ob_expr_tokenize.cpp
+      - src/sql/engine/expr/ob_expr_tokenize.h
+      - src/storage/fts/ob_fts_parser_helper.cpp
+      - src/data_plane/api/data_plane/fts/ob_fts_parser_helper.h
+      - src/storage/fts/ob_fts_parser_property.cpp
+      - src/data_plane/api/data_plane/fts/ob_fts_parser_property.h
+      - .github/script/seekdb/fts_tokenize_config_validation.py
       - .github/script/seekdb/fts_docword_sort_diagnostics.py
       - .github/script/seekdb/test_fts_docword_sort_diagnostics.py
       - .github/workflows/fts-docword-sort-diagnostics.yml
