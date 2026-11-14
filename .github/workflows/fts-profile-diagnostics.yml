@@ -4,6 +4,9 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - .github/script/seekdb/fts_accepted_profile.py
+      - .github/script/seekdb/test_fts_accepted_profile.py
+      - .github/workflows/fts-accepted-profile.yml
       - src/sql/engine/expr/ob_expr_tokenize.cpp
       - src/sql/engine/expr/ob_expr_tokenize.h
       - src/storage/fts/ob_fts_parser_helper.cpp
