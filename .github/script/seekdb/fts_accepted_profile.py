@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Profile the exact saved c3d7988 executable through the original benchmark."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,37 @@ import fts_tokenize_config_validation as typed
 
 validation, driver, common = typed.validation, typed.driver, typed.common
 ORIGINAL_PREPARE = validation.prepare
+
+
+def source_proof(args):
+    return dict(typed.ORIGINAL_SOURCE_PROOF(args, ()), experiment='ACCEPTED_C3D7988_PROFILE')
+
+
+def owned_threads(task_root):
+    result = {}
+    for entry in task_root.iterdir():
+        try:
+            raw = (entry / 'stat').read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        close = raw.rindex(')')
+        fields = raw[close + 2:].split()
+        tid = int(entry.name)
+        driver.require(int(raw.split(' ', 1)[0]) == tid, 'Owned thread stat identity changed')
+        result[str(tid)] = dict(comm=raw[raw.index('(') + 1:close],
+                               userTicks=int(fields[11]), systemTicks=int(fields[12]),
+                               startTicks=int(fields[19]))
+    return result
+
+
+def coverage(phase, processes):
+    first = min(processes, key=lambda row: abs(row['monotonic_ns'] - phase['startMonotonicNs']))
+    last = min(processes, key=lambda row: abs(row['monotonic_ns'] - phase['stopMonotonicNs']))
+    user_cpu = max(0, last['utime_seconds'] - first['utime_seconds'])
+    minimum = max(20, 0.25 * user_cpu * 99)
+    return dict(processUserCpuSeconds=user_cpu, minimumSamples=minimum,
+                passed=phase['sampleCount'] >= minimum,
+                scope='Diagnostic sanity gate, not a statistical significance test')
 
 
 def phase_windows(marks):
@@ -55,10 +87,19 @@ def validate(args):
     driver.dump(report_path, report)
     runtime = args.source / '.github/script/seekdb/fts-profile-runtime'
     capture_module = common.load_module('accepted_profile_capture', runtime / 'profile_capture.py')
+    original_snapshot = capture_module._proc_snapshot
+    def snapshot_with_threads(identity, clock_ticks, page_size):
+        result = original_snapshot(identity, clock_ticks, page_size)
+        result['ownedThreads'] = owned_threads(Path('/proc') / str(identity['pid']) / 'task')
+        return result
+    capture_module._proc_snapshot = snapshot_with_threads
     analysis = common.load_module('accepted_profile_analysis', runtime / 'run_profile.py')
     scorer = common.load_module('accepted_original_scorer', args.source / 'tools/benchmark/fts_large_bench_score.py')
     baseline = json.loads((args.source / 'tools/benchmark/fts_large_bench_baseline.json').read_text())
-    benchmark = validation.benchmark_callback(args, {'baseline': identity}, 'baseline', baseline, scorer)
+    role_args = argparse.Namespace(source=args.root / 'sources/baseline', workspace=args.source,
+        role='baseline', expected_sha=validation.BASE, binary=Path(identity['binary']),
+        obclient=args.source / 'deps/3rd/u01/obclient/bin/obclient')
+    benchmark = common.benchmark_work(role_args, baseline, scorer, False)
     directory = args.root / 'profiling/accepted-benchmark'
 
     def work(call, out, pid):
@@ -69,6 +110,11 @@ def validate(args):
                        state=dict(pid=pid, startTicks=owned['startTicks']))
         process_path = out / 'profile-owned-process.json'
         driver.dump(process_path, process)
+        warmup_out = out / 'original-prewarm'
+        warmup_out.mkdir()
+        warmup = benchmark(call, warmup_out)
+        driver.require(warmup.get('passed'), 'Original benchmark worker prewarm failed')
+        driver.dump(out / 'prewarm-thread-state.json', owned_threads(Path('/proc') / str(pid) / 'task'))
         original_capture = common.capture_group
         capture = None
         command_path = args.root / 'sources/baseline/tools/benchmark/fts_large_bench.sh'
@@ -85,7 +131,7 @@ def validate(args):
             return receipt
         common.capture_group = capture_benchmark
         try:
-            result = benchmark(call, out, pid)
+            result = benchmark(call, out)
         finally:
             common.capture_group = original_capture
         driver.require(capture is not None, 'The original benchmark was not sampled')
@@ -93,7 +139,8 @@ def validate(args):
                        and not capture.summary['errors'], 'The raw accepted-ELF capture did not complete')
         driver.require(0 < capture.summary['perf_data_bytes'] <= 512 * 1024**2,
                        'The raw profile is empty or exceeds the evidence cap')
-        return dict(result, timingsDiagnosticOnly=True, profileScope=process)
+        return dict(result, timingsDiagnosticOnly=True, profileScope=process,
+                    uninstrumentedOriginalPrewarm=warmup)
 
     row = driver.run_owned(args, report, {'baseline': identity}, 'baseline', 'accepted-profile', work)
     common.require_instance(row)
@@ -108,6 +155,7 @@ def validate(args):
     samples = analysis.report_samples(output.read_text(encoding='utf-8', errors='replace'))
     marks = [json.loads(line) for line in (directory / 'capture-marks.jsonl').read_text().splitlines()]
     phases = phase_windows(marks)
+    processes = [json.loads(line) for line in (directory / 'proc-samples.jsonl').read_text().splitlines()]
     for name, phase in phases.items():
         phase_output = directory / ('perf-' + name + '.txt')
         phase_receipt = common.capture_group(command + ['--time', phase['perfTime']], phase_output,
@@ -115,6 +163,7 @@ def validate(args):
         driver.require(phase_receipt['exitCode'] == 0 and phase_receipt['childrenCleaned'],
                        'Scored phase profile decoding failed: ' + name)
         phase.update(analysis.report_samples(phase_output.read_text(encoding='utf-8', errors='replace')))
+        phase['coverage'] = coverage(phase, processes)
     files = []
     for path in sorted(directory.iterdir()):
         common.no_symlinks(path)
@@ -122,6 +171,10 @@ def validate(args):
         files.append(dict(path=path.name, bytes=path.stat().st_size, sha256=common.digest(path)))
     driver.dump(directory / 'profile-manifest.json', dict(files=files, fullBytes=True, truncated=False,
         sourceCommit=validation.BASE, elfSha256=identity['sha256'], buildId=identity['buildId']))
+    report.update(profileAnalysis=samples, profilePhases=phases)
+    driver.dump(report_path, report)
+    driver.require(all(row['coverage']['passed'] for row in phases.values()),
+                   'Scored phases are underrepresented relative to owned process user CPU time')
     report.update(status='accepted_original_benchmark_profile_completed', profileAnalysis=samples,
                   profilePhases=phases, phaseBoundaryScope='Polled log observations; not exact operator timings',
                   profiledCommit=validation.BASE, performanceComparisonComputed=False,
@@ -132,6 +185,7 @@ def validate(args):
 
 if __name__ == '__main__':
     typed.configure()
+    validation.source_proof = driver.source_proof = source_proof
     driver.prepare = prepare
     driver.validate = validate
     raise SystemExit(validation.main())
