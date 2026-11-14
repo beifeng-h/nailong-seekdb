@@ -58,10 +58,10 @@ jobs:
           git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
             fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
             "$GITHUB_SHA" \
-            b9637d5e792cce0e461a06eee2df91036a3ff37a:refs/heads/codex/frozen-b963 \
-            bd5d28fda9552daca40ab81a2ef32b8ca663d426:refs/heads/codex/frozen-bd5d \
-            c3d798873b700987b6983043d2abf0defd8e2500:refs/heads/codex/frozen-c3d7988 \
-            5bce9e06d1281347ad61344e4b01fab9158c58a2:refs/heads/codex/frozen-official
+            b9637d5e792cce0e461a06eee2df91036a3ff37a:refs/heads/fts-validation/frozen-b963 \
+            bd5d28fda9552daca40ab81a2ef32b8ca663d426:refs/heads/fts-validation/frozen-bd5d \
+            c3d798873b700987b6983043d2abf0defd8e2500:refs/heads/fts-validation/frozen-c3d7988 \
+            5bce9e06d1281347ad61344e4b01fab9158c58a2:refs/heads/fts-validation/frozen-official
           git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
