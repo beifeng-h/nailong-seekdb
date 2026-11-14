@@ -49,9 +49,10 @@ def build_profile(args):
 
 def configuration_sql():
     statements = []
+    long_text = "'" + 'database orchard ' * 64 + "'"
     texts = ("CAST(NULL AS CHAR CHARACTER SET utf8mb4)", "''", "'a A database DATABASE orchard'",
              "_utf8mb4 X'E695B0E68DAEE5BA93E6A380E7B4A2'",
-             "_utf8mb4 X'6100622061'", "REPEAT('database orchard ',64)")
+             "_utf8mb4 X'6100622061'", long_text)
     for parser in ('ik', 'beng', 'space', 'ngram', 'ngram2'):
         for index, text in enumerate(texts):
             for mode in ('default', 'all'):
@@ -64,39 +65,61 @@ def configuration_sql():
         "'[{\"output\":\"all\"},{\"additional_args\":[{\"ngram_token_size\":3}]}]');")
     statements.extend((
         "CREATE DATABASE tokenize_config_probe;",
-        "CREATE TABLE tokenize_config_probe.docs(id INT PRIMARY KEY, body TEXT, parser VARCHAR(16), options TEXT);",
+        "CREATE TABLE tokenize_config_probe.docs(id INT PRIMARY KEY, body VARCHAR(2048), `parser` VARCHAR(16), `options` VARCHAR(1024));",
         "INSERT INTO tokenize_config_probe.docs VALUES (1,'a database orchard','beng','[{\"output\":\"all\"}]'),"
         "(2,'abc database','space','[{\"output\":\"default\"}]'),(3,NULL,'ngram','[{}]'),"
         "(4,'database','ngram2','[]');",
-        "SELECT id,TOKENIZE(body,parser,options) FROM tokenize_config_probe.docs ORDER BY id;",
+        "SELECT id,TOKENIZE(body,`parser`,`options`) FROM tokenize_config_probe.docs ORDER BY id;",
     ))
     return '\n'.join(statements)
 
 
-def configuration_work(call, out):
-    query = configuration_sql()
-    result = driver.sql(call, out, 'typed-config-matrix', query)
-    driver.require(len(result.splitlines()) == 67, 'Incomplete TOKENIZE configuration matrix')
-    control = common.SESSION + "SELECT TOKENIZE(NULL,'ik');\n"
-    output = out / 'binary-ik-null-control.log'
-    (out / 'binary-ik-null-control.sql').write_text(control)
+def rejection_control(call, out, label, query, expected, pattern):
+    control = common.SESSION + query + '\n'
+    output = out / (label + '.log')
+    (out / (label + '.sql')).write_text(control)
     receipt = common.capture_group([str(call.obclient), '-h127.0.0.1', '-P'+str(call.port),
         '-uroot', '-A', '-N', '-B', '--raw', '--default-character-set=utf8mb4', '-Doceanbase'],
         output, Path.cwd(), 30, env=os.environ.copy(), stdin=control.encode())
     rejected = output.read_text()
     driver.require(receipt['exitCode'] == 1 and receipt['childrenCleaned']
-                   and re.fullmatch(r'ERROR 1235 \(0A000\) at line \d+: ik with the binary charset is not supported\n', rejected),
-                   'Binary IK NULL rejection changed')
-    driver.dump(out / 'binary-ik-null-control.json', dict(expectedError=1235, **receipt))
+                   and re.fullmatch(pattern, rejected), 'Inherited rejection changed: ' + label)
+    driver.dump(out / (label + '.json'), dict(expectedError=expected, **receipt))
+    return rejected
+
+
+def configuration_work(call, out):
+    query = configuration_sql()
+    text = common.SESSION + query + '\n'
+    (out / 'typed-config-matrix.sql').write_text(text)
+    output = out / 'typed-config-matrix.log'
+    receipt = common.capture_group([str(call.obclient), '-h127.0.0.1', '-P'+str(call.port),
+        '-uroot', '-A', '-N', '-B', '--raw', '--force', '--default-character-set=utf8mb4', '-Doceanbase'],
+        output, Path.cwd(), 900, env=os.environ.copy(), stdin=text.encode())
+    result = output.read_text()
+    driver.require(receipt['exitCode'] == 0 and receipt['childrenCleaned']
+                   and not re.search(r'^ERROR ', result, re.M), 'TOKENIZE configuration matrix failed')
+    labels = re.findall(r"^SELECT '([^']+)'", query, re.M) + ['1', '2', '3', '4']
+    rows = [line.split('\t') for line in result.splitlines()]
+    driver.require(len(rows) == 67 and [row[0] for row in rows] == labels
+                   and all(len(row) == 2 for row in rows), 'Incomplete TOKENIZE configuration matrix')
+    rejected = rejection_control(call, out, 'binary-ik-null-control', "SELECT TOKENIZE(NULL,'ik');", 1235,
+        r'ERROR 1235 \(0A000\) at line \d+: ik with the binary charset is not supported\n')
+    rejected += rejection_control(call, out, 'repeat-ik-lob-control',
+        "SELECT 'ik_5_default', TOKENIZE(REPEAT('database orchard ',64),'ik','[{\"output\":\"default\"}]');", 1210,
+        r'ERROR 1210 \(HY000\) at line \d+: Invalid argument\n')
     return dict(canonical=result+rejected, sqlSha256=hashlib.sha256(query.encode()).hexdigest(),
                 outputSha256=hashlib.sha256(result.encode()).hexdigest(), rows=67,
-                parserCount=5, outputModes=2, inheritedBinaryIkNullError=1235)
+                parserCount=5, outputModes=2, inheritedBinaryIkNullError=1235,
+                inheritedRepeatIkLobError=1210)
 
 
 def equality_work(call, out):
     result = corrected_equality_work(call, out)
     matrix = configuration_work(call, out)
-    result['canonical'] += matrix['canonical'].encode().hex()
+    payload = bytes.fromhex(result['canonical']) + matrix['canonical'].encode()
+    result.update(canonical=payload.hex(), outputBytes=len(payload),
+                  outputSha256=hashlib.sha256(payload).hexdigest())
     result['typedConfigurationMatrix'] = {key: value for key, value in matrix.items() if key != 'canonical'}
     return result
 
