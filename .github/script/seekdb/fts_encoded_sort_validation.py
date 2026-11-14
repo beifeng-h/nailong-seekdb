@@ -32,6 +32,10 @@ BASE_TAR_SHA = '33df822f7840d6829b739bb2e0c568c1c492268496dfb99ced8915d107430c21
 BASE_ELF_SHA = '8b83cb8fc4b2f99196437e63b8d6a6c4c3d08443c3030942552c52d2ee0b63e3'
 BASE_BUILD_ID = '66082815f1b9cf9fc5261081d5c3535471990b9a'
 BASE_ELF_BYTES = 1332384520
+BASE_ZIP_BYTES = 329590277
+BASE_TAR_BYTES = 329567268
+BASE_RUN = 43204498012
+BASE_ARTIFACT = 13941216422
 SCHEDULE = (('A1', 'baseline'), ('B1', 'candidate'), ('B2', 'candidate'), ('A2', 'baseline'))
 PAIRS = (('A1', 'B1'), ('A2', 'B2'))
 REGRESSION_SQL = """SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
@@ -100,7 +104,7 @@ def prepare(args):
     driver.require(not root.exists() and args.source != root and args.source not in root.parents
                    and root not in args.source.parents, 'Fresh disjoint validation root required')
     proof = source_proof(args)
-    driver.require(args.artifact_zip is not None and args.artifact_zip.stat().st_size == 329590277
+    driver.require(args.artifact_zip is not None and args.artifact_zip.stat().st_size == BASE_ZIP_BYTES
                    and common.digest(args.artifact_zip) == BASE_ZIP_SHA, 'Exact bd5d ZIP mismatch')
     root.mkdir()
     for name in ('runtime/baseline', 'runtime/candidate', 'evidence/baseline',
@@ -123,7 +127,7 @@ def prepare(args):
                        and manifest['fullBytes'] is True and manifest['stripped'] is False
                        and manifest['truncated'] is False, 'Archived bd5d identity mismatch')
         payload = archive.read('candidate-elf.tar.gz')
-        driver.require(len(payload) == 329567268 and hashlib.sha256(payload).hexdigest() == BASE_TAR_SHA,
+        driver.require(len(payload) == BASE_TAR_BYTES and hashlib.sha256(payload).hexdigest() == BASE_TAR_SHA,
                        'Exact bd5d tar identity mismatch')
     baseline = root / 'runtime/baseline/seekdb'
     with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
@@ -138,13 +142,13 @@ def prepare(args):
     (root / 'evidence/baseline/archived-identity.json').write_bytes(identity_raw)
     driver.dump(root / 'runtime/baseline/identity.json', dict(
         original, role='baseline', binary=str(baseline), archiveRole='candidate',
-        archiveRun=43204498012, archiveId=13941216422, archiveZipSha256=BASE_ZIP_SHA))
+        archiveRun=BASE_RUN, archiveId=BASE_ARTIFACT, archiveZipSha256=BASE_ZIP_SHA))
     plan = dict(scope='SAME_HOST_ENCODED_SORT_DEVELOPMENT_VALIDATION_NOT_FORMAL_CONTEST', proof=proof,
                 baselineCommit=BASE, baselineRebuilt=False, candidateBuildsRequired=1,
                 formalContestRun=False, formalSubmissionsConsumedBeforeThisRun=11,
                 schedule=[dict(name=name, role=role) for name, role in SCHEDULE],
                 benchmarkConfig=common.CONFIG, validationWorkLimitSeconds=7200,
-                baselineArtifact=dict(run=43204498012, id=13941216422, zipSha256=BASE_ZIP_SHA))
+                baselineArtifact=dict(run=BASE_RUN, id=BASE_ARTIFACT, zipSha256=BASE_ZIP_SHA))
     driver.dump(root / 'plan.json', plan)
     driver.dump(root / 'report.json', dict(status='prepared', formalContestRun=False,
                 baselineRebuilt=False, instances=[], nativeCases=[], targeted={}, rounds=[], plan=plan))
