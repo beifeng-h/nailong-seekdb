@@ -130,17 +130,21 @@ def validate(args):
                 capture.mark('accepted_original_benchmark_finished')
             return receipt
         common.capture_group = capture_benchmark
+        original_settle = common.SETTLE_SECONDS
+        common.SETTLE_SECONDS = 0
         try:
             result = benchmark(call, out)
         finally:
             common.capture_group = original_capture
+            common.SETTLE_SECONDS = original_settle
         driver.require(capture is not None, 'The original benchmark was not sampled')
         driver.require(capture.summary['status'] in ('raw_recorded', 'raw_recorded_sample_count_unverified')
                        and not capture.summary['errors'], 'The raw accepted-ELF capture did not complete')
         driver.require(0 < capture.summary['perf_data_bytes'] <= 512 * 1024**2,
                        'The raw profile is empty or exceeds the evidence cap')
         return dict(result, timingsDiagnosticOnly=True, profileScope=process,
-                    uninstrumentedOriginalPrewarm=warmup)
+                    uninstrumentedOriginalPrewarm=warmup,
+                    diagnosticSettleSeconds=0, originalWrapperSettleSeconds=original_settle)
 
     row = driver.run_owned(args, report, {'baseline': identity}, 'baseline', 'accepted-profile', work)
     common.require_instance(row)
