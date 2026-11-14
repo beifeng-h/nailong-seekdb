@@ -4,6 +4,10 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - src/observer/composition/retrieval/ob_das_legacy_tr_merge_iter.cpp
+      - .github/script/seekdb/fts_match_only_filter_validation.py
+      - .github/script/seekdb/test_fts_match_only_filter_validation.py
+      - .github/workflows/fts-match-only-filter-validation.yml
       - .github/script/seekdb/fts_accepted_profile.py
       - .github/script/seekdb/test_fts_accepted_profile.py
       - .github/workflows/fts-accepted-profile.yml
