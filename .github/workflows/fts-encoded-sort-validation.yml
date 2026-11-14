@@ -1,7 +1,18 @@
-name: SeekDB FTS inverted-only build sort validation
+name: SeekDB TOKENIZE typed configuration validation
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+    paths:
+      - src/sql/engine/expr/ob_expr_tokenize.cpp
+      - src/sql/engine/expr/ob_expr_tokenize.h
+      - src/storage/fts/ob_fts_parser_helper.cpp
+      - src/data_plane/api/data_plane/fts/ob_fts_parser_helper.h
+      - src/storage/fts/ob_fts_parser_property.cpp
+      - src/data_plane/api/data_plane/fts/ob_fts_parser_property.h
+      - .github/script/seekdb/fts_tokenize_config_validation.py
+      - .github/script/seekdb/fts_encoded_sort_validation.py
+      - .github/workflows/fts-encoded-sort-validation.yml
 
 permissions:
   contents: read
@@ -13,7 +24,7 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false && github.sha == 'f2e024d6abd6dabc718a0df557dc3691155d0a76' }}
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -74,7 +85,7 @@ jobs:
           python3 -B -m unittest discover -s .github/script/seekdb/fts-profile-runtime \
             -p 'test_*.py' -v \
             2>&1 | tee -a "$ENCODED_SORT_META_ROOT/offline-tests.log"
-          python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase proof \
+          python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase proof \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
             > "$ENCODED_SORT_META_ROOT/source-proof.json"
 
@@ -175,7 +186,7 @@ jobs:
           test "${#archives[@]}" -eq 1
           test -f "${archives[0]}" && test ! -L "${archives[0]}"
           test "$(stat -c '%h' -- "${archives[0]}")" -eq 1
-          python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase prepare \
+          python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase prepare \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
             --artifact-zip "${archives[0]}"
 
@@ -214,7 +225,7 @@ jobs:
           set -euo pipefail
           timeout --signal=TERM --kill-after=30s 15m ./build.sh release --init \
             2>&1 | tee "$RUNNER_TEMP/seekdb-count-only-initialize-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase prebuild \
+          python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase prebuild \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
 
       - name: Build the complete candidate once with the original two-job profile
@@ -227,9 +238,9 @@ jobs:
           /usr/bin/time -v timeout --signal=TERM --kill-after=30s 65m "$cmake_bin" \
             --build build_release --target seekdb -j2 \
             2>&1 | tee "$RUNNER_TEMP/seekdb-count-only-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
-          python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase snapshot \
+          python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase snapshot \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
-          python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase preserve \
+          python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase preserve \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
             --out "$ENCODED_SORT_CANDIDATE_OUT"
 
@@ -250,7 +261,7 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=120s 20m \
-            python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase validate \
+            python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase validate \
             --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
 
       - name: Collect bounded evidence and build log tails
@@ -267,7 +278,7 @@ jobs:
             done
           fi
           if test -d "$ENCODED_SORT_ROOT/evidence/candidate"; then
-            python3 -B .github/script/seekdb/fts_inverted_sort_validation.py --phase collect \
+            python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase collect \
               --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
               --out "$ENCODED_SORT_EVIDENCE_OUT"
           fi

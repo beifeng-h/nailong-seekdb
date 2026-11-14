@@ -63,7 +63,7 @@ SELECT 'ordered', GROUP_CONCAT(CONCAT(id, ':', HEX(word)) ORDER BY word COLLATE 
 """
 
 
-def source_proof(args):
+def source_proof(args, products=None):
     source, commit = args.source, args.driver_sha
     driver.require(re.fullmatch('[0-9a-f]{40}', commit) is not None, 'Full source SHA required')
     identity = common.source_identity(source, commit)
@@ -71,7 +71,8 @@ def source_proof(args):
                    'Exact bd5d source tree mismatch')
     changed = set(common.git(source, 'diff', '--name-only', BASE, commit, '--').decode().splitlines())
     product_changes = {path for path in changed if not path.startswith('.github/')}
-    driver.require(product_changes == {PRODUCT}, 'Only the FTS DDL sorting product change is permitted')
+    expected_products = {PRODUCT} if products is None else set(products)
+    driver.require(product_changes == expected_products, 'Product changes exceed the selected experiment')
     hashes = driver.inventory(source)
     case_inputs = {}
     for name in driver.CASES:
@@ -83,7 +84,7 @@ def source_proof(args):
             driver.require(common.git(source, 'show', BASE + ':' + relative) == path.read_bytes(),
                            'Existing selected native input changed: ' + relative)
         case_inputs[name] = dict(testSha256=common.digest(paths[0]), expectedSha256=common.digest(paths[1]))
-    patch = common.git(source, 'diff', *driver.CANONICAL_DIFF_FLAGS, BASE, commit, '--', PRODUCT)
+    patch = common.git(source, 'diff', *driver.CANONICAL_DIFF_FLAGS, BASE, commit, '--', *sorted(expected_products))
     ci_files = {}
     for path in sorted(changed - product_changes):
         ci_files[path] = hashlib.sha256(common.git(source, 'show', commit + ':' + path)).hexdigest()
@@ -91,7 +92,7 @@ def source_proof(args):
     driver.KERNEL, driver.KERNEL_TREE = commit, identity['tree']
     return dict(baselineCommit=BASE, baselineTree=BASE_TREE, kernelCommit=commit,
                 kernelTree=identity['tree'], driverCommit=commit, driverTree=identity['tree'],
-                productChanges=[PRODUCT], ciChanges=sorted(ci_files), ciBlobSha256=ci_files,
+                productChanges=sorted(expected_products), ciChanges=sorted(ci_files), ciBlobSha256=ci_files,
                 canonicalFullIndexPatchSha256=hashlib.sha256(patch).hexdigest(),
                 originalInputCount=75, originalInputInventorySha256=driver.INVENTORY,
                 originalInputHashes=hashes, caseInputs=case_inputs,
@@ -154,7 +155,7 @@ def prepare(args):
                 baselineRebuilt=False, instances=[], nativeCases=[], targeted={}, rounds=[], plan=plan))
 
 
-def build_profile(args):
+def build_profile(args, products=None):
     build = args.source / 'build_release'
     out = args.root / 'evidence/candidate' / ('profile-' + args.phase)
     out.mkdir(parents=True, exist_ok=True)
@@ -181,7 +182,8 @@ def build_profile(args):
     commands_raw = profile.regular(build / 'compile_commands.json', profile.COMMAND_CAP)
     commands = json.loads(commands_raw)
     driver.require(isinstance(commands, list) and 0 < len(commands) <= 50000, 'Invalid command database')
-    affected = []
+    targets = (PRODUCT,) if products is None else tuple(products)
+    affected = {name: [] for name in targets}
     for row in commands:
         unit = Path(row['file'])
         if not unit.is_absolute():
@@ -189,28 +191,49 @@ def build_profile(args):
         includes = []
         if 'Unity' in unit.parts:
             includes = re.findall(r'^#include "([^"\n]+)"', unit.read_text(encoding='utf-8'), re.M)
-        if unit.resolve() == (args.source / PRODUCT).resolve() or str(args.source / PRODUCT) in includes:
-            affected.append(row)
-    driver.require(len(affected) == 1, 'One actual DDL compilation unit required')
-    row = affected[0]
-    argv = row.get('arguments') or shlex.split(row['command'])
-    compiler = compilers['CXX']['COMPILER']
-    driver.require(compiler in argv[:2] and '-o' in argv, 'DDL command uses an unexpected compiler')
-    object_path = Path(argv[argv.index('-o') + 1])
-    if not object_path.is_absolute():
-        object_path = Path(row['directory']) / object_path
-    driver.require(object_path.resolve().is_relative_to(build.resolve()), 'DDL object escapes the build root')
+        for name in targets:
+            if unit.resolve() == (args.source / name).resolve() or str(args.source / name) in includes:
+                affected[name].append(row)
+    driver.require(all(len(rows) == 1 for rows in affected.values()),
+                   'One actual compilation unit required for each modified source')
+    selected = {name: rows[0] for name, rows in affected.items()}
     rust = subprocess.check_output(['rustc', '--version'], cwd=args.source / 'rust', timeout=30).decode().strip()
     driver.require(rust.startswith('rustc 1.98.1 '), 'Original Rust 1.98.1 required')
-    signature = dict(settings=profile.EXPECTED, compilers=compilers, rustVersion=rust, affectedCommand=row)
+    signature = dict(settings=profile.EXPECTED, compilers=compilers, rustVersion=rust)
+    if products is None:
+        signature['affectedCommand'] = selected[PRODUCT]
+    else:
+        signature['affectedCommands'] = selected
     prior = args.root / 'evidence/candidate/profile-prebuild/profile-proof.json'
     if args.phase == 'snapshot':
         driver.require(json.loads(prior.read_text())['signature'] == signature, 'Compiler/profile changed after prebuild')
-        common.no_symlinks(object_path)
-        driver.require(object_path.is_file() and object_path.stat().st_size > 0, 'Actual DDL object was not built')
-        driver.dump(args.root / 'evidence/candidate/affected-object.json', dict(
-            product=PRODUCT, path=str(object_path), bytes=object_path.stat().st_size,
-            sha256=common.digest(object_path), compileCommand=row))
+        objects = []
+        for name, row in selected.items():
+            argv = row.get('arguments') or shlex.split(row['command'])
+            driver.require(compilers['CXX']['COMPILER'] in argv[:2] and '-o' in argv,
+                           'Affected command uses an unexpected compiler')
+            object_path = Path(argv[argv.index('-o') + 1])
+            if not object_path.is_absolute():
+                object_path = Path(row['directory']) / object_path
+            driver.require(object_path.resolve().is_relative_to(build.resolve()), 'Object escapes build root')
+            common.no_symlinks(object_path)
+            driver.require(object_path.is_file() and object_path.stat().st_size > 0, 'Affected object was not built')
+            record = dict(product=name, path=str(object_path), bytes=object_path.stat().st_size,
+                          sha256=common.digest(object_path), compileCommand=row)
+            if products is not None:
+                dependency = Path(argv[argv.index('-MF') + 1]) if '-MF' in argv else Path(str(object_path)+'.d')
+                if not dependency.is_absolute():
+                    dependency = Path(row['directory']) / dependency
+                raw = profile.regular(dependency, 8 * 1024**2)
+                record['dependency'] = dict(path=str(dependency), bytes=len(raw),
+                    sha256=hashlib.sha256(raw).hexdigest(), sourceFiles=[target for target in targets
+                    if str(args.source / target) in raw.decode()], wholeFileCopied=False)
+                record['dependencyText'] = raw.decode()
+            objects.append(record)
+        if products is None:
+            driver.dump(args.root / 'evidence/candidate/affected-object.json', objects[0])
+        else:
+            driver.dump(args.root / 'evidence/candidate/affected-objects.json', objects)
     driver.dump(out / 'profile-proof.json', dict(passed=True, signature=signature,
                 commandDatabaseSha256=hashlib.sha256(commands_raw).hexdigest()))
     return profile.EXPECTED.copy(), rust
