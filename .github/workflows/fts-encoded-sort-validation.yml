@@ -1,15 +1,7 @@
 name: SeekDB FTS inverted-only build sort validation
 
 on:
-  push:
-    branches: [perf/fts-profile-diagnostics-20261111]
-    paths:
-      - src/rootserver/ddl_task/ob_ddl_common_rs_impl.cpp
-      - .github/script/seekdb/fts_encoded_sort_validation.py
-      - .github/script/seekdb/fts_inverted_sort_validation.py
-      - .github/script/seekdb/test_fts_inverted_sort_validation.py
-      - .github/script/seekdb/test_fts_encoded_sort_validation.py
-      - .github/workflows/fts-encoded-sort-validation.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +13,7 @@ concurrency:
 
 jobs:
   validate:
-    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false && github.sha == 'f2e024d6abd6dabc718a0df557dc3691155d0a76' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
