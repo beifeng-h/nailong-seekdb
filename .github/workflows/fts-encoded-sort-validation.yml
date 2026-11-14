@@ -1,18 +1,7 @@
-name: SeekDB TOKENIZE typed configuration validation
+name: Archived TOKENIZE typed configuration validation
 
 on:
-  push:
-    branches: [perf/fts-profile-diagnostics-20261111]
-    paths:
-      - src/sql/engine/expr/ob_expr_tokenize.cpp
-      - src/sql/engine/expr/ob_expr_tokenize.h
-      - src/storage/fts/ob_fts_parser_helper.cpp
-      - src/data_plane/api/data_plane/fts/ob_fts_parser_helper.h
-      - src/storage/fts/ob_fts_parser_property.cpp
-      - src/data_plane/api/data_plane/fts/ob_fts_parser_property.h
-      - .github/script/seekdb/fts_tokenize_config_validation.py
-      - .github/script/seekdb/fts_encoded_sort_validation.py
-      - .github/workflows/fts-encoded-sort-validation.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
+      ARCHIVED_CANDIDATE_SHA: '729b901595023627c224891b0afb8794732fad77'
       SORT_BASELINE_DIAGNOSTICS_ONLY: '0'
       CARGO_BUILD_JOBS: '2'
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
@@ -59,14 +49,14 @@ jobs:
           git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
             fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
-            "$GITHUB_SHA" c3d798873b700987b6983043d2abf0defd8e2500 \
+            "$ARCHIVED_CANDIDATE_SHA" c3d798873b700987b6983043d2abf0defd8e2500 \
             5bce9e06d1281347ad61344e4b01fab9158c58a2
-          for sha in "$GITHUB_SHA" c3d798873b700987b6983043d2abf0defd8e2500 \
+          for sha in "$ARCHIVED_CANDIDATE_SHA" c3d798873b700987b6983043d2abf0defd8e2500 \
             5bce9e06d1281347ad61344e4b01fab9158c58a2; do
             git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
           done
-          git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$ARCHIVED_CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$ARCHIVED_CANDIDATE_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Check driver regressions and the FTS sort candidate proof
@@ -86,7 +76,7 @@ jobs:
             -p 'test_*.py' -v \
             2>&1 | tee -a "$ENCODED_SORT_META_ROOT/offline-tests.log"
           python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase proof \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA" \
             > "$ENCODED_SORT_META_ROOT/source-proof.json"
 
       - name: Admit resources after reclaiming the original disposable image tools
@@ -187,7 +177,7 @@ jobs:
           test -f "${archives[0]}" && test ! -L "${archives[0]}"
           test "$(stat -c '%h' -- "${archives[0]}")" -eq 1
           python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase prepare \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA" \
             --artifact-zip "${archives[0]}"
 
       - name: Preserve original dependency downloads through HTTPS mirror transport
@@ -226,7 +216,7 @@ jobs:
           timeout --signal=TERM --kill-after=30s 15m ./build.sh release --init \
             2>&1 | tee "$RUNNER_TEMP/seekdb-count-only-initialize-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
           python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase prebuild \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA"
 
       - name: Build the complete candidate once with the original two-job profile
         if: ${{ env.SORT_BASELINE_DIAGNOSTICS_ONLY != '1' }}
@@ -239,16 +229,16 @@ jobs:
             --build build_release --target seekdb -j2 \
             2>&1 | tee "$RUNNER_TEMP/seekdb-count-only-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
           python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase snapshot \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA"
           python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase preserve \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA" \
             --out "$ENCODED_SORT_CANDIDATE_OUT"
 
       - name: Preserve the full candidate before SQL validation
         if: ${{ env.SORT_BASELINE_DIAGNOSTICS_ONLY != '1' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fts-encoded-sort-candidate-${{ github.sha }}
+          name: fts-encoded-sort-candidate-${{ env.ARCHIVED_CANDIDATE_SHA }}
           path: ${{ env.ENCODED_SORT_CANDIDATE_OUT }}/
           retention-days: 3
           compression-level: 0
@@ -262,7 +252,7 @@ jobs:
           set -euo pipefail
           timeout --signal=TERM --kill-after=120s 20m \
             python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase validate \
-            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA"
+            --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA"
 
       - name: Collect bounded evidence and build log tails
         if: ${{ always() }}
@@ -279,7 +269,7 @@ jobs:
           fi
           if test -d "$ENCODED_SORT_ROOT/evidence/candidate"; then
             python3 -B .github/script/seekdb/fts_tokenize_config_validation.py --phase collect \
-              --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$GITHUB_SHA" \
+              --source "$GITHUB_WORKSPACE" --root "$ENCODED_SORT_ROOT" --driver-sha "$ARCHIVED_CANDIDATE_SHA" \
               --out "$ENCODED_SORT_EVIDENCE_OUT"
           fi
 
@@ -287,7 +277,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fts-encoded-sort-evidence-${{ github.sha }}
+          name: fts-encoded-sort-evidence-${{ env.ARCHIVED_CANDIDATE_SHA }}
           path: |
             ${{ env.ENCODED_SORT_EVIDENCE_OUT }}/
             ${{ env.ENCODED_SORT_META_ROOT }}/
