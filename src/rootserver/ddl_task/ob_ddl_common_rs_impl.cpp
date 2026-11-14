@@ -312,7 +312,7 @@ static bool can_encode_fts_build_sort(const ObTableSchema &table_schema,
 {
   bool has_doc_id = false;
   bool has_word = false;
-  bool can_encode = table_schema.is_fts_index_aux()
+  bool can_encode = (table_schema.is_fts_index_aux() || table_schema.is_fts_doc_word_aux())
       && order_column_ids.count() == 2;
   for (int64_t i = 0; can_encode && i < order_column_ids.count(); ++i) {
     const ObColumnSchemaV2 *column = table_schema.get_column_schema(order_column_ids.at(i));
