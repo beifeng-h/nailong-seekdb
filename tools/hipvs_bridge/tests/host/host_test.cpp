@@ -19,10 +19,12 @@
 #include <io.h>
 #ifdef SEEKDB_HOST_FROZEN_PARAMETERS
 static constexpr size_t expected_build_iterations=100;
+static constexpr size_t expected_intermediate_degree=256;
 static constexpr size_t expected_minimum_itopk=512;
 static constexpr cuvsCagraSearchAlgo expected_search_algorithm=SINGLE_CTA;
 #else
 static constexpr size_t expected_build_iterations=4;
+static constexpr size_t expected_intermediate_degree=128;
 static constexpr size_t expected_minimum_itopk=1536;
 static constexpr cuvsCagraSearchAlgo expected_search_algorithm=MULTI_CTA;
 #endif
@@ -160,7 +162,7 @@ int cuvsCagraIndexParamsDestroy(cuvsCagraIndexParams_t p) { S.stream_events.push
 int cuvsCagraIndexCreate(cuvsCagraIndex_t* p) { if(inject_failure(ApiFailure::Index)) return CUVS_ERROR; *p=new FakeIndex; ++S.indexes; return api_ok(); }
 int cuvsCagraIndexDestroy(cuvsCagraIndex_t p) { S.stream_events.push_back(StreamEvent::Index); S.cleanup.push_back(Cleanup::Index); delete p; --S.indexes; return api_ok(); }
 int cuvsCagraBuild(cuvsResources_t,cuvsCagraIndexParams_t p,DLManagedTensor* t,cuvsCagraIndex_t i) {
- CHECK(p->build_algo==NN_DESCENT); CHECK(p->graph_degree==128); CHECK(p->intermediate_graph_degree==256); CHECK(p->nn_descent_niter==expected_build_iterations);
+ CHECK(p->build_algo==NN_DESCENT); CHECK(p->graph_degree==128); CHECK(p->intermediate_graph_degree==expected_intermediate_degree); CHECK(p->nn_descent_niter==expected_build_iterations);
  if(inject_failure(ApiFailure::Build)) return CUVS_ERROR;
  i->n=t->dl_tensor.shape[0]; i->dim=t->dl_tensor.shape[1]; return api_ok();
 }

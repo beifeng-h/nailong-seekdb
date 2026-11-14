@@ -121,7 +121,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   }
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  h->ip->intermediate_graph_degree = 128;
   h->ip->nn_descent_niter = 4;
   if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) {
     sk_cuvs_report_error("build index"); goto fail_ip;
