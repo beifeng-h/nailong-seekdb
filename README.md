@@ -197,6 +197,22 @@ length. Writes update the length using the number of bytes transferred, and
 successful truncations set the new length. Each file has a single owning
 writer, and reopening reads its current length from the filesystem.
 
+Record reads request a schema-bounded page prefix: eight bytes per BIGINT,
+four bytes for a VARCHAR length plus at most four bytes per declared code point,
+and four bytes per vector component, with a 16-byte page header. The prefix is
+capped at the existing 4096-byte page size. Multi-page records retain full-page
+reads, and a stored payload length cannot exceed the bytes fetched. Prefix reads
+use the same transaction overlay as full-page reads; the unread suffix is zero.
+Ordinary scans and flat-index scans reuse their row and record buffers.
+
+The transaction dirty bitmap uses two 4096-byte windows. Windows write back on
+eviction and before commit enumerates dirty pages. Savepoint rollback updates
+the same windows, and transaction cleanup discards them. The cache has a fixed
+8 KiB payload regardless of transaction size. Native positional writes avoid
+an extra stream seek, complete short writes, retry POSIX EINTR, and track the
+actual extent even when an error follows a partially completed write. The WAL
+format, synchronization order and commit acknowledgement remain unchanged.
+
 `shutdown` closes the database, rolls back uncommitted changes, acknowledges
 the request, flushes, and exits with code zero. EOF also closes the database.
 Expected SQL errors and invalid requests return nonempty string codes and

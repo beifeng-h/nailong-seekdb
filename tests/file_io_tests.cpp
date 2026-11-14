@@ -14,20 +14,26 @@
 #include <windows.h>
 #include <winioctl.h>
 BOOL WINAPI io_test_read_file(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
+BOOL WINAPI io_test_write_file(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 #define ReadFile io_test_read_file
+#define WriteFile io_test_write_file
 #else
 #include <unistd.h>
 ssize_t io_test_pread(int, void*, std::size_t, off_t);
+ssize_t io_test_pwrite(int, const void*, std::size_t, off_t);
 #define pread io_test_pread
+#define pwrite io_test_pwrite
 #endif
 
-// Exercise the production file implementation with controlled native reads.
+// Exercise the production file implementation with controlled native I/O.
 #include "../src/page_store.cpp"
 
 #ifdef _WIN32
 #undef ReadFile
+#undef WriteFile
 #else
 #undef pread
+#undef pwrite
 #endif
 
 namespace {
@@ -35,8 +41,11 @@ namespace {
 std::size_t read_limit = std::numeric_limits<std::size_t>::max();
 unsigned native_calls = 0;
 bool inject_error = false;
+std::size_t write_limit = std::numeric_limits<std::size_t>::max();
+unsigned write_calls = 0, fail_write_call = 0;
 #ifndef _WIN32
 unsigned interrupted_reads = 0;
+unsigned interrupted_writes = 0;
 #endif
 
 void require(bool condition, const char* message) {
@@ -113,6 +122,16 @@ BOOL WINAPI io_test_read_file(HANDLE handle, LPVOID data, DWORD length, LPDWORD 
   const auto count = static_cast<DWORD>(std::min<std::size_t>(length, read_limit));
   return ::ReadFile(handle, data, count, transferred, request);
 }
+BOOL WINAPI io_test_write_file(HANDLE handle, LPCVOID data, DWORD length, LPDWORD transferred, LPOVERLAPPED request) {
+  ++write_calls;
+  if (write_calls == fail_write_call) {
+    *transferred = 0;
+    SetLastError(ERROR_WRITE_FAULT);
+    return FALSE;
+  }
+  const auto count = static_cast<DWORD>(std::min<std::size_t>(length, write_limit));
+  return ::WriteFile(handle, data, count, transferred, request);
+}
 #else
 ssize_t io_test_pread(int descriptor, void* data, std::size_t length, off_t offset) {
   ++native_calls;
@@ -126,6 +145,19 @@ ssize_t io_test_pread(int descriptor, void* data, std::size_t length, off_t offs
     return -1;
   }
   return ::pread(descriptor, data, std::min(length, read_limit), offset);
+}
+ssize_t io_test_pwrite(int descriptor, const void* data, std::size_t length, off_t offset) {
+  ++write_calls;
+  if (interrupted_writes != 0) {
+    --interrupted_writes;
+    errno = EINTR;
+    return -1;
+  }
+  if (write_calls == fail_write_call) {
+    errno = EIO;
+    return -1;
+  }
+  return ::pwrite(descriptor, data, std::min(length, write_limit), offset);
 }
 #endif
 
@@ -212,6 +244,45 @@ int main(int argc, char** argv) {
       require(actual == expected, "Reopened file data differs");
     }
     pass("offset_range_and_zero_length");
+
+    file.resize(0);
+    write_limit = 7;
+    const auto writes_before = write_calls;
+    file.write(0, expected.data(), expected.size());
+    file.read(0, actual.data(), actual.size());
+    require(actual == expected && write_calls - writes_before >= 6, "Short writes were not completed at the correct offsets");
+    require(file.size() == expected.size(), "Short-write file length differs");
+    pass("short_writes_reassembled");
+
+    file.resize(0);
+    fail_write_call = write_calls + 3;
+    rejected = false;
+    try { file.write(0, expected.data(), expected.size()); }
+    catch (const std::runtime_error&) { rejected = true; }
+    fail_write_call = 0;
+    require(rejected && file.size() == 14 && std::filesystem::file_size(directory.path / "mixed.bin") == 14,
+            "Partial-write failure lost the actual file length");
+    file.read(0, actual.data(), 14);
+    require(std::equal(actual.begin(), actual.begin() + 14, expected.begin()), "Partial-write prefix differs");
+    file.write(14, expected.data() + 14, expected.size() - 14);
+    file.read(0, actual.data(), actual.size());
+    require(actual == expected && file.size() == expected.size(), "Retry after a partial write differs");
+    write_limit = std::numeric_limits<std::size_t>::max();
+    pass("partial_write_error_tracks_extent_and_allows_retry");
+
+#ifndef _WIN32
+    interrupted_writes = 2;
+    file.write(0, expected.data(), expected.size());
+    file.read(0, actual.data(), actual.size());
+    require(actual == expected && interrupted_writes == 0, "Interrupted writes were not retried");
+    pass("interrupted_writes_retried");
+#endif
+
+    rejected = false;
+    try { file.write(static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()), expected.data(), 1); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected && file.size() == expected.size(), "Out-of-range write extent changed the file");
+    pass("write_extent_overflow_rejected");
 
     const auto large_path = directory.path / "large.bin";
 #ifdef _WIN32

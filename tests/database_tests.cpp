@@ -177,6 +177,45 @@ void chained_records() {
   Database db(d.path); check(state(db, "wide").at(5) == expected, "Wide row restart mismatch");
 }
 
+void row_prefix_boundaries() {
+  for (const std::uint32_t extent : {8U, 889U, 890U, std::numeric_limits<std::uint32_t>::max()}) {
+    Directory d;
+    std::string text;
+    for (std::uint32_t i = 0; i < std::min(extent, 890U); ++i) text += "\xf0\x9f\x98\x80";
+    const Schema schema{"bounded", {{"id", Type::bigint}, {"text", Type::varchar, extent},
+                                     {"v", Type::vector, 128}}, 0};
+    const std::vector<Row> expected{{std::int64_t(1), text, Vector(128, 0.25f)},
+                                    {std::int64_t(2), text, Vector(128, 0.25f)}};
+    const auto verify = [&](Database& db) {
+      check(*db.get("bounded", 1) == expected[0], "Bounded record lookup lost UTF-8 or vector bytes");
+      check(state(db, "bounded").at(2) == expected[1], "Bounded record scan differs");
+      for (const auto mode : {SearchMode::exact, SearchMode::ann}) {
+        for (const auto budget : {std::size_t(128), std::size_t(1024)}) {
+          std::size_t seen = 0;
+          db.scan_topk("bounded", Vector(128, 0), 2,
+            [&](const Row& value) { return std::get<std::string>(value[1]) == text; },
+            [&](const Neighbor& neighbor) {
+              check(seen < expected.size() && neighbor.row == expected[seen], "Bounded TopK row or tie order differs");
+              check(std::abs(neighbor.distance - std::sqrt(8.0)) < 1e-12, "Bounded TopK distance differs");
+              ++seen; return true;
+            }, budget, mode);
+          check(seen == expected.size(), "Bounded TopK omitted rows");
+        }
+      }
+    };
+    {
+      Database db(d.path); db.create_table(schema); db.insert("bounded", expected);
+      db.create_vector_index("bounded", "bounded_vec", 2); verify(db);
+      db.begin();
+      db.update("bounded", [](const Row& value) { return std::get<std::int64_t>(value[0]) == 1; },
+                std::vector<Assignment>{{1, std::string{}}});
+      check(std::get<std::string>((*db.get("bounded", 1))[1]).empty(), "Bounded read missed staged replacement");
+      db.rollback(); verify(db);
+    }
+    Database reopened(d.path); verify(reopened);
+  }
+}
+
 void growth_against_reference() {
   Directory d; std::map<std::int64_t, Row> reference;
   {
@@ -265,6 +304,7 @@ int main() {
     run("transaction_vector_visibility_and_rollback", transactional_visibility);
     run("update_failure_and_deleted_slot_reuse", update_failure_and_reuse);
     run("multi_page_records_and_reclamation", chained_records);
+    run("row_prefix_utf8_page_boundary_and_extent_overflow", row_prefix_boundaries);
     run("hash_growth_against_independent_reference", growth_against_reference);
     run("ordinary_filters_external_sort_and_limit", ordinary_filters_and_external_order);
     run("streaming_topk_zero_small_full_and_oversized_k", streaming_large_k);

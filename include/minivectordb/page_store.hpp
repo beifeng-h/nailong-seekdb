@@ -31,7 +31,7 @@ class PageStore {
 
   void begin();
   std::uint64_t allocate();
-  Page read(std::uint64_t page_id);
+  Page read(std::uint64_t page_id, std::size_t prefix_bytes = page_size);
   void write(std::uint64_t page_id, const Page& page);
   Savepoint savepoint() const;
   void rollback_to(Savepoint point);

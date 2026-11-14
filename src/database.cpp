@@ -141,6 +141,18 @@ struct Table {
 };
 constexpr std::size_t bucket_capacity = (page_size - 16) / 16;
 constexpr std::size_t blob_capacity = page_size - 16;
+
+std::size_t row_page_prefix(const Schema& schema) {
+  std::size_t bytes = 16;
+  for (const auto& column : schema.columns) {
+    const std::uint64_t length = column.type == Type::bigint ? 8 :
+        column.type == Type::varchar ? 4 + std::uint64_t(column.extent) * 4 :
+        std::uint64_t(column.extent) * sizeof(float);
+    if (length >= page_size - bytes) return page_size;
+    bytes += static_cast<std::size_t>(length);
+  }
+  return bytes;
+}
 constexpr std::uint32_t schema_labels_tag = 0x314c424c;
 constexpr std::string_view sort_owner = "MiniVectorDB transient sort v1\n";
 
@@ -441,21 +453,21 @@ struct Database::Impl {
     return next;
   }
 
-  void blob(std::uint64_t id, std::vector<std::byte>& result) {
+  void blob(std::uint64_t id, std::vector<std::byte>& result, std::size_t prefix_bytes = page_size) {
     result.clear();
     std::uint64_t visited = 0;
     while (id != 0) {
       if (++visited > pages.size()) invalid("Cyclic record pages");
-      const auto page = pages.read(id); const auto used = get64(page.data() + 8);
-      if (used > blob_capacity) invalid("Invalid record page length");
+      const auto page = pages.read(id, prefix_bytes); const auto used = get64(page.data() + 8);
+      if (used > prefix_bytes - 16) invalid("Invalid record page length");
       result.insert(result.end(), page.begin() + 16, page.begin() + 16 + static_cast<std::size_t>(used));
       id = get64(page.data());
     }
   }
 
-  std::vector<std::byte> blob(std::uint64_t id) {
+  std::vector<std::byte> blob(std::uint64_t id, std::size_t prefix_bytes = page_size) {
     std::vector<std::byte> result;
-    blob(id, result);
+    blob(id, result, prefix_bytes);
     return result;
   }
 
@@ -665,10 +677,11 @@ struct Database::Impl {
   void each_vector(const Table& table, SearchMode mode, const Predicate& predicate, Function function) {
     if (mode == SearchMode::exact) {
       const auto column = vector_column(table.schema);
+      const auto prefix_bytes = row_page_prefix(table.schema);
       std::vector<std::byte> bytes;
       Row row;
       each_entry(table, [&](std::int64_t key, std::uint64_t record) {
-        blob(record, bytes);
+        blob(record, bytes, prefix_bytes);
         decode_row(table.schema, bytes, row);
         if (predicate && !predicate(row)) return true;
         return function(key, record, std::get<Vector>(row[column]));
@@ -677,11 +690,20 @@ struct Database::Impl {
     }
     const auto index = vector_index(table);
     if (!index) invalid("ANN mode requires a vector index");
+    const auto prefix_bytes = row_page_prefix(index->schema);
+    const auto owner_prefix_bytes = row_page_prefix(table.schema);
+    std::vector<std::byte> bytes, owner_bytes;
+    Row row, owner_row;
     // Exhaustive flat-index search returns exact results using bounded query memory.
     each_entry(*index, [&](std::int64_t key, std::uint64_t entry) {
-      const auto row = decode_row(index->schema, blob(entry));
+      blob(entry, bytes, prefix_bytes);
+      decode_row(index->schema, bytes, row);
       const auto record = std::bit_cast<std::uint64_t>(std::get<std::int64_t>(row[1]));
-      if (predicate && !predicate(decode_row(table.schema, blob(record)))) return true;
+      if (predicate) {
+        blob(record, owner_bytes, owner_prefix_bytes);
+        decode_row(table.schema, owner_bytes, owner_row);
+        if (!predicate(owner_row)) return true;
+      }
       return function(key, record, std::get<Vector>(row[2]));
     });
   }
@@ -698,7 +720,7 @@ std::uint64_t Database::count(const std::string& name) { return impl_->table(nam
 std::optional<Row> Database::get(const std::string& name, std::int64_t key) {
   auto& s = *impl_; const auto table = s.table(name); const auto record = s.lookup(table, key);
   if (record == 0) return {};
-  return decode_row(table.schema, s.blob(record));
+  return decode_row(table.schema, s.blob(record, row_page_prefix(table.schema)));
 }
 
 void validate_schema(const Schema& schema) {
@@ -816,8 +838,12 @@ std::uint64_t Database::erase(const std::string& name, const Predicate& predicat
 
 void Database::scan(const std::string& name, const Predicate& predicate, const Visitor& visitor) {
   auto& s = *impl_; const auto table = s.table(name);
+  const auto prefix_bytes = row_page_prefix(table.schema);
+  std::vector<std::byte> bytes;
+  Row row;
   s.each_entry(table, [&](std::int64_t, std::uint64_t record) {
-    const auto row = decode_row(table.schema, s.blob(record));
+    s.blob(record, bytes, prefix_bytes);
+    decode_row(table.schema, bytes, row);
     return predicate && !predicate(row) ? true : visitor(row);
   });
 }

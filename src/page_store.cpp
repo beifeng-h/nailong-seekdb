@@ -67,17 +67,6 @@ class File {
 
   std::uint64_t size() const { return size_; }
 
-  void seek(std::uint64_t offset) {
-    if (offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-      fail("File offset overflow");
-#ifdef _WIN32
-    const int result = _fseeki64(stream_, static_cast<__int64>(offset), SEEK_SET);
-#else
-    const int result = fseeko(stream_, static_cast<off_t>(offset), SEEK_SET);
-#endif
-    if (result != 0) fail("File seek failed");
-  }
-
   void read(std::uint64_t offset, void* data, std::size_t length) {
     const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     if (offset > maximum || length > maximum - offset) fail("File offset overflow");
@@ -107,10 +96,29 @@ class File {
   void write(std::uint64_t offset, const void* data, std::size_t length) {
     const auto maximum = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     if (offset > maximum || length > maximum - offset) fail("File offset overflow");
-    seek(offset);
-    const auto written = length == 0 ? 0 : std::fwrite(data, 1, length, stream_);
-    if (written != 0) size_ = std::max(size_, offset + written);
-    if (written != length) fail("Incomplete file write: " + path_.string());
+    const auto* input = static_cast<const std::byte*>(data);
+    std::size_t completed = 0;
+    while (completed < length) {
+      const auto position = offset + completed;
+#ifdef _WIN32
+      OVERLAPPED request{};
+      request.Offset = static_cast<DWORD>(position);
+      request.OffsetHigh = static_cast<DWORD>(position >> 32);
+      const auto count = static_cast<DWORD>(std::min<std::size_t>(length - completed, std::numeric_limits<DWORD>::max()));
+      DWORD transferred = 0;
+      const bool success = WriteFile(handle_, input + completed, count, &transferred, &request) != 0;
+      completed += transferred;
+      if (transferred != 0) size_ = std::max(size_, offset + completed);
+      if (!success || transferred == 0) fail("Incomplete file write: " + path_.string());
+#else
+      const auto count = std::min<std::size_t>(length - completed, std::numeric_limits<ssize_t>::max());
+      const auto transferred = pwrite(descriptor_, input + completed, count, static_cast<off_t>(position));
+      if (transferred < 0 && errno == EINTR) continue;
+      if (transferred <= 0) fail("Incomplete file write: " + path_.string());
+      completed += static_cast<std::size_t>(transferred);
+      size_ = std::max(size_, offset + completed);
+#endif
+    }
   }
 
   void resize(std::uint64_t size) {
@@ -203,6 +211,14 @@ struct PageStore::Impl {
   std::uint64_t committed_pages = 0, logical_pages = 0, transaction = 0;
   std::uint64_t generation = 0, dirty_count = 0;
   bool active = false, poisoned = false;
+  struct BitmapWindow {
+    std::array<unsigned char, page_size> bytes{};
+    std::uint64_t offset = std::numeric_limits<std::uint64_t>::max();
+    std::size_t length = 0;
+    bool changed = false;
+  };
+  std::array<BitmapWindow, 2> bitmap_windows{};
+  std::size_t recent_bitmap_window = 0;
 
   explicit Impl(const std::filesystem::path& path, FaultHook callback)
       : directory(path), hook(std::move(callback)) {
@@ -231,29 +247,60 @@ struct PageStore::Impl {
   void point(std::string_view value) { if (hook) hook(value); }
 
   void remove_staging() {
+    for (auto& window : bitmap_windows) {
+      window.offset = std::numeric_limits<std::uint64_t>::max();
+      window.length = 0; window.changed = false;
+    }
     stage.reset(); bitmap.reset(); undo.reset();
     for (const char* name : {"txn.pages", "txn.bits", "txn.undo"})
       std::filesystem::remove(directory / name);
   }
 
+  void flush_bitmap(BitmapWindow& window) {
+    if (!window.changed) return;
+    bitmap->write(window.offset, window.bytes.data(), window.length);
+    window.changed = false;
+  }
+
+  BitmapWindow& bitmap_window(std::uint64_t id) {
+    const auto offset = (id / 8) / page_size * page_size;
+    for (std::size_t i = 0; i < bitmap_windows.size(); ++i) {
+      if (bitmap_windows[i].offset == offset) {
+        recent_bitmap_window = i;
+        return bitmap_windows[i];
+      }
+    }
+    auto& window = bitmap_windows[1 - recent_bitmap_window];
+    flush_bitmap(window);
+    window.offset = std::numeric_limits<std::uint64_t>::max();
+    window.bytes.fill(0);
+    window.length = offset < bitmap->size() ?
+        static_cast<std::size_t>(std::min<std::uint64_t>(page_size, bitmap->size() - offset)) : 0;
+    if (window.length != 0) bitmap->read(offset, window.bytes.data(), window.length);
+    window.offset = offset;
+    recent_bitmap_window = 1 - recent_bitmap_window;
+    return window;
+  }
+
   bool dirty(std::uint64_t id) {
-    unsigned char byte = 0;
-    if (id / 8 < bitmap->size()) bitmap->read(id / 8, &byte, 1);
-    return (byte & (1U << (id % 8))) != 0;
+    const auto& window = bitmap_window(id);
+    return (window.bytes[id / 8 - window.offset] & (1U << (id % 8))) != 0;
   }
 
   void set_dirty(std::uint64_t id, bool value) {
-    unsigned char byte = 0;
-    if (id / 8 < bitmap->size()) bitmap->read(id / 8, &byte, 1);
+    auto& window = bitmap_window(id);
+    auto& byte = window.bytes[id / 8 - window.offset];
     const bool previous = (byte & (1U << (id % 8))) != 0;
     if (previous == value) return;
     if (value) { byte |= static_cast<unsigned char>(1U << (id % 8)); ++dirty_count; }
     else { byte &= static_cast<unsigned char>(~(1U << (id % 8))); --dirty_count; }
-    bitmap->write(id / 8, &byte, 1);
+    window.length = std::max(window.length, static_cast<std::size_t>(id / 8 - window.offset + 1));
+    window.changed = true;
   }
 
   template<class Callback>
   void each_dirty(Callback callback) {
+    for (auto& window : bitmap_windows) flush_bitmap(window);
     std::array<unsigned char, page_size> bits{};
     const auto length = bitmap->size();
     for (std::uint64_t offset = 0; offset < length; offset += bits.size()) {
@@ -344,12 +391,13 @@ std::uint64_t PageStore::allocate() {
   return s.logical_pages++;
 }
 
-Page PageStore::read(std::uint64_t id) {
+Page PageStore::read(std::uint64_t id, std::size_t prefix_bytes) {
   auto& s = *impl_; s.usable();
   if (id >= s.logical_pages) fail("Page ID outside database");
+  if (prefix_bytes > page_size) fail("Page read exceeds page size");
   Page page{};
-  if (s.active && s.dirty(id)) s.stage->read(checked_offset(id), page.data(), page.size());
-  else if (id < s.committed_pages) s.data->read(checked_offset(id, true), page.data(), page.size());
+  if (s.active && s.dirty(id)) s.stage->read(checked_offset(id), page.data(), prefix_bytes);
+  else if (id < s.committed_pages) s.data->read(checked_offset(id, true), page.data(), prefix_bytes);
   return page;
 }
 

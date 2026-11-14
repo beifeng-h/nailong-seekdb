@@ -67,6 +67,29 @@ void zero_pages() {
   check(store.size() == 2 && store.read(0) == Page{} && store.read(1) == Page{}, "Allocated pages must be zero");
 }
 
+void page_prefixes() {
+  Directory d;
+  const auto original = pattern(3), changed = pattern(8);
+  const auto verify = [&](PageStore& store, const Page& expected) {
+    for (const std::size_t length : {std::size_t(0), std::size_t(1), std::size_t(17),
+                                     minivectordb::page_size - 1, minivectordb::page_size}) {
+      const auto actual = store.read(0, length);
+      for (std::size_t i = 0; i < actual.size(); ++i)
+        check(actual[i] == (i < length ? expected[i] : std::byte{}), "Page prefix bytes differ");
+    }
+    rejected([&] { store.read(0, minivectordb::page_size + 1); });
+    rejected([&] { store.read(store.size(), 0); });
+  };
+  {
+    PageStore store(d.path);
+    store.begin(); store.allocate(); verify(store, Page{});
+    store.write(0, original); verify(store, original); store.commit(); verify(store, original);
+    store.begin(); const auto point = store.savepoint(); store.write(0, changed); verify(store, changed);
+    store.rollback_to(point); verify(store, original); store.rollback(); verify(store, original);
+  }
+  PageStore reopened(d.path); verify(reopened, original);
+}
+
 void rollback_and_close() {
   Directory d;
   {
@@ -89,6 +112,36 @@ void statement_savepoints() {
   check(store.allocate() == 1 && store.read(1) == Page{}, "Rolled back allocation exposed stale bytes");
   store.write(1, pattern(8)); store.commit();
   check(store.read(0) == pattern(1) && store.read(1) == pattern(8), "Commit after statement rollback failed");
+}
+
+void bitmap_window_eviction() {
+  Directory d; PageStore store(d.path);
+  constexpr std::uint64_t stride = minivectordb::page_size * 8;
+  const std::array<std::uint64_t, 5> ids{0, stride - 1, stride, 2 * stride - 1, 2 * stride};
+  store.begin();
+  for (std::uint64_t id = 0; id <= ids.back(); ++id) store.allocate();
+  for (std::size_t i = 0; i < ids.size(); ++i) store.write(ids[i], pattern(static_cast<unsigned>(i + 1)));
+  const auto point = store.savepoint();
+  for (unsigned round = 0; round < 3; ++round) {
+    for (auto id = ids.rbegin(); id != ids.rend(); ++id) store.write(*id, pattern(20 + round));
+  }
+  const auto extra = store.allocate(); store.write(extra, pattern(30));
+  store.rollback_to(point);
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    check(store.read(ids[i]) == pattern(static_cast<unsigned>(i + 1)), "Bitmap eviction lost saved page state");
+  check(store.allocate() == extra && store.read(extra) == Page{}, "Evicted bitmap exposed rolled-back allocation");
+  store.commit();
+  for (std::size_t i = 0; i < ids.size(); ++i)
+    check(store.read(ids[i]) == pattern(static_cast<unsigned>(i + 1)), "Bitmap eviction omitted a committed page");
+  store.begin();
+  for (auto id : ids) store.write(id, pattern(40));
+  store.rollback();
+  store.begin();
+  check(store.read(ids.front()) == pattern(1) && store.read(ids.back()) == pattern(5),
+        "Reused bitmap windows leaked a previous transaction");
+  store.write(ids.back(), pattern(7)); store.commit();
+  check(store.read(ids.front()) == pattern(1) && store.read(ids.back()) == pattern(7),
+        "Commit after window reset differs");
 }
 
 void state_errors() {
@@ -149,8 +202,10 @@ int main() {
   try {
     run("committed_pages_survive_restart", durable_pages);
     run("zero_pages_survive_empty_commit", zero_pages);
+    run("page_prefixes_across_transactions_and_reopen", page_prefixes);
     run("rollback_and_uncommitted_close", rollback_and_close);
     run("statement_savepoint_keeps_prior_changes", statement_savepoints);
+    run("bitmap_window_eviction_savepoint_and_transaction_reuse", bitmap_window_eviction);
     run("transaction_state_errors", state_errors);
     for (const auto* fault : {"commit.header_written", "commit.frame_written"})
       run(fault, [&] { commit_interruption(fault, false); });
