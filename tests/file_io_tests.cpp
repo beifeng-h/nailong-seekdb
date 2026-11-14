@@ -93,6 +93,17 @@ void crc_contracts() {
   for (std::size_t index = 0; index < page.size(); ++index)
     page[index] = std::byte((index * 37 + 11) & 255);
   check_crc_bytes(page.data(), page.size());
+  std::array<unsigned char, minivectordb::page_size + 32> unaligned{};
+  for (std::size_t index = 0; index < unaligned.size(); ++index)
+    unaligned[index] = static_cast<unsigned char>((index * 101 + index / 7) & 255);
+  for (std::size_t offset = 0; offset < 8; ++offset) {
+    for (std::size_t length = 0; length <= 24; ++length)
+      check_crc_bytes(unaligned.data() + offset, length);
+    for (const std::size_t length : {std::size_t(31), std::size_t(32), std::size_t(33),
+                                     std::size_t(63), std::size_t(64), std::size_t(65),
+                                     std::size_t(4095), std::size_t(4096), std::size_t(4111), std::size_t(4112)})
+      check_crc_bytes(unaligned.data() + offset, length);
+  }
 }
 
 struct TestDirectory {

@@ -81,6 +81,23 @@ jobs:
             --entrypoint python3 minivectordb-m11 \
             /source/tests/legacy_schema.py /build/sql_public_case_driver \
             --vector-index --report /evidence/legacy-index-schema.json
+          docker run --rm --network none \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --entrypoint python3 minivectordb-m11 \
+            /source/tests/crash_recovery.py /build/storage_fault_driver \
+            --report /evidence/page-crash.json
+          docker run --rm --network none \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --entrypoint python3 minivectordb-m11 \
+            /source/tests/crash_recovery.py /build/sql_fault_driver --sort-cleanup \
+            --commit-returned-stage session.commit_returned \
+            --scope 'Linux SQL storage and index recovery; not formal acceptance' \
+            --report /evidence/sql-crash.json
+          docker run --rm --network none \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --entrypoint python3 minivectordb-m11 \
+            /source/tests/index_build_recovery.py /build/sql_fault_driver \
+            --report /evidence/index-build-crash.json
 
       - name: Run the unchanged official handshake and public driver on the default image
         shell: bash
@@ -93,6 +110,38 @@ jobs:
           python3 protocol_check/run.py --image minivectordb-m11 \
             --output "$RUNNER_TEMP/m11-official-public" 2>&1 | tee "$evidence_dir/public-driver.log"
           cat "$RUNNER_TEMP/m11-official-public/result.json"
+
+      - name: Compare production stdio with the passed 7d07 source in the same image
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=7d07cdb7d148678f7a2a2db284da3b484575dbb9
+          baseline_source="$RUNNER_TEMP/minivectordb-baseline"
+          evidence_dir="$RUNNER_TEMP/minivectordb-evidence"
+          mkdir -p "$baseline_source"
+          git fetch --no-tags --depth=1 https://github.com/beifeng-h/nailong-seekdb.git "$baseline"
+          test "$(git rev-parse "$baseline^{commit}")" = "$baseline"
+          git rev-parse "$baseline" "$baseline^{tree}" > "$evidence_dir/baseline-source-identity.txt"
+          git archive "$baseline" CMakeLists.txt include src third_party tests \
+            | tar -x -C "$baseline_source"
+          docker run --rm --network none --cpus 2 --memory 2g --pids-limit 128 \
+            --mount "type=bind,src=$baseline_source,dst=/baseline-source,readonly" \
+            --mount "type=bind,src=$evidence_dir,dst=/evidence" \
+            --env SOURCE_REVISION --entrypoint bash minivectordb-m11 -c '
+              set -euo pipefail
+              c++ --version > /evidence/paired-compiler.txt
+              cmake -S /baseline-source -B /tmp/baseline-build -DCMAKE_BUILD_TYPE=Release
+              cmake --build /tmp/baseline-build --target minivectordb_server --parallel 2
+              mkdir -p /evidence/baseline-bin
+              cp /tmp/baseline-build/minivectordb_server /evidence/baseline-bin/
+              cp /tmp/baseline-build/CMakeCache.txt /evidence/baseline-cmake-cache.txt
+              cp /build/CMakeCache.txt /evidence/candidate-cmake-cache.txt
+              python3 /source/tests/runtime_performance.py \
+                --baseline /tmp/baseline-build/minivectordb_server \
+                --candidate /build/minivectordb_server \
+                --candidate-revision "$SOURCE_REVISION" \
+                --report /evidence/runtime-performance.json
+            ' 2>&1 | tee "$evidence_dir/runtime-performance.log"
 
       - name: Preserve the database executable and validation evidence
         if: always()

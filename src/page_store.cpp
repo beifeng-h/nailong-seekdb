@@ -153,21 +153,37 @@ class File {
 #endif
 };
 
-constexpr auto crc_table = [] {
-  std::array<std::uint32_t, 256> table{};
-  for (std::size_t index = 0; index < table.size(); ++index) {
+constexpr auto crc_tables = [] {
+  std::array<std::array<std::uint32_t, 256>, 8> tables{};
+  for (std::size_t index = 0; index < tables[0].size(); ++index) {
     auto value = static_cast<std::uint32_t>(index);
     for (int bit = 0; bit < 8; ++bit)
       value = (value >> 1) ^ (0xedb88320U & (0U - (value & 1U)));
-    table[index] = value;
+    tables[0][index] = value;
   }
-  return table;
+  for (std::size_t index = 0; index < tables[0].size(); ++index) {
+    auto value = tables[0][index];
+    for (std::size_t slice = 1; slice < tables.size(); ++slice) {
+      value = tables[0][value & 255U] ^ (value >> 8);
+      tables[slice][index] = value;
+    }
+  }
+  return tables;
 }();
 
 std::uint32_t crc_update(std::uint32_t value, const void* data, std::size_t length) {
   const auto* bytes = static_cast<const unsigned char*>(data);
-  for (std::size_t i = 0; i < length; ++i)
-    value = crc_table[(value ^ bytes[i]) & 255U] ^ (value >> 8);
+  std::size_t i = 0;
+  for (; length - i >= 8; i += 8) {
+    const auto head = value ^ std::uint32_t(bytes[i]) ^ (std::uint32_t(bytes[i + 1]) << 8) ^
+        (std::uint32_t(bytes[i + 2]) << 16) ^ (std::uint32_t(bytes[i + 3]) << 24);
+    value = crc_tables[7][head & 255U] ^ crc_tables[6][(head >> 8) & 255U] ^
+        crc_tables[5][(head >> 16) & 255U] ^ crc_tables[4][head >> 24] ^
+        crc_tables[3][bytes[i + 4]] ^ crc_tables[2][bytes[i + 5]] ^
+        crc_tables[1][bytes[i + 6]] ^ crc_tables[0][bytes[i + 7]];
+  }
+  for (; i < length; ++i)
+    value = crc_tables[0][(value ^ bytes[i]) & 255U] ^ (value >> 8);
   return value;
 }
 
@@ -210,6 +226,8 @@ struct PageStore::Impl {
   FaultHook hook;
   std::uint64_t committed_pages = 0, logical_pages = 0, transaction = 0;
   std::uint64_t generation = 0, dirty_count = 0;
+  std::uint64_t protected_pages = 0;
+  std::uint64_t savepoint_epoch = 0;
   bool active = false, poisoned = false;
   struct BitmapWindow {
     std::array<unsigned char, page_size> bytes{};
@@ -219,6 +237,12 @@ struct PageStore::Impl {
   };
   std::array<BitmapWindow, 2> bitmap_windows{};
   std::size_t recent_bitmap_window = 0;
+  struct CachedPage {
+    Page page{};
+    std::uint64_t id = std::numeric_limits<std::uint64_t>::max(), used = 0, undo_epoch = 0;
+  };
+  std::array<CachedPage, 16> page_cache{};
+  std::uint64_t cache_clock = 0;
 
   explicit Impl(const std::filesystem::path& path, FaultHook callback)
       : directory(path), hook(std::move(callback)) {
@@ -245,6 +269,33 @@ struct PageStore::Impl {
   void usable() const { if (poisoned) fail("Commit outcome uncertain; reopen the database"); }
   void require_transaction() const { usable(); if (!active) fail("No active transaction"); }
   void point(std::string_view value) { if (hook) hook(value); }
+
+  CachedPage* cached_entry(std::uint64_t id) {
+    for (auto& entry : page_cache) {
+      if (entry.id == id) { entry.used = ++cache_clock; return &entry; }
+    }
+    return nullptr;
+  }
+
+  void remember_page(std::uint64_t id, const Page& page) {
+    auto& entry = *std::min_element(page_cache.begin(), page_cache.end(),
+        [](const CachedPage& left, const CachedPage& right) { return left.used < right.used; });
+    entry.page = page; entry.id = id; entry.used = ++cache_clock;
+    entry.undo_epoch = 0;
+  }
+
+  void update_cached_page(std::uint64_t id, const Page& page) {
+    for (auto& entry : page_cache) {
+      if (entry.id == id) { entry.page = page; entry.used = ++cache_clock; return; }
+    }
+  }
+
+  void clear_page_cache() {
+    for (auto& entry : page_cache) {
+      entry.id = std::numeric_limits<std::uint64_t>::max(); entry.used = 0; entry.undo_epoch = 0;
+    }
+    cache_clock = 0;
+  }
 
   void remove_staging() {
     for (auto& window : bitmap_windows) {
@@ -381,6 +432,8 @@ void PageStore::begin() {
   s.bitmap = std::make_unique<File>(s.directory / "txn.bits", true);
   s.undo = std::make_unique<File>(s.directory / "txn.undo", true);
   s.logical_pages = s.committed_pages; s.dirty_count = 0;
+  s.protected_pages = s.committed_pages;
+  ++s.savepoint_epoch;
   s.active = true; ++s.generation;
 }
 
@@ -395,25 +448,46 @@ Page PageStore::read(std::uint64_t id, std::size_t prefix_bytes) {
   auto& s = *impl_; s.usable();
   if (id >= s.logical_pages) fail("Page ID outside database");
   if (prefix_bytes > page_size) fail("Page read exceeds page size");
+  if (prefix_bytes == page_size) {
+    if (const auto* cached = s.cached_entry(id)) return cached->page;
+  }
   Page page{};
   if (s.active && s.dirty(id)) s.stage->read(checked_offset(id), page.data(), prefix_bytes);
   else if (id < s.committed_pages) s.data->read(checked_offset(id, true), page.data(), prefix_bytes);
+  if (prefix_bytes == page_size) s.remember_page(id, page);
   return page;
 }
 
 void PageStore::write(std::uint64_t id, const Page& page) {
   auto& s = *impl_; s.require_transaction();
-  const auto before = read(id);
-  std::array<std::byte, undo_record_size> record{};
-  put64(record.data(), id); record[8] = std::byte(s.dirty(id) ? 1 : 0);
-  std::copy(before.begin(), before.end(), record.begin() + 16);
-  s.undo->write(s.undo->size(), record.data(), record.size());
-  s.stage->write(checked_offset(id), page.data(), page.size());
-  s.set_dirty(id, true);
+  if (id >= s.logical_pages) fail("Page ID outside database");
+  try {
+    // No established savepoint can access pages beyond this high-water mark.
+    if (id < s.protected_pages) {
+      const auto* cached = s.cached_entry(id);
+      if (!cached || cached->undo_epoch != s.savepoint_epoch) {
+        const auto before = read(id);
+        auto& entry = *s.cached_entry(id);
+        std::array<std::byte, undo_record_size> record{};
+        put64(record.data(), id); record[8] = std::byte(s.dirty(id) ? 1 : 0);
+        std::copy(before.begin(), before.end(), record.begin() + 16);
+        s.undo->write(s.undo->size(), record.data(), record.size());
+        entry.undo_epoch = s.savepoint_epoch;
+      }
+    }
+    s.stage->write(checked_offset(id), page.data(), page.size());
+    s.set_dirty(id, true);
+    s.update_cached_page(id, page);
+  } catch (...) {
+    s.clear_page_cache();
+    throw;
+  }
 }
 
 PageStore::Savepoint PageStore::savepoint() const {
-  const auto& s = *impl_; s.require_transaction();
+  auto& s = *impl_; s.require_transaction();
+  s.protected_pages = std::max(s.protected_pages, s.logical_pages);
+  ++s.savepoint_epoch;
   return {s.generation, s.undo->size(), s.logical_pages};
 }
 
@@ -423,6 +497,8 @@ void PageStore::rollback_to(Savepoint point) {
   if (point.generation != s.generation || point.undo_size > end ||
       point.undo_size % undo_record_size != 0 || point.page_count > s.logical_pages)
     fail("Invalid savepoint");
+  s.clear_page_cache();
+  ++s.savepoint_epoch;
   std::array<std::byte, undo_record_size> record{};
   for (auto offset = end; offset > point.undo_size; offset -= record.size()) {
     s.undo->read(offset - record.size(), record.data(), record.size());
@@ -431,6 +507,7 @@ void PageStore::rollback_to(Savepoint point) {
     if (was_dirty) s.stage->write(checked_offset(id), record.data() + 16, page_size);
     s.set_dirty(id, was_dirty);
   }
+  for (auto id = point.page_count; id < s.logical_pages; ++id) s.set_dirty(id, false);
   s.undo->resize(point.undo_size);
   s.logical_pages = point.page_count;
 }
@@ -438,6 +515,7 @@ void PageStore::rollback_to(Savepoint point) {
 void PageStore::rollback() {
   auto& s = *impl_; s.require_transaction();
   s.logical_pages = s.committed_pages; s.active = false;
+  s.clear_page_cache();
   s.remove_staging();
 }
 

@@ -213,6 +213,16 @@ an extra stream seek, complete short writes, retry POSIX EINTR, and track the
 actual extent even when an error follows a partially completed write. The WAL
 format, synchronization order and commit acknowledgement remain unchanged.
 
+Full-page reads additionally use a fixed 16-page LRU cache with a 64 KiB data
+payload. Short record-prefix reads retain their smaller I/O size. Successful
+writes update cached pages; write errors and both rollback paths invalidate
+the cache. Page bounds and uncertain-commit checks precede cache lookup.
+New pages beyond every established savepoint's page-count high-water mark
+need no undo image. Within one savepoint epoch, a cached page records only its
+first before-image; eviction can add redundant undo without losing recovery
+information. Savepoints and rollback advance the epoch. Rollback also clears
+dirty flags for discarded allocations before their page IDs can be reused.
+
 `shutdown` closes the database, rolls back uncommitted changes, acknowledges
 the request, flushes, and exits with code zero. EOF also closes the database.
 Expected SQL errors and invalid requests return nonempty string codes and
@@ -308,10 +318,11 @@ to perform the same input check locally. The platform performs the Agent assessm
 Record decoding reserves the schema's column count before appending values.
 Float32 vectors use bulk byte copies for encoding and decoding on little-endian
 hosts, with explicit little-endian conversion on other hosts. WAL checksums use
-a compile-time CRC-32 lookup table with the existing polynomial and incremental
-checksum state. Record bytes, WAL framing and durable commit ordering follow
+eight compile-time CRC-32 tables to process eight bytes per iteration with the
+existing polynomial and incremental checksum state. Record bytes, WAL framing and durable commit ordering follow
 the existing format. The file I/O regression compares CRC results against the
-previous bitwise algorithm, including incremental updates and page payloads.
+previous bitwise algorithm, including incremental updates, unaligned input,
+short tails and page payloads.
 
 The learning material includes selected authentic user requests, the user's
 filter-order explanation and version-specific experiment results. Student
@@ -348,6 +359,36 @@ that query runs preserve the database file. Operating-system cache is retained.
 Results apply to these projection workloads and the measured environment.
 Filtered TopK scoring, physical device I/O and formal resource acceptance
 require their own measurements.
+
+## Production process performance diagnostics
+
+```sh
+python3 tests/runtime_performance.py \
+  --baseline /path/to/7d07/minivectordb_server \
+  --candidate build/minivectordb_server \
+  --candidate-revision YOUR_COMMIT --report runtime-performance.json
+```
+
+The stdio validation workflow fetches the exact passed source
+`7d07cdb7d148678f7a2a2db284da3b484575dbb9`, verifies its commit and tree, and
+builds that server inside the candidate's locked image using matching Release
+options. Both programs run in the same network-disabled container with 2 CPUs
+and a 2 GiB limit. The diagnostic script hashes the executables and its own
+source. Database fixtures use the system temporary directory and are removed
+after the run; validation archives contain reports and executable identities.
+
+The harness alternates request order on two live processes and independent
+databases. It checks durable 100-row insert batches, full database-byte equality,
+reopen, index creation and persistence, filtered and unfiltered Top10 against
+independent integer-distance truth, and primary-key queries. Exact and
+exhaustive flat-index modes each run twice. Queries must preserve persistent
+pages and both complete responses must match. Index creation is one preparation
+operation per program; its order is not balanced for a speed measurement.
+There is no timing-based pass
+threshold. Linux reports include `/proc/PID/io`, CPU ticks and lifetime
+`VmHWM`; these process counters include pipes and operating-system cache and
+do not establish the organizer's container T/B/M metrics or a contest score.
+The same script runs on Windows with process metrics explicitly unavailable.
 
 ## Integration status
 
