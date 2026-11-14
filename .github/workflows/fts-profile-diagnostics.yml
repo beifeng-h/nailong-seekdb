@@ -14,6 +14,8 @@ on:
       - .github/workflows/fts-encoded-sort-revalidation.yml
       - .github/script/seekdb/fts_encoded_sort_validation.py
       - .github/script/seekdb/test_fts_encoded_sort_validation.py
+      - .github/script/seekdb/fts_inverted_sort_validation.py
+      - .github/script/seekdb/test_fts_inverted_sort_validation.py
       - .github/workflows/fts-encoded-sort-diagnostics.yml
       - .github/script/seekdb/fts_encoded_sort_diagnostics.py
       - .github/script/seekdb/fts_encoded_sort_cases.py
