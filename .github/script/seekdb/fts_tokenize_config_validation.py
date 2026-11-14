@@ -2,6 +2,9 @@
 """Validate typed TOKENIZE configuration against the complete saved c3d7988 ELF."""
 import hashlib
 import json
+import os
+from pathlib import Path
+import re
 
 import fts_encoded_sort_validation as validation
 import fts_inverted_sort_validation as previous
@@ -46,7 +49,7 @@ def build_profile(args):
 
 def configuration_sql():
     statements = []
-    texts = ("NULL", "''", "'a A database DATABASE orchard'",
+    texts = ("CAST(NULL AS CHAR CHARACTER SET utf8mb4)", "''", "'a A database DATABASE orchard'",
              "_utf8mb4 X'E695B0E68DAEE5BA93E6A380E7B4A2'",
              "_utf8mb4 X'6100622061'", "REPEAT('database orchard ',64)")
     for parser in ('ik', 'beng', 'space', 'ngram', 'ngram2'):
@@ -74,9 +77,20 @@ def configuration_work(call, out):
     query = configuration_sql()
     result = driver.sql(call, out, 'typed-config-matrix', query)
     driver.require(len(result.splitlines()) == 67, 'Incomplete TOKENIZE configuration matrix')
-    return dict(canonical=result, sqlSha256=hashlib.sha256(query.encode()).hexdigest(),
+    control = common.SESSION + "SELECT TOKENIZE(NULL,'ik');\n"
+    output = out / 'binary-ik-null-control.log'
+    (out / 'binary-ik-null-control.sql').write_text(control)
+    receipt = common.capture_group([str(call.obclient), '-h127.0.0.1', '-P'+str(call.port),
+        '-uroot', '-A', '-N', '-B', '--raw', '--default-character-set=utf8mb4', '-Doceanbase'],
+        output, Path.cwd(), 30, env=os.environ.copy(), stdin=control.encode())
+    rejected = output.read_text()
+    driver.require(receipt['exitCode'] == 1 and receipt['childrenCleaned']
+                   and re.fullmatch(r'ERROR 1235 \(0A000\) at line \d+: ik with the binary charset is not supported\n', rejected),
+                   'Binary IK NULL rejection changed')
+    driver.dump(out / 'binary-ik-null-control.json', dict(expectedError=1235, **receipt))
+    return dict(canonical=result+rejected, sqlSha256=hashlib.sha256(query.encode()).hexdigest(),
                 outputSha256=hashlib.sha256(result.encode()).hexdigest(), rows=67,
-                parserCount=5, outputModes=2)
+                parserCount=5, outputModes=2, inheritedBinaryIkNullError=1235)
 
 
 def equality_work(call, out):
