@@ -1,0 +1,224 @@
+name: SeekDB accepted executable profile
+
+on:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+    paths:
+      - .github/script/seekdb/fts_accepted_profile.py
+      - .github/script/seekdb/test_fts_accepted_profile.py
+      - .github/workflows/fts-accepted-profile.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: seekdb-fts-free-linux-validation
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      LC_ALL: C
+      LANG: C
+    steps:
+      - name: Fetch the exact driver accepted source and frozen inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/fts-accepted-profile-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$work" && test ! -L "$work"
+          mkdir -m 0700 "$work" "$work/evidence" "$work/downloads"
+          printf 'PROFILE_WORK_ROOT=%s\n' "$work" >> "$GITHUB_ENV"
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c maintenance.auto=false -c gc.auto=0 -C "$GITHUB_WORKSPACE" \
+            fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
+            "$GITHUB_SHA" c3d798873b700987b6983043d2abf0defd8e2500 \
+            5bce9e06d1281347ad61344e4b01fab9158c58a2
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain=v1 --untracked-files=all)"
+          for image_tool in /usr/local/lib/android /usr/share/dotnet /opt/ghc; do
+            if test -e "$image_tool"; then
+              test "$(realpath -- "$image_tool")" = "$image_tool"
+              case "$image_tool" in
+                /usr/local/lib/android|/usr/share/dotnet|/opt/ghc) sudo -n rm -rf -- "$image_tool" ;;
+                *) exit 2 ;;
+              esac
+            fi
+          done
+
+      - name: Install documented runtime and profiling prerequisites
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$PROFILE_WORK_ROOT/evidence/prerequisites.log") 2>&1
+          prerequisites_ready=true
+          for tool in python3 readelf ldd; do
+            if command -v "$tool" && "$tool" --version; then
+              printf 'Available tool: %s\n' "$tool"
+            else
+              printf 'Missing or unusable tool: %s\n' "$tool"
+              prerequisites_ready=false
+            fi
+          done
+          if test -x /usr/bin/python3; then
+            /usr/bin/python3 --version
+          else
+            printf 'Missing driver interpreter: /usr/bin/python3\n'
+            prerequisites_ready=false
+          fi
+          libaio=/lib/x86_64-linux-gnu/libaio.so.1t64
+          if test -r "$libaio"; then
+            ls -l -- "$libaio"
+          else
+            printf 'Missing required library: %s\n' "$libaio"
+            prerequisites_ready=false
+          fi
+          perf_path=
+          while IFS= read -r candidate; do
+            test -x "$candidate" || continue
+            printf 'Probing perf candidate: %s\n' "$candidate"
+            if timeout 5s "$candidate" --version && \
+              sudo -n timeout --signal=TERM --kill-after=5s 10s "$candidate" \
+                stat -e cpu-clock:u -- sleep 0.05; then
+              perf_path=$candidate
+              break
+            fi
+          done < <(
+            command -v perf || true
+            if test -d /usr/lib/linux-tools; then
+              find /usr/lib/linux-tools -maxdepth 3 -type f -name perf -print | sort -V -r
+            fi
+          )
+          if test -n "$perf_path"; then
+            printf 'Verified existing perf: %s\n' "$perf_path"
+            printf '%s\n' "$(dirname -- "$perf_path")" >> "$GITHUB_PATH"
+          fi
+          if test "$prerequisites_ready" = true && test -n "$perf_path"; then
+            printf 'Existing prerequisites passed; skipping APT.\n'
+          else
+            printf 'Existing prerequisites incomplete; checking official repository DNS before APT.\n'
+            for host in archive.ubuntu.com security.ubuntu.com; do
+              if ! timeout --signal=TERM --kill-after=2s 10s getent ahostsv4 "$host"; then
+                printf 'Official repository DNS lookup failed or timed out: %s; APT was not started.\n' "$host"
+                exit 2
+              fi
+            done
+            apt_sources="$PROFILE_WORK_ROOT/evidence/apt-sources.list"
+            apt_sourceparts="$PROFILE_WORK_ROOT/apt-sourceparts"
+            mkdir -m 0700 "$apt_sourceparts"
+            test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg
+            cat > "$apt_sources" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main universe
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main universe
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-backports main universe
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main universe
+          SOURCES
+            apt_options=(-o "Dir::Etc::sourcelist=$apt_sources" -o "Dir::Etc::sourceparts=$apt_sourceparts"
+              -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            sudo -n apt-get "${apt_options[@]}" update --error-on=any
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+              install -y --no-install-recommends \
+              libaio1t64 binutils python3 linux-tools-common linux-tools-generic
+          fi
+
+      - name: Download the exact complete accepted executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 10
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43350361661'
+          artifact-ids: '14006965532'
+          github-token: ${{ github.token }}
+          path: ${{ env.PROFILE_WORK_ROOT }}/downloads/baseline
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Extract the unchanged pinned official client
+        shell: bash
+        run: |
+          set -euo pipefail
+          downloads="$PROFILE_WORK_ROOT/client-downloads"
+          mkdir -m 0700 "$downloads"
+          cd -- "$downloads"
+          for package in obclient libobclient; do
+            curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 \
+              --output "$package-2.2.3-1.el8.x86_64.rpm" \
+              "https://mirrors.oceanbase.com/oceanbase/community/stable/el/8/x86_64/$package-2.2.3-1.el8.x86_64.rpm"
+          done
+          python3 -B "$GITHUB_WORKSPACE/.github/script/seekdb/fts-profile-runtime/extract_official_obclient.py" \
+            --output official-client > "$PROFILE_WORK_ROOT/evidence/client-extraction.json"
+          mkdir -p "$GITHUB_WORKSPACE/deps/3rd/u01"
+          test ! -e "$GITHUB_WORKSPACE/deps/3rd/u01/obclient"
+          cp -a -- "$downloads/official-client" "$GITHUB_WORKSPACE/deps/3rd/u01/obclient"
+
+      - name: Check the existing capture regressions and prepare the saved executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/script/seekdb/fts-profile-runtime -p 'test_*.py' -v \
+            > "$PROFILE_WORK_ROOT/evidence/offline-tests.log" 2>&1
+          python3 -B -m unittest discover -s .github/script/seekdb -p test_fts_accepted_profile.py -v \
+            >> "$PROFILE_WORK_ROOT/evidence/offline-tests.log" 2>&1
+          mapfile -d '' -t archives < <(find "$PROFILE_WORK_ROOT/downloads/baseline" -mindepth 1 -maxdepth 1 -print0)
+          test "${#archives[@]}" -eq 1
+          sudo -n env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 LC_ALL=C LANG=C \
+            GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=gc.auto GIT_CONFIG_VALUE_2=0 \
+            python3 -B .github/script/seekdb/fts_accepted_profile.py --phase prepare \
+            --source "$GITHUB_WORKSPACE" --root "$PROFILE_WORK_ROOT/run" --driver-sha "$GITHUB_SHA" \
+            --artifact-zip "${archives[0]}"
+          sudo -n cp -- /lib/x86_64-linux-gnu/libaio.so.1t64 "$PROFILE_WORK_ROOT/run/runtime/baseline/libaio.so.1"
+          cmp -- /lib/x86_64-linux-gnu/libaio.so.1t64 "$PROFILE_WORK_ROOT/run/runtime/baseline/libaio.so.1"
+          ldd "$PROFILE_WORK_ROOT/run/runtime/baseline/seekdb" \
+            > "$PROFILE_WORK_ROOT/evidence/elf-dependencies.log" 2>&1 || true
+
+      - name: Profile one original benchmark and verify owned cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=120s 12m \
+            sudo -n env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 LC_ALL=C LANG=C \
+            GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+            GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false GIT_CONFIG_KEY_2=gc.auto GIT_CONFIG_VALUE_2=0 \
+            python3 -B .github/script/seekdb/fts_accepted_profile.py --phase validate \
+            --source "$GITHUB_WORKSPACE" --root "$PROFILE_WORK_ROOT/run" --driver-sha "$GITHUB_SHA"
+
+      - name: Collect preserved evidence after database cleanup
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f "$PROFILE_WORK_ROOT/run/report.json"; then
+            sudo -n env -i PATH="$PATH" PYTHONDONTWRITEBYTECODE=1 LC_ALL=C LANG=C \
+              python3 -B .github/script/seekdb/fts_accepted_profile.py --phase collect \
+              --source "$GITHUB_WORKSPACE" --root "$PROFILE_WORK_ROOT/run" --driver-sha "$GITHUB_SHA" \
+              --out "$PROFILE_WORK_ROOT/collected"
+          fi
+          resolved=$(realpath -- "$PROFILE_WORK_ROOT")
+          case "$resolved" in "$RUNNER_TEMP"/fts-accepted-profile-*) ;; *) exit 2 ;; esac
+          for output in "$PROFILE_WORK_ROOT/collected" "$PROFILE_WORK_ROOT/run/profiling"; do
+            if test -d "$output" && test ! -L "$output"; then
+              sudo -n chown -R --no-dereference "$(id -u):$(id -g)" -- "$output"
+            fi
+          done
+
+      - name: Preserve complete raw profile and benchmark evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fts-accepted-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PROFILE_WORK_ROOT }}/evidence/
+            ${{ env.PROFILE_WORK_ROOT }}/collected/
+            ${{ env.PROFILE_WORK_ROOT }}/run/profiling/
+          retention-days: 3
+          compression-level: 3
+          if-no-files-found: warn
+          include-hidden-files: false
