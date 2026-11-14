@@ -10,6 +10,27 @@ import fts_accepted_profile as profile
 
 
 class ProfileBoundaryTests(unittest.TestCase):
+    def test_sparse_phase_is_rejected_despite_a_successful_perf_exit(self):
+        processes = [dict(monotonic_ns=0, utime_seconds=1),
+                     dict(monotonic_ns=4000000000, utime_seconds=5)]
+        phase = dict(startMonotonicNs=0, stopMonotonicNs=4000000000, sampleCount=2)
+        result = profile.coverage(phase, processes)
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['minimumSamples'], 99)
+        phase['sampleCount'] = 300
+        self.assertTrue(profile.coverage(phase, processes)['passed'])
+
+    def test_thread_telemetry_reads_only_the_owned_task_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '101').mkdir()
+            fields = ['S'] + ['0'] * 21
+            fields[11], fields[12], fields[19] = '25', '3', '123'
+            (root / '101/stat').write_text('101 (Req Worker) ' + ' '.join(fields))
+            (root / '102').mkdir()
+            self.assertEqual(profile.owned_threads(root), {'101': dict(
+                comm='Req Worker', userTicks=25, systemTicks=3, startTicks=123)})
+
     def test_phase_ranges_keep_nanosecond_precision_and_do_not_overlap(self):
         start = 123456789012345
         marks = [dict(label='benchmark_stage', fields={'stage': f'[{i}/5]'},
@@ -51,7 +72,7 @@ class ProfileBoundaryTests(unittest.TestCase):
             failed = dict(name='accepted-profile', status='passed', cleanupPassed=False)
             with mock.patch.object(profile.validation, 'prepare_nofile'), \
                     mock.patch.object(profile.driver, 'safe_elf'), \
-                    mock.patch.object(profile.common, 'load_module', return_value=types.SimpleNamespace()), \
+                    mock.patch.object(profile.common, 'load_module', return_value=types.SimpleNamespace(_proc_snapshot=mock.Mock())), \
                     mock.patch.object(profile.validation, 'benchmark_callback'), \
                     mock.patch.object(profile.driver, 'run_owned', return_value=failed), \
                     mock.patch.object(profile.common, 'capture_group') as decode:
