@@ -5,7 +5,6 @@
 #include <dlpack/dlpack.h>
 #ifdef __HIP_PLATFORM_AMD__
 #include <cuvs/cuda_runtime.h>
-#include <omp.h>
 #else
 #include <cuda_runtime.h>
 #endif
@@ -13,37 +12,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
-
-#ifdef __HIP_PLATFORM_AMD__
-static pthread_once_t sk_cuvs_runtime_once = PTHREAD_ONCE_INIT;
-
-static void sk_cuvs_initialize_runtime(void)
-{
-  /* NN-descent overlaps two host teams, including one in a new std::thread.
-   * A caller-local omp_set_num_threads does not configure that second team.
-   * The fixed ROCm libomp exposes kmp_set_defaults for future host threads. */
-  if (getenv("OMP_NUM_THREADS") == NULL) {
-    int cpu_budget = omp_get_num_procs();
-#if defined(__linux__)
-    FILE* limit = fopen("/sys/fs/cgroup/cpu.max", "r");
-    if (limit) {
-      long long quota = 0, period = 0;
-      if (fscanf(limit, "%lld %lld", &quota, &period) == 2 && quota > 0 && period > 0) {
-        long long quota_cpus = quota / period;
-        if (quota_cpus < 1) quota_cpus = 1;
-        if (cpu_budget <= 0 || quota_cpus < cpu_budget) cpu_budget = (int)quota_cpus;
-      }
-      fclose(limit);
-    }
-#endif
-    int threads = cpu_budget > 1 ? cpu_budget / 2 : 1;
-    if (threads > 8) threads = 8;
-    char setting[48];
-    snprintf(setting, sizeof(setting), "OMP_NUM_THREADS=%d", threads);
-    kmp_set_defaults(setting);
-  }
-}
-#endif
 
 typedef struct {
   cuvsResources_t        res;
@@ -91,9 +59,6 @@ static int sk_cuvs_release(sk_cuvs_index* index, void* buffer, size_t bytes)
 
 static sk_cuvs_index* sk_cuvs_index_alloc(void)
 {
-#ifdef __HIP_PLATFORM_AMD__
-  pthread_once(&sk_cuvs_runtime_once, sk_cuvs_initialize_runtime);
-#endif
   sk_cuvs_index* index = (sk_cuvs_index*)calloc(1, sizeof(*index));
   if (index && pthread_mutex_init(&index->search_mutex, NULL) != 0) {
     free(index);
@@ -157,7 +122,7 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
   h->ip->intermediate_graph_degree = 256;
-  h->ip->nn_descent_niter = 100;
+  h->ip->nn_descent_niter = 4;
   if (cuvsCagraIndexCreate(&h->idx) != CUVS_SUCCESS) {
     sk_cuvs_report_error("build index"); goto fail_ip;
   }
@@ -212,9 +177,10 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
     if (cuvsCagraSearchParamsCreate(&sp) != CUVS_SUCCESS) { sk_cuvs_report_error("search params"); rc=14; goto done; }
     {
       size_t required_itopk = (size_t)topk * 4;
-      if (required_itopk < 512) required_itopk = 512;
+      if (required_itopk < 1536) required_itopk = 1536;
       if (sp->itopk_size < required_itopk) sp->itopk_size = required_itopk;
       sp->search_width = 4;
+      sp->algo = MULTI_CTA;
     }
     cuvsFilter f; f.type=NO_FILTER; f.addr=(uintptr_t)0;
     if (cuvsCagraSearch(h->res, sp, h->idx, &qt, &nt, &dt, f) != CUVS_SUCCESS) { sk_cuvs_report_error("CAGRA search"); rc=15; goto done; }

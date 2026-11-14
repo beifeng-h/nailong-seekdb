@@ -1,7 +1,6 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include <mutex>
 // Host-logic shim only: Windows long matches the production local shape arrays.
 // This intentionally does not validate the Linux DLPack ABI.
 enum { kDLCPU=1, kDLCUDA=2, kDLFloat=2, kDLUInt=1 };
@@ -16,7 +15,8 @@ typedef FakeResource* cuvsResources_t;
 typedef FakeIndex* cuvsCagraIndex_t;
 struct FakeIndexParams { int build_algo; size_t graph_degree, intermediate_graph_degree, nn_descent_niter; };
 typedef FakeIndexParams* cuvsCagraIndexParams_t;
-struct FakeSearchParams { size_t itopk_size, search_width; };
+enum cuvsCagraSearchAlgo { SINGLE_CTA, MULTI_CTA, MULTI_KERNEL, AUTO };
+struct FakeSearchParams { size_t itopk_size, search_width; cuvsCagraSearchAlgo algo; };
 typedef FakeSearchParams* cuvsCagraSearchParams_t;
 enum { CUVS_SUCCESS=0, CUVS_ERROR=1, NN_DESCENT=3, NO_FILTER=0 };
 struct cuvsFilter { int type; uintptr_t addr; };
@@ -50,6 +50,3 @@ int pthread_mutex_init(pthread_mutex_t*,const void*);
 int pthread_mutex_destroy(pthread_mutex_t*);
 int pthread_mutex_lock(pthread_mutex_t*);
 int pthread_mutex_unlock(pthread_mutex_t*);
-typedef std::once_flag pthread_once_t;
-#define PTHREAD_ONCE_INIT {}
-int pthread_once(pthread_once_t*, void (*)(void));

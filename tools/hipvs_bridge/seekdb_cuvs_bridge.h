@@ -27,10 +27,6 @@ int seekdb_cuvs_cagra_knn(const float* base, long n, long dim,
  * failed free is never retried; complete resource recovery is not guaranteed.
  * Free waits for queued work and releases before destroying the resource;
  * synchronization failures are reported and cleanup then remains best effort.
- * On AMD, the first build/load configures process-wide libomp defaults only
- * when OMP_NUM_THREADS is absent. Each host team uses at most eight threads
- * and half the available CPU budget (at least one); the cgroup-v2 root quota
- * is used when available. Existing environment settings take precedence.
  * All ROCm/cuVS state lives inside the .so; seekdb only ever sees these C symbols. */
 void* seekdb_cuvs_build(const float* base, long n, long dim);
 int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,

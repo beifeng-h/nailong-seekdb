@@ -16,10 +16,8 @@ Use a fresh output directory for each source version. `build-host.cmd` creates a
 
 ## What is checked
 
-- `--runtime-defaults` checks one-time libomp default configuration across repeated builds, without modifying the process environment. Run again with `OMP_NUM_THREADS=3` to check that explicit settings are preserved. The host double exposes 16 CPUs; Linux cgroup parsing and actual nested SDK threads require the GPU integration test.
-
 - Repeated requests that fit an existing workspace perform zero further RMM allocations; growth and shrink preserve query/ID/distance copying, including null distance output.
-- Graph and search parameter values remain those of the frozen source in this model.
+- Graph parameters use 4 NN-Descent iterations, intermediate degree 256 and output degree 128. Search parameters explicitly select `MULTI_CTA`, width 4 and `max(1536, 4 * topk)` intermediate results.
 - Allocation failures at each of the three growth positions return failure, leave the handle usable and balance all model allocations at teardown.
 - An injected distance-copy failure returns an error after the ID copy, and the handle remains usable for a later successful search.
 - Workspace-release failures before and after model deallocation are tested at query, neighbor and distance growth in 128 and 256 dimensions. They return failure before CAGRA, disable further search/serialization, and never retry the ambiguous pointer. Other known-owned buffers are each freed once. Model allocations left live by a failure before deallocation remain explicitly unknown; they are not counted as recovered GPU memory.
@@ -49,6 +47,6 @@ For a red control, compile the fixture against the exact previous bridge at `441
 
 ## Frozen comparison
 
-The frozen V5 bridge at commit `634888d9b037153fa143d2c913ba4b25503e1d62` has SHA256 `296fafff4bd8d86ff2222840d44a23f56ba687acd1393879c8a0e922e7620b3e`. Compile that exact source with this fixture and run without arguments for common plumbing checks. `--require-reuse` must fail specifically because its second same-size query performs three further allocations; any build failure or unrelated runtime failure is not an accepted red result.
+The frozen V5 bridge at commit `634888d9b037153fa143d2c913ba4b25503e1d62` has SHA256 `296fafff4bd8d86ff2222840d44a23f56ba687acd1393879c8a0e922e7620b3e`. Supply `--frozen-parameters` as the fourth argument to `build-host.cmd` when compiling that source or a previous 100-iteration, `SINGLE_CTA` source. Use an empty third argument for the default Visual Studio path. This selects the frozen parameter expectations in the fixture. Run without arguments for common plumbing checks. `--require-reuse` must fail specifically because its second same-size query performs three further allocations. Retain the actual failure output.
 
 The candidate must compile and run the full `--require-reuse` suite with exit zero. Retain the exact source/header/fixture hashes, compiler output and full test log. GPU acceptance still requires the official fixed offline build, real fixed-library GPU execution, persistence/Recall/resource checks and paired SQL measurements described in the design document.

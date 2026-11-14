@@ -17,7 +17,15 @@
 #include <thread>
 #include <vector>
 #include <io.h>
-#include <omp.h>
+#ifdef SEEKDB_HOST_FROZEN_PARAMETERS
+static constexpr size_t expected_build_iterations=100;
+static constexpr size_t expected_minimum_itopk=512;
+static constexpr cuvsCagraSearchAlgo expected_search_algorithm=SINGLE_CTA;
+#else
+static constexpr size_t expected_build_iterations=4;
+static constexpr size_t expected_minimum_itopk=1536;
+static constexpr cuvsCagraSearchAlgo expected_search_algorithm=MULTI_CTA;
+#endif
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(std::string(__func__)+": "+#x); } while (0)
 struct PendingWork {
  enum class Kind { Copy, Search, Free };
@@ -64,17 +72,6 @@ struct State {
 } S;
 static int64_t snapshot_n=0, snapshot_dim=0;
 static thread_local const char* sdk_error=nullptr;
-static int runtime_defaults_calls=0;
-static std::string runtime_defaults;
-extern "C" int omp_get_num_procs(void) { return 16; }
-extern "C" void kmp_set_defaults(const char* value) {
- ++runtime_defaults_calls;
- runtime_defaults=value;
-}
-int pthread_once(pthread_once_t* once, void (*initialize)(void)) {
- std::call_once(*once,initialize);
- return 0;
-}
 static int api_ok() { sdk_error=nullptr; return CUVS_SUCCESS; }
 static int api_error(const char* detail) { sdk_error=detail; return CUVS_ERROR; }
 static const char* failure_text(ApiFailure failure) {
@@ -163,11 +160,11 @@ int cuvsCagraIndexParamsDestroy(cuvsCagraIndexParams_t p) { S.stream_events.push
 int cuvsCagraIndexCreate(cuvsCagraIndex_t* p) { if(inject_failure(ApiFailure::Index)) return CUVS_ERROR; *p=new FakeIndex; ++S.indexes; return api_ok(); }
 int cuvsCagraIndexDestroy(cuvsCagraIndex_t p) { S.stream_events.push_back(StreamEvent::Index); S.cleanup.push_back(Cleanup::Index); delete p; --S.indexes; return api_ok(); }
 int cuvsCagraBuild(cuvsResources_t,cuvsCagraIndexParams_t p,DLManagedTensor* t,cuvsCagraIndex_t i) {
- CHECK(p->build_algo==NN_DESCENT); CHECK(p->graph_degree==128); CHECK(p->intermediate_graph_degree==256); CHECK(p->nn_descent_niter==100);
+ CHECK(p->build_algo==NN_DESCENT); CHECK(p->graph_degree==128); CHECK(p->intermediate_graph_degree==256); CHECK(p->nn_descent_niter==expected_build_iterations);
  if(inject_failure(ApiFailure::Build)) return CUVS_ERROR;
  i->n=t->dl_tensor.shape[0]; i->dim=t->dl_tensor.shape[1]; return api_ok();
 }
-int cuvsCagraSearchParamsCreate(cuvsCagraSearchParams_t* p) { if(inject_failure(ApiFailure::SearchParams)) return CUVS_ERROR; *p=new FakeSearchParams{64,1}; std::lock_guard<std::mutex> lk(S.mu); ++S.search_params; return 0; }
+int cuvsCagraSearchParamsCreate(cuvsCagraSearchParams_t* p) { if(inject_failure(ApiFailure::SearchParams)) return CUVS_ERROR; *p=new FakeSearchParams{64,1,SINGLE_CTA}; std::lock_guard<std::mutex> lk(S.mu); ++S.search_params; return 0; }
 int cuvsCagraSearchParamsDestroy(cuvsCagraSearchParams_t p) {
  std::lock_guard<std::mutex> lock(S.mu);
  for(auto* resource:S.active_resources) for(const auto& work:resource->stream.pending)
@@ -235,7 +232,7 @@ int cuvsCagraSearch(cuvsResources_t resource,cuvsCagraSearchParams_t p,cuvsCagra
  std::lock_guard<std::mutex> lk(S.mu); api_entry(); ++S.searches;
  const long nq=q->dl_tensor.shape[0], dim=q->dl_tensor.shape[1], topk=n->dl_tensor.shape[1];
  CHECK(dim==idx->dim); CHECK(n->dl_tensor.shape[0]==nq); CHECK(d->dl_tensor.shape[0]==nq); CHECK(d->dl_tensor.shape[1]==topk);
- CHECK(p->itopk_size==std::max<size_t>(512,static_cast<size_t>(topk)*4)); CHECK(p->search_width==4); CHECK(f.type==NO_FILTER); CHECK(f.addr==0);
+ CHECK(p->itopk_size==std::max<size_t>(expected_minimum_itopk,static_cast<size_t>(topk)*4)); CHECK(p->search_width==4); CHECK(p->algo==expected_search_algorithm); CHECK(f.type==NO_FILTER); CHECK(f.addr==0);
  CHECK(device_range(q->dl_tensor.data,sizeof(float)*nq*dim)); CHECK(device_range(n->dl_tensor.data,sizeof(unsigned)*nq*topk)); CHECK(device_range(d->dl_tensor.data,sizeof(float)*nq*topk));
  if(inject_failure(ApiFailure::Search)) return CUVS_ERROR;
  auto* queries=static_cast<float*>(q->dl_tensor.data); auto* ids=static_cast<unsigned*>(n->dl_tensor.data); auto* dist=static_cast<float*>(d->dl_tensor.data);
@@ -278,7 +275,7 @@ static void reuse_and_growth(bool strict) {
  std::cout<<"steady allocation delta="<<(second-first)<<" (required reuse: 0; baseline: 3)\n";
  if(strict) CHECK(second==first);
  search(h,3,4,9); const int grown=S.alloc_calls; search(h,2,2,11,false); if(strict) CHECK(S.alloc_calls==grown);
- // Different topk sizes retain exact per-call search params, including >512 itopk.
+ // Different topk sizes retain exact per-call workspace and search parameters.
  search(h,1,129,5); search(h,1,1,4); seekdb_cuvs_free(h); clean_state();
  std::cout<<"PASS reuse/growth/copy/params/free\n";
 }
@@ -596,30 +593,14 @@ static void stream_ordering() {
  std::cout<<"PASS stream-ordering regression suite (HOST ONLY)\n";
 }
 int main(int argc,char** argv) {
- const bool runtime_only=argc==2 && std::string(argv[1])=="--runtime-defaults";
  const bool strict=argc==2 && std::string(argv[1])=="--require-reuse";
  const bool before_only=argc==2 && std::string(argv[1])=="--release-failure-before";
  const bool after_only=argc==2 && std::string(argv[1])=="--release-failure-after";
  const bool diagnostic_only=argc==2 && std::string(argv[1])=="--lifecycle-diagnostics";
  const bool copy_only=argc==2 && std::string(argv[1])=="--copy-serialize-diagnostics";
  const bool stream_only=argc==2 && std::string(argv[1])=="--stream-ordering";
- if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only && !stream_only && !runtime_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics|--stream-ordering|--runtime-defaults]\n"; return 2;}
+ if(argc>1 && !strict && !before_only && !after_only && !diagnostic_only && !copy_only && !stream_only) {std::cerr<<"usage: host_test [--require-reuse|--release-failure-before|--release-failure-after|--lifecycle-diagnostics|--copy-serialize-diagnostics|--stream-ordering]\n"; return 2;}
  try {
-  if(runtime_only) {
-   const char* configured=std::getenv("OMP_NUM_THREADS");
-   const std::string original=configured?configured:"";
-   void* handle=build();
-   CHECK(runtime_defaults_calls==(configured?0:1));
-   if(!configured) CHECK(runtime_defaults=="OMP_NUM_THREADS=8");
-   seekdb_cuvs_free(handle);
-   handle=build(); seekdb_cuvs_free(handle);
-   CHECK(runtime_defaults_calls==(configured?0:1));
-   const char* after=std::getenv("OMP_NUM_THREADS");
-   CHECK((configured && after && original==after) || (!configured && !after));
-   clean_state();
-   std::cout<<"PASS runtime defaults initialized once; explicit environment preserved\n";
-   return 0;
-  }
   if(before_only || after_only) {release_failure_disables_handle(after_only); return 0;}
   if(diagnostic_only) {lifecycle_diagnostics(); return 0;}
   if(copy_only) {copy_serialize_diagnostics(); return 0;}

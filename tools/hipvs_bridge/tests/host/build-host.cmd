@@ -10,12 +10,14 @@ for %%I in ("%BRIDGE%") do set "BRIDGE=%%~fI"
 for %%I in ("%BRIDGE%") do set "BRIDGEDIR=%%~dpI"
 set "VSDEVCMD=%~3"
 if not defined VSDEVCMD set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat"
+set "PARAMETER_FLAGS="
+if "%~4"=="--frozen-parameters" set "PARAMETER_FLAGS=/DSEEKDB_HOST_FROZEN_PARAMETERS"
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 if errorlevel 1 exit /b 2
 call "%VSDEVCMD%" -no_logo -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b %errorlevel%
 pushd "%OUTDIR%"
-cl.exe /nologo /std:c++17 /D__HIP_PLATFORM_AMD__ /EHsc /W4 /TP /I"%TASK%include" /I"%BRIDGEDIR%." "%BRIDGE%" "%TASK%host_test.cpp" /Fe:"%OUTDIR%\host_test.exe"
+cl.exe /nologo /std:c++17 /D__HIP_PLATFORM_AMD__ %PARAMETER_FLAGS% /EHsc /W4 /TP /I"%TASK%include" /I"%BRIDGEDIR%." "%BRIDGE%" "%TASK%host_test.cpp" /Fe:"%OUTDIR%\host_test.exe"
 set "RESULT=%errorlevel%"
 popd
 exit /b %RESULT%
