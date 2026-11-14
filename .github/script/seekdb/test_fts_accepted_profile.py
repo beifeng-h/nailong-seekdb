@@ -10,6 +10,19 @@ import fts_accepted_profile as profile
 
 
 class ProfileBoundaryTests(unittest.TestCase):
+    def test_phase_ranges_keep_nanosecond_precision_and_do_not_overlap(self):
+        start = 123456789012345
+        marks = [dict(label='benchmark_stage', fields={'stage': f'[{i}/5]'},
+                      monotonic_ns=start + i * 1000000001) for i in range(1, 6)]
+        marks.append(dict(label='accepted_original_benchmark_finished', monotonic_ns=start + 7000000000))
+        phases = profile.phase_windows(marks)
+        self.assertEqual(phases['build']['perfTime'], '123459.789012348,123460.789012348')
+        self.assertEqual(phases['build']['stopMonotonicNs'], phases['tokenize']['startMonotonicNs'])
+
+    def test_missing_stage_is_not_silently_assigned_to_another_phase(self):
+        with self.assertRaisesRegex(RuntimeError, 'five original'):
+            profile.phase_windows([])
+
     def test_prepare_removes_build_and_pair_schedule(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
