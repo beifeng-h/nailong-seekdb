@@ -18,7 +18,7 @@ import fts_count_projection_diagnostics as archived
 import fts_ddl_row_cache_validation as row_cache
 
 
-driver, common = archived.driver, archived.common
+driver, common = row_cache.driver, row_cache.common
 BASE_SOURCE = '2abe2633f85f41c1825fb144b29e2d3496e614df'
 CANDIDATE = '603075716540b4f14dff9e8650bbcb0d4d60d338'
 CANDIDATE_TREE = '28040eace1ed1439f7e28d2dd4fc4ac7e47fe901'
@@ -49,6 +49,7 @@ archived.PINS = {
 
 def configure():
     row_cache.configure()
+    archived.driver = driver
     driver.SCHEDULE = SCHEDULE
 
 
@@ -162,7 +163,7 @@ def run(args):
     signal.alarm(budget)
     try:
         driver.resource_record(args.root / 'evidence/resources.json', 12 * 1024**3)
-        archived.count_only.parent.prepare_nofile(argparse.Namespace(root=args.root, phase='run'))
+        row_cache.validation.prepare_nofile(argparse.Namespace(root=args.root, phase='run'))
         runtime_args, identities = prepare(args, report)
         profile_path = args.source / '.github/script/seekdb/fts-profile-runtime/run_profile.py'
         adapter = common.load_module('repeat_original_profile_adapter', profile_path)

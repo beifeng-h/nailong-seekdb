@@ -28,6 +28,14 @@ def make_rounds():
 
 
 class RepeatScoringTests(unittest.TestCase):
+    def test_reuse_and_benchmark_share_the_frozen_candidate_driver(self):
+        repeat.configure()
+        self.assertIs(repeat.driver, repeat.row_cache.validation.driver)
+        self.assertIs(repeat.archived.driver, repeat.driver)
+        self.assertIs(repeat.driver.source_proof, repeat.row_cache.source_proof)
+        self.assertEqual(repeat.driver.BASE, repeat.BASE_SOURCE)
+        self.assertEqual(repeat.driver.SCHEDULE, repeat.SCHEDULE)
+
     def test_four_paired_results_preserve_negative_improvements(self):
         result = repeat.summarize(make_rounds(), BASELINE, SCORER)
         self.assertEqual([(x['baseline'], x['candidate']) for x in result['pairs']], list(repeat.PAIRS))
