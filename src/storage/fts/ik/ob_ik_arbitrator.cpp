@@ -180,8 +180,7 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
               bool is_ignore = false;
               if (ObFTCharUtil::CharType::CHINESE == type) {
                 token.type_ = ObIKTokenType::IK_CHINESE_TOKEN;
-                if (OB_FAIL(ctx.result_list().push_back(token))) {
-                }
+                ctx.result_list().push_back(token);
               } else if (ObFTCharUtil::CharType::OTHER_CJK == type) {
                 if (OB_FAIL(ObFTCharUtil::is_ignore_single_cjk(ctx.collation(),
                                                                ctx.fulltext() + current,
@@ -189,8 +188,7 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
                                                                is_ignore))) {
                 } else if (!is_ignore) {
                   token.type_ = ObIKTokenType::IK_OTHER_CJK_TOKEN;
-                  if (OB_FAIL(ctx.result_list().push_back(token))) {
-                  }
+                  ctx.result_list().push_back(token);
                 } else {
                 }
               }
