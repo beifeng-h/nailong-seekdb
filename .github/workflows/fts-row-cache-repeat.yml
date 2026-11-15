@@ -58,7 +58,12 @@ jobs:
             fetch --atomic --no-auto-maintenance --no-tags --depth=1 origin \
             "$GITHUB_SHA" \
             2abe2633f85f41c1825fb144b29e2d3496e614df:refs/heads/fts-validation/frozen-base \
-            603075716540b4f14dff9e8650bbcb0d4d60d338:refs/heads/fts-validation/frozen-candidate
+            603075716540b4f14dff9e8650bbcb0d4d60d338:refs/heads/fts-validation/frozen-candidate \
+            5bce9e06d1281347ad61344e4b01fab9158c58a2:refs/heads/fts-validation/frozen-input-reference
+          for sha in "$GITHUB_SHA" 2abe2633f85f41c1825fb144b29e2d3496e614df \
+                     603075716540b4f14dff9e8650bbcb0d4d60d338 5bce9e06d1281347ad61344e4b01fab9158c58a2; do
+            git -C "$GITHUB_WORKSPACE" cat-file -e "$sha^{commit}"
+          done
           git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"

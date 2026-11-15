@@ -66,6 +66,12 @@ class RepeatScoringTests(unittest.TestCase):
         ):
             self.assertIn('- ' + path, trigger)
 
+    def test_input_reference_is_fetched_and_checked(self):
+        workflow = (ROOT / '.github/workflows/fts-row-cache-repeat.yml').read_text(encoding='utf8')
+        reference = repeat.driver.native_harness.REFERENCE
+        self.assertIn(reference + ':refs/heads/fts-validation/frozen-input-reference', workflow)
+        self.assertIn('cat-file -e "$sha^{commit}"', workflow)
+
 
 if __name__ == '__main__':
     unittest.main()
