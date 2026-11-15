@@ -13,8 +13,10 @@ class StorageWorkTests(unittest.TestCase):
         def sql(call, out, label, query):
             calls.append(label)
             if label == 'decoder-major-version-before':
+                self.assertEqual(query, 'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION;')
                 return '100\t100\n'
             if label == 'decoder-major-version-after':
+                self.assertEqual(query, 'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION;')
                 return '200\t200\n'
             if label == 'decoder-storage-before':
                 return expected

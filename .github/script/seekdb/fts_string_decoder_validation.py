@@ -87,16 +87,16 @@ def storage_work(call, out):
     before = driver.sql(call, out, 'decoder-storage-before', query)
     driver.require(before == expected, 'Before-freeze storage bytes differ from independently generated rows')
     before_version = driver.sql(call, out, 'decoder-major-version-before',
-        'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION ORDER BY tenant_id;')
+        'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION;')
     driver.sql(call, out, 'decoder-major-freeze', 'ALTER SYSTEM MAJOR FREEZE;')
     deadline = time.monotonic() + 150
     attempts = 0
     while True:
         status = driver.sql(call, out, 'decoder-major-version-after',
-            'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION ORDER BY tenant_id;')
+            'SELECT frozen_scn,last_scn FROM oceanbase.DBA_OB_MAJOR_COMPACTION;')
         values = [line.split('\t') for line in status.splitlines()]
         old = [line.split('\t') for line in before_version.splitlines()]
-        complete = (len(values) == len(old) > 0 and
+        complete = (len(values) == len(old) == 1 and
                     all(len(x) == len(y) == 2 and all(z.isdigit() for z in x + y) and
                         int(x[0]) > int(y[0]) and int(x[1]) >= int(x[0])
                         for x, y in zip(values, old)))
