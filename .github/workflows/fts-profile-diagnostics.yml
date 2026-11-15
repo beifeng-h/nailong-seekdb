@@ -54,6 +54,9 @@ on:
       - .github/script/seekdb/fts_ddl_row_cache_validation.py
       - .github/script/seekdb/test_fts_ddl_row_cache_validation.py
       - .github/workflows/fts-ddl-row-cache-validation.yml
+      - .github/script/seekdb/fts_row_cache_repeat.py
+      - .github/script/seekdb/test_fts_row_cache_repeat.py
+      - .github/workflows/fts-row-cache-repeat.yml
       - .github/script/seekdb/fts_expr_cache_validation.py
       - .github/script/seekdb/fts_ik_result_array_validation.py
       - .github/script/seekdb/test_fts_ik_result_array_validation.py
