@@ -51,12 +51,10 @@ public:
   void reset();
   void reuse();
   TO_STRING_KV(K_(row_idx), K_(is_fts_index_aux), K_(helper), K_(is_inited),
-               "row_count", words_.size());
+               "row_count", rows_.count());
 private:
   lib::MemoryContext merge_memctx_;
-  storage::ObFTWordMap words_;
-  storage::ObFTWordMap::const_iterator word_iter_;
-  blocksstable::ObDatumRow *row_;
+  ObDomainIndexRow rows_;
   uint64_t row_idx_;
   bool is_fts_index_aux_;
   storage::ObFTParseHelper helper_;

@@ -35,7 +35,6 @@ namespace oceanbase
 namespace sql
 {
 using storage::ObFTWordMap;
-using blocksstable::ObDatumRow;
 
 
 ObObjDatumMapType ObFTIndexRowCache::FTS_INDEX_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
@@ -45,10 +44,7 @@ ObExprOperatorType ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE[] = {T_FUN_SYS_WORD_SE
 ObExprOperatorType ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE[] = {T_FUN_SYS_DOC_ID, T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
 
 ObFTIndexRowCache::ObFTIndexRowCache()
-  : merge_memctx_(nullptr),
-    words_(),
-    word_iter_(),
-    row_(nullptr),
+  : rows_(),
     row_idx_(0),
     is_fts_index_aux_(true),
     helper_(),
@@ -73,9 +69,6 @@ int ObFTIndexRowCache::init(
     ret = OB_INIT_TWICE;
   } else if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(merge_memctx_, param))) {
   } else if (OB_FAIL(helper_.init(&(merge_memctx_->get_arena_allocator()), parser_name, parser_properties))) {
-  } else if (OB_ISNULL(row_ = OB_NEW(ObDatumRow, "FTSIndexRow"))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(row_->init(merge_memctx_->get_arena_allocator(), 4))) {
   } else {
     row_idx_ = 0;
     is_fts_index_aux_ = is_fts_index_aux;
@@ -92,31 +85,20 @@ int ObFTIndexRowCache::segment(const common::ObObjMeta &ft_obj_meta,
                                const ObString &fulltext)
 {
   int ret = OB_SUCCESS;
-  static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
-  const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
-  const ObCollationType type = ft_obj_meta.get_collation_type();
-  int64_t doc_length = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
   } else if (FALSE_IT(reuse())) {
-  } else if (OB_UNLIKELY(!ft_obj_meta.is_valid())) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (0 == fulltext.length()) {
-    ret = OB_ITER_END;
-  } else if (OB_FAIL(words_.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
-  } else if (OB_UNLIKELY(CS_TYPE_INVALID == type || CS_TYPE_PINYIN_BEGIN_MARK <= type)) {
-    ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(helper_.segment(ft_obj_meta, fulltext.ptr(), fulltext.length(), doc_length, words_))) {
-  } else if (0 == words_.size()) {
-    ret = OB_ITER_END;
+  } else if (OB_FAIL(ObDASDomainUtils::generate_fulltext_word_rows(merge_memctx_->get_arena_allocator(),
+                                                                   &helper_,
+                                                                   ft_obj_meta,
+                                                                   doc_id_datum,
+                                                                   fulltext,
+                                                                   is_fts_index_aux_,
+                                                                   rows_))) {
   } else {
     row_idx_ = 0;
-    word_iter_ = words_.begin();
-    const int64_t doc_id_idx = is_fts_index_aux_ ? 1 : 0;
-    row_->storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
-    row_->storage_datums_[3].set_uint(doc_length);
   }
-  LOG_TRACE("word segment", K(ret), K(row_idx_), K(words_.size()), K(doc_id_datum), K(fulltext));
+  LOG_TRACE("word segment", K(ret), K(row_idx_), K(rows_.count()), K(doc_id_datum), K(fulltext));
   return ret;
 }
 
@@ -125,25 +107,19 @@ int ObFTIndexRowCache::get_next_row(blocksstable::ObDatumRow *&row)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
-  } else if (row_idx_ >= words_.size()) {
+  } else if (row_idx_ >= rows_.count()) {
     ret = OB_ITER_END;
   } else {
-    const int64_t word_idx = is_fts_index_aux_ ? 0 : 1;
-    row_->storage_datums_[word_idx].set_datum(word_iter_->first.get_word());
-    row_->storage_datums_[2].set_uint(word_iter_->second);
-    row = row_;
-    ++word_iter_;
+    row = (rows_[row_idx_]);
     ++row_idx_;
   }
-  LOG_TRACE("get next row", K(ret), KPC(row), K(row_idx_), K(words_.size()));
+  LOG_TRACE("get next row", K(ret), KPC(row), K(row_idx_), K(rows_.count()));
   return ret;
 }
 
 void ObFTIndexRowCache::reset()
 {
-  words_.destroy();
-  word_iter_ = ObFTWordMap::const_iterator();
-  OB_DELETE(ObDatumRow, "FTSIndexRow", row_);
+  rows_.reset();
   row_idx_ = 0;
   is_fts_index_aux_ = true;
   helper_.reset();
@@ -156,11 +132,7 @@ void ObFTIndexRowCache::reset()
 
 void ObFTIndexRowCache::reuse()
 {
-  words_.destroy();
-  word_iter_ = ObFTWordMap::const_iterator();
-  if (OB_NOT_NULL(row_)) {
-    row_->reuse();
-  }
+  rows_.reuse();
   row_idx_ = 0;
   if (OB_NOT_NULL(merge_memctx_)) {
     merge_memctx_->reset_remain_one_page();
