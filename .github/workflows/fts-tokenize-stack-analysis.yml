@@ -1,0 +1,105 @@
+name: SeekDB saved TOKENIZE stack analysis
+
+on:
+  push:
+    branches: [perf/fts-profile-diagnostics-20261111]
+    paths:
+      - .github/script/seekdb/fts_tokenize_stack_analysis.py
+      - .github/script/seekdb/test_fts_tokenize_stack_analysis.py
+      - .github/workflows/fts-tokenize-stack-analysis.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: seekdb-fts-free-linux-validation
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    if: ${{ github.repository == 'beifeng-h/nailong-seekdb' && github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      LC_ALL: C
+      LANG: C
+      DEBUGINFOD_URLS: ''
+    steps:
+      - name: Initialize isolated analysis paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/fts-tokenize-stacks-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$work" && test ! -L "$work"
+          mkdir -m 0700 "$work" "$work/evidence" "$work/recording" "$work/binary"
+          printf 'STACK_WORK_ROOT=%s\n' "$work" >> "$GITHUB_ENV"
+
+      - name: Check out the exact analysis driver
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            .github/script/seekdb/fts_tokenize_stack_analysis.py
+            .github/script/seekdb/test_fts_tokenize_stack_analysis.py
+          sparse-checkout-cone-mode: false
+
+      - name: Download the verified recording
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 5
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43852576463'
+          artifact-ids: '14219460962'
+          github-token: ${{ github.token }}
+          path: ${{ env.STACK_WORK_ROOT }}/recording
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download the exact preserved executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 10
+        with:
+          repository: beifeng-h/nailong-seekdb
+          run-id: '43667118747'
+          artifact-ids: '14144705933'
+          github-token: ${{ github.token }}
+          path: ${{ env.STACK_WORK_ROOT }}/binary
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Verify inputs and decode selected stacks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s .github/script/seekdb -p test_fts_tokenize_stack_analysis.py -v \
+            > "$STACK_WORK_ROOT/evidence/offline-tests.log" 2>&1
+          perf_path=
+          while IFS= read -r candidate; do
+            test -x "$candidate" || continue
+            if timeout 5s "$candidate" --version > "$STACK_WORK_ROOT/evidence/perf-probe.log" 2>&1; then
+              perf_path=$candidate
+              break
+            fi
+          done < <(command -v perf || true; find /usr/lib/linux-tools -maxdepth 3 -type f -name perf 2>/dev/null | sort -V -r || true)
+          test -n "$perf_path"
+          export PATH="$(dirname -- "$perf_path"):$PATH"
+          mapfile -d '' -t recordings < <(find "$STACK_WORK_ROOT/recording" -mindepth 1 -maxdepth 1 -type f -print0)
+          mapfile -d '' -t binaries < <(find "$STACK_WORK_ROOT/binary" -mindepth 1 -maxdepth 1 -type f -print0)
+          test "${#recordings[@]}" -eq 1 && test "${#binaries[@]}" -eq 1
+          python3 -B .github/script/seekdb/fts_tokenize_stack_analysis.py \
+            --recording "${recordings[0]}" --binary-zip "${binaries[0]}" --work "$STACK_WORK_ROOT"
+
+      - name: Preserve bounded stack evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fts-tokenize-stacks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.STACK_WORK_ROOT }}/evidence/
+          if-no-files-found: warn
+          retention-days: 3
+          compression-level: 3
+          include-hidden-files: false

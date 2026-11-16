@@ -14,6 +14,9 @@ on:
       - .github/script/seekdb/fts_tokenize_focused_profile.py
       - .github/script/seekdb/test_fts_tokenize_focused_profile.py
       - .github/workflows/fts-tokenize-focused-profile.yml
+      - .github/script/seekdb/fts_tokenize_stack_analysis.py
+      - .github/script/seekdb/test_fts_tokenize_stack_analysis.py
+      - .github/workflows/fts-tokenize-stack-analysis.yml
       - src/sql/engine/expr/ob_expr_tokenize.cpp
       - src/sql/engine/expr/ob_expr_tokenize.h
       - src/storage/fts/ob_fts_parser_helper.cpp
