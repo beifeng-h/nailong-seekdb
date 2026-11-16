@@ -4,6 +4,8 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - .github/script/seekdb/fts_empty_wordmap_validation.py
+      - .github/workflows/fts-empty-wordmap-validation.yml
       - src/observer/composition/retrieval/ob_das_legacy_tr_merge_iter.cpp
       - .github/script/seekdb/fts_match_only_filter_validation.py
       - .github/script/seekdb/test_fts_match_only_filter_validation.py
