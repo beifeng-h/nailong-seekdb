@@ -60,6 +60,9 @@ on:
       - .github/script/seekdb/fts_string_decoder_validation.py
       - .github/script/seekdb/test_fts_string_decoder_validation.py
       - .github/workflows/fts-string-decoder-validation.yml
+      - .github/script/seekdb/fts_string_decoder_repeat.py
+      - .github/script/seekdb/test_fts_string_decoder_repeat.py
+      - .github/workflows/fts-string-decoder-repeat.yml
       - .github/workflows/fts-row-cache-repeat.yml
       - .github/script/seekdb/fts_expr_cache_validation.py
       - .github/script/seekdb/fts_ik_result_array_validation.py
