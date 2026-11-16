@@ -78,13 +78,31 @@ jobs:
           python3 -B -m unittest discover -s .github/script/seekdb -p test_fts_tokenize_stack_analysis.py -v \
             > "$STACK_WORK_ROOT/evidence/offline-tests.log" 2>&1
           perf_path=
-          while IFS= read -r candidate; do
-            test -x "$candidate" || continue
-            if timeout 5s "$candidate" --version > "$STACK_WORK_ROOT/evidence/perf-probe.log" 2>&1; then
-              perf_path=$candidate
-              break
-            fi
-          done < <(command -v perf || true; find /usr/lib/linux-tools -maxdepth 3 -type f -name perf 2>/dev/null | sort -V -r || true)
+          probe_perf() {
+            while IFS= read -r candidate; do
+              test -x "$candidate" || continue
+              for attempt in 1 2; do
+                printf 'candidate=%s attempt=%s\n' "$candidate" "$attempt" >> "$STACK_WORK_ROOT/evidence/perf-probe.log"
+                if timeout --signal=TERM --kill-after=3s 15s "$candidate" --version \
+                    >> "$STACK_WORK_ROOT/evidence/perf-probe.log" 2>&1; then
+                  perf_path=$candidate
+                  return 0
+                else
+                  status=$?
+                  printf 'probe_exit=%s\n' "$status" >> "$STACK_WORK_ROOT/evidence/perf-probe.log"
+                fi
+              done
+            done < <(command -v perf || true; find /usr/lib/linux-tools -maxdepth 3 -type f -name perf 2>/dev/null | sort -V -r || true)
+            return 1
+          }
+          if ! probe_perf; then
+            sudo -n apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 update --error-on=any \
+              >> "$STACK_WORK_ROOT/evidence/perf-probe.log" 2>&1
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              linux-tools-common linux-tools-generic >> "$STACK_WORK_ROOT/evidence/perf-probe.log" 2>&1
+            probe_perf
+          fi
           test -n "$perf_path"
           export PATH="$(dirname -- "$perf_path"):$PATH"
           mapfile -d '' -t recordings < <(find "$STACK_WORK_ROOT/recording" -mindepth 1 -maxdepth 1 -type f -print0)
