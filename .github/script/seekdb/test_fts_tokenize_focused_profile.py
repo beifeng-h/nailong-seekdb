@@ -50,8 +50,113 @@ class FocusedTokenizeProfileTests(unittest.TestCase):
         coverage = focused.request_coverage(processes, {101: 150, 102: 300}, 5, 50)
         self.assertEqual(coverage['observedUserTicks'], 200)
         self.assertEqual(coverage['requestSamples'], 150)
-        self.assertTrue(coverage['passed'])
-        self.assertFalse(focused.request_coverage(processes, {101: 20}, 5, 50)['passed'])
+        self.assertFalse(coverage['passed'])
+        self.assertEqual(coverage['reusedThreadIds'], [101])
+        self.assertTrue(focused.request_coverage(processes[:3], {101: 150}, 5, 50)['passed'])
+        self.assertFalse(focused.request_coverage(processes[:3], {101: 20}, 5, 50)['passed'])
+
+    def test_busy_unobserved_worker_invalidates_aggregate_coverage(self):
+        def sample(time, one, two):
+            return dict(monotonic_ns=time, clock_ticks_per_second=100,
+                        ownedThreads={'101': dict(comm='ReqWorker', userTicks=one, startTicks=8),
+                                      '102': dict(comm='ReqWorker', userTicks=two, startTicks=9)})
+        processes = [sample(10, 0, 0), sample(20, 150, 100), sample(30, 250, 200)]
+        coverage = focused.request_coverage(processes, {101: 240}, 5, 40)
+        self.assertFalse(coverage['passed'])
+        self.assertEqual(coverage['uncoveredBusyThreads'], [102])
+
+    def test_attach_waits_for_stable_active_request_thread_and_output(self):
+        probe = focused.WorkerReadiness(start_ns=0)
+        thread = lambda ticks, start=1: {'101': dict(comm='ReqWorker', userTicks=ticks, startTicks=start)}
+        self.assertFalse(probe.observe(100_000_000, thread(1), 0))
+        self.assertFalse(probe.observe(800_000_000, thread(11), 0))
+        self.assertFalse(probe.observe(1_200_000_000, thread(21), 100))
+        self.assertTrue(probe.observe(1_600_000_000, thread(35), 100))
+        self.assertFalse(probe.observe(1_700_000_000, thread(36, start=2), 100))
+
+    def test_readiness_failure_reaps_only_owned_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            client = mock.Mock(pid=123)
+            call = types.SimpleNamespace(obclient=out / 'obclient', port=7500)
+            with mock.patch.object(focused, 'ROUNDS', 1), \
+                    mock.patch.object(focused.subprocess, 'Popen', return_value=client), \
+                    mock.patch.object(focused, 'wait_for_request_activity', side_effect=RuntimeError('no worker')), \
+                    mock.patch.object(focused, 'reap_client', return_value=False) as reap:
+                with self.assertRaisesRegex(RuntimeError, 'no worker'):
+                    focused.capture_repeated_sql(call, out, 42, out / 'identity.json', out / 'capture',
+                                                 mock.Mock(), 'ik', 'SELECT 1;')
+            reap.assert_called_once_with(client)
+
+    def test_recording_starts_after_client_activity_and_reaps_after_exit(self):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            call = types.SimpleNamespace(obclient=out / 'obclient', port=7500)
+
+            class Client:
+                pid = 123
+                running = True
+
+                def poll(self):
+                    return None if self.running else 0
+
+                def wait(self, timeout):
+                    events.append('client_finished')
+                    output_stream.write(b'result\nresult\n')
+                    output_stream.flush()
+                    self.running = False
+                    return 0
+
+            class Capture:
+                def __init__(self, identity, directory):
+                    pass
+
+                def __enter__(self):
+                    events.append('capture_started')
+                    return self
+
+                def mark(self, label, **fields):
+                    events.append(label)
+
+                def __exit__(self, *args):
+                    events.append('capture_finished')
+
+            client = Client()
+
+            def launch(*args, **kwargs):
+                nonlocal output_stream
+                output_stream = kwargs['stdout']
+                events.append('client_started')
+                return client
+
+            def ready(*args):
+                events.append('request_active')
+                return dict(clientStillRunning=True, readyMonotonicNs=1, observations=[])
+
+            output_stream = None
+            with mock.patch.object(focused, 'ROUNDS', 2), \
+                    mock.patch.object(focused.subprocess, 'Popen', side_effect=launch), \
+                    mock.patch.object(focused, 'wait_for_request_activity', side_effect=ready), \
+                    mock.patch.object(focused, 'reap_client', return_value=True):
+                output, _ = focused.capture_repeated_sql(call, out, 42, out / 'identity.json', out / 'capture',
+                    types.SimpleNamespace(PerfCapture=Capture), 'ik', 'SELECT 1;')
+            self.assertEqual(output, 'result\nresult\n')
+            self.assertEqual(events, ['client_started', 'request_active', 'capture_started',
+                'sample_window_started', 'client_finished', 'sample_window_finished', 'capture_finished'])
+
+    def test_early_client_exit_is_rejected_before_thread_inspection(self):
+        with mock.patch.object(focused.profile, 'owned_threads') as threads:
+            with self.assertRaisesRegex(RuntimeError, 'client exited'):
+                focused.wait_for_request_activity(mock.Mock(poll=mock.Mock(return_value=0)),
+                                                  Path('.'), Path('unused'))
+        threads.assert_not_called()
+
+    def test_request_thread_hotspot_percent_uses_filtered_sample_count(self):
+        profile = dict(sampleCount=137, functionHotspots=[dict(samples=7, overheadPercent=4.49)])
+        focused.add_request_thread_fractions(profile)
+        self.assertAlmostEqual(profile['functionHotspots'][0]['requestSamplePercent'], 700 / 137)
+        self.assertEqual(profile['functionHotspots'][0]['overheadPercent'], 4.49)
 
     def test_failed_instance_cleanup_prevents_profile_decoding(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -7,16 +7,124 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import struct
+import subprocess
+import time
 
 import fts_accepted_profile as profile
 import fts_string_decoder_validation as baseline
 
 
 validation, driver, common = baseline.validation, baseline.driver, baseline.common
-ROUNDS = 60000
+ROUNDS = 120000
 WARMUP = 100
 MIN_REQUEST_SAMPLES = 100
+CLIENT_TIMEOUT_SECONDS = 180
+READINESS_TIMEOUT_SECONDS = 15
+
+
+class WorkerReadiness:
+    """Wait for a stable worker set, recent CPU activity, and SQL output."""
+
+    def __init__(self, start_ns):
+        self.start_ns = start_ns
+        self.stable_since_ns = start_ns
+        self.previous = {}
+        self.identities = set()
+        self.last_progress_ns = None
+
+    def observe(self, now_ns, threads, output_bytes):
+        current = {tid: item for tid, item in threads.items() if item['comm'].startswith('ReqWorker')}
+        identities = {(tid, item['startTicks']) for tid, item in current.items()}
+        if identities != self.identities:
+            self.stable_since_ns = now_ns
+            self.identities = identities
+        for tid, item in current.items():
+            before = self.previous.get(tid)
+            if before and before['startTicks'] == item['startTicks'] and item['userTicks'] > before['userTicks']:
+                self.last_progress_ns = now_ns
+        self.previous = current
+        return bool(output_bytes > 0 and self.last_progress_ns is not None
+                    and now_ns - self.start_ns >= 1_500_000_000
+                    and now_ns - self.stable_since_ns >= 500_000_000
+                    and now_ns - self.last_progress_ns <= 300_000_000)
+
+
+def wait_for_request_activity(process, task_root, output_path):
+    start = time.monotonic_ns()
+    probe = WorkerReadiness(start)
+    observations = []
+    while time.monotonic_ns() - start < READINESS_TIMEOUT_SECONDS * 1_000_000_000:
+        driver.require(process.poll() is None, 'SQL client exited before request threads became active')
+        stamp = time.monotonic_ns()
+        threads = profile.owned_threads(task_root)
+        size = output_path.stat().st_size
+        ready = probe.observe(stamp, threads, size)
+        observations.append(dict(monotonicNs=stamp, outputBytes=size,
+            requestThreads={tid: item for tid, item in threads.items() if item['comm'].startswith('ReqWorker')}))
+        if ready:
+            return dict(readyMonotonicNs=stamp, observations=observations,
+                        clientStillRunning=process.poll() is None)
+        time.sleep(0.1)
+    raise RuntimeError('Request threads did not become stably active before the deadline')
+
+
+def reap_client(process):
+    """Reap only the process group created for this diagnostic client."""
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        process.wait(timeout=10)
+        return True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=10)
+    return False
+
+
+def capture_repeated_sql(call, out, pid, process_path, directory, capture_module, parser, statement):
+    """Start one sustained client, then attach while its requests are active."""
+    input_path = out / (parser + '-repeated.sql')
+    output_path = out / (parser + '-repeated.log')
+    input_path.write_text(common.SESSION + (statement + '\n') * ROUNDS, encoding='utf-8')
+    command = [str(call.obclient), '-h127.0.0.1', '-P' + str(call.port), '-uroot', '-A', '-N', '-B',
+               '--raw', '--default-character-set=utf8mb4', '-Doceanbase']
+    with input_path.open('rb') as sql_stream, output_path.open('wb') as output_stream:
+        started = time.monotonic_ns()
+        process = subprocess.Popen(command, cwd=Path.cwd(), env=os.environ.copy(), stdin=sql_stream,
+                                   stdout=output_stream, stderr=subprocess.STDOUT, start_new_session=True)
+        cleaned = False
+        try:
+            readiness = wait_for_request_activity(process, Path('/proc') / str(pid) / 'task', output_path)
+            driver.require(readiness['clientStillRunning'], 'SQL client exited before perf attachment')
+            with capture_module.PerfCapture(process_path, directory) as capture:
+                driver.require(process.poll() is None, 'SQL client exited during perf attachment')
+                capture.mark('sample_window_started', parser=parser, clientStartedNs=started,
+                             readyNs=readiness['readyMonotonicNs'])
+                try:
+                    code = process.wait(timeout=CLIENT_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError('Diagnostic SQL client timed out') from error
+                capture.mark('sample_window_finished', parser=parser)
+                driver.require(code == 0, 'Diagnostic SQL client failed')
+        finally:
+            cleaned = reap_client(process)
+    driver.require(cleaned, 'Diagnostic SQL process group required forced cleanup')
+    driver.dump(out / (parser + '-client.json'), dict(command=command, clientStartedNs=started,
+        readiness=readiness, returnCode=code, childrenCleaned=cleaned,
+        sqlSha256=common.digest(input_path), outputSha256=common.digest(output_path)))
+    return output_path.read_text(encoding='utf-8', errors='strict'), capture
 
 
 def benchmark_statements(script):
@@ -70,10 +178,26 @@ def raw_samples(path, expected_pid, start_ns, stop_ns):
     return result
 
 
+def add_request_thread_fractions(profile_result):
+    """Keep perf's original percentages and add explicit filtered-sample fractions."""
+    total = profile_result['sampleCount']
+    driver.require(total > 0, 'A request-thread sample denominator is required')
+    for row in profile_result['functionHotspots']:
+        row['requestSamplePercent'] = 100.0 * row['samples'] / total
+    profile_result['requestSamplePercentScope'] = 'Fraction of selected request-thread samples'
+    profile_result['overheadPercentScope'] = 'Original perf output; denominator may include filtered samples'
+
+
 def request_coverage(processes, samples, start_ns, stop_ns):
     """Compare samples with observed request-worker user ticks, not wall time."""
     ticks = defaultdict(int)
     names = {}
+    identities = defaultdict(set)
+    for row in processes:
+        if start_ns <= row['monotonic_ns'] < stop_ns:
+            for tid, item in row['ownedThreads'].items():
+                if item['comm'].startswith('ReqWorker'):
+                    identities[int(tid)].add(item['startTicks'])
     for first, last in zip(processes, processes[1:]):
         if first['monotonic_ns'] < start_ns or last['monotonic_ns'] >= stop_ns:
             continue
@@ -90,9 +214,13 @@ def request_coverage(processes, samples, start_ns, stop_ns):
     hz = processes[0]['clock_ticks_per_second'] if processes else 0
     driver.require(hz > 0, 'Missing process tick frequency')
     minimum = max(MIN_REQUEST_SAMPLES, total_ticks / hz * 99 * 0.25)
+    uncovered = [tid for tid, value in ticks.items()
+                 if value >= 20 and samples.get(tid, 0) < value / hz * 99 * 0.5]
+    reused = sorted(tid for tid, starts in identities.items() if len(starts) > 1)
     return dict(threads=rows, requestSamples=request_samples, observedUserTicks=total_ticks,
                 clockTicksPerSecond=hz, minimumSamples=minimum,
-                passed=total_ticks > 0 and request_samples >= minimum,
+                uncoveredBusyThreads=uncovered, reusedThreadIds=reused,
+                passed=total_ticks > 0 and request_samples >= minimum and not uncovered and not reused,
                 scope='Observed request threads only; not proof of statistical significance')
 
 
@@ -147,10 +275,8 @@ def validate(args):
                            'The original TOKENIZE statement must return one row')
             driver.sql(call, out, parser + '-warmup', (statement + '\n') * WARMUP)
             directory = args.root / 'profiling' / parser
-            with capture_module.PerfCapture(process_path, directory) as capture:
-                capture.mark('sql_started', parser=parser)
-                output = driver.sql(call, out, parser + '-repeated', (statement + '\n') * ROUNDS)
-                capture.mark('sql_finished', parser=parser)
+            output, capture = capture_repeated_sql(call, out, pid, process_path, directory,
+                                                   capture_module, parser, statement)
             rows = output.splitlines(keepends=True)
             driver.require(len(rows) == ROUNDS and all(row == control for row in rows),
                            'Repeated diagnostic output differs from the single original statement')
@@ -173,10 +299,11 @@ def validate(args):
     for parser in statements:
         directory = args.root / 'profiling' / parser
         marks = [json.loads(line) for line in (directory / 'capture-marks.jsonl').read_text().splitlines()]
-        driver.require([x['label'] for x in marks] == ['sql_started', 'sql_finished'],
-                       'Expected exactly one marked SQL interval')
+        driver.require([x['label'] for x in marks] == ['sample_window_started', 'sample_window_finished'],
+                       'Expected exactly one marked sampling interval')
         start, stop = (x['monotonic_ns'] for x in marks)
-        driver.require(start < stop, 'Empty diagnostic SQL interval')
+        driver.require(marks[0]['fields']['clientStartedNs'] < marks[0]['fields']['readyNs'] < start < stop,
+                       'Invalid active-client sampling interval')
         samples = raw_samples(directory / 'perf.data', marks[0]['scope']['pid'], start, stop)
         processes = [json.loads(line) for line in (directory / 'proc-samples.jsonl').read_text().splitlines()]
         coverage = request_coverage(processes, samples, start, stop)
@@ -200,6 +327,7 @@ def validate(args):
             request_profile = analysis.report_samples(request_output.read_text(encoding='utf-8', errors='replace'))
             driver.require(request_profile['sampleCount'] == coverage['requestSamples'],
                            'Request-thread raw and decoded sample counts differ')
+            add_request_thread_fractions(request_profile)
         results[parser].update(windowStartNs=start, windowStopNs=stop,
             allOwnedSamples=sum(samples.values()), coverage=coverage, profile=decoded,
             requestThreadProfile=request_profile)
