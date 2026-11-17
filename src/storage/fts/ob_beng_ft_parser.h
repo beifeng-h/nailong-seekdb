@@ -39,6 +39,7 @@ public:
       english_analyzer_(),
       doc_(),
       token_stream_(nullptr),
+      borrow_token_(false),
       is_inited_(false)
   {}
   ~ObBEngFTParser() { reset(); }
@@ -62,6 +63,7 @@ private:
   share::ObEnglishTextAnalyzer english_analyzer_;
   common::ObDatum doc_;
   share::ObITokenStream *token_stream_;
+  bool borrow_token_;
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(ObBEngFTParser);

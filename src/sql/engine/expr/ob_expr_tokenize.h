@@ -22,6 +22,7 @@
 #include "lib/string/ob_string.h"
 #include "sql/engine/expr/ob_expr_operator.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
+#include "data_plane/fts/ob_fts_parser_helper.h"
 
 namespace oceanbase
 {
@@ -48,7 +49,22 @@ public:
                         common::ObExprTypeCtx &type_ctx) const override;
   int cg_expr(ObExprCGCtx &op_cg_ctx, const ObRawExpr &raw_expr, ObExpr &rt_expr) const override;
 
+  bool need_rt_ctx() const override { return true; }
+
 private:
+  struct TokenizeExecContext final : public ObExprOperatorCtx
+  {
+    TokenizeExecContext()
+      : allocator_(ObMemAttr("FTTokenize")), config_allocator_(ObMemAttr("FTTokenizeCfg")) {}
+    int prepare(const ObString &parser_name, const ObString &properties);
+    ObArenaAllocator allocator_;
+    ObArenaAllocator config_allocator_;
+    storage::ObFTParseHelper helper_;
+    storage::FTLocalWordMap words_;
+    ObString parser_name_;
+    ObString properties_;
+  };
+
   struct TokenizeParam
   {
   public:
@@ -95,7 +111,7 @@ private:
 
   static int tokenize_fulltext(const TokenizeParam &param,
                                TokenizeParam::OUTPUT_MODE mode,
-                               common::ObIAllocator &allocator,
+                               TokenizeExecContext &runtime,
                                ObIJsonBase *&result);
 
   static int construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param);

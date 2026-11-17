@@ -59,12 +59,16 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
 
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
+  TokenizeExecContext *runtime = nullptr;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+  } else if (OB_ISNULL(runtime = static_cast<TokenizeExecContext *>(
+                 ctx.exec_ctx_.get_expr_op_ctx(expr.expr_ctx_id_)))
+      && OB_FAIL(ctx.exec_ctx_.create_expr_op_ctx(expr.expr_ctx_id_, runtime))) {
+  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, *runtime, json_result))) {
   } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
                                                      ctx,
                                                      temp_allocator,
@@ -75,23 +79,45 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   return ret;
 }
 
+int ObExprTokenize::TokenizeExecContext::prepare(const ObString &parser_name,
+                                               const ObString &properties)
+{
+  int ret = OB_SUCCESS;
+  words_.reuse();
+  allocator_.reuse();
+  if (parser_name_ != parser_name || properties_ != properties) {
+    helper_.reset();
+    parser_name_.reset();
+    properties_.reset();
+    config_allocator_.reuse();
+    if (OB_FAIL(ob_write_string(config_allocator_, parser_name, parser_name_))) {
+    } else if (OB_FAIL(ob_write_string(config_allocator_, properties, properties_))) {
+    } else if (OB_FAIL(helper_.init(&allocator_, parser_name_, properties_))) {
+    }
+    if (OB_FAIL(ret)) {
+      helper_.reset();
+      parser_name_.reset();
+      properties_.reset();
+    }
+  }
+  return ret;
+}
+
 int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
                                       TokenizeParam::OUTPUT_MODE mode,
-                                      ObIAllocator &allocator,
+                                      TokenizeExecContext &runtime,
                                       ObIJsonBase *&result)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParseHelper tokenize_helper;
+  storage::ObFTParseHelper &tokenize_helper = runtime.helper_;
   const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
-  storage::ObFTWordMap token_map;
-
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
+  storage::FTLocalWordMap &token_map = runtime.words_;
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
-  } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
+  } else if (OB_FAIL(runtime.prepare(param.parser_name_, param.properties_))) {
+  } else if (OB_FAIL(token_map.prepare(ft_word_bkt_cnt))) {
   } else if (
       (0 != param.fulltext_.length())
       && OB_FAIL(tokenize_helper.segment(

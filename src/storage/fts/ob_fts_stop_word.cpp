@@ -19,6 +19,7 @@
 
 #include "share/rc/ob_server_runtime.h"
 #include "storage/fts/ob_fts_stop_word.h"
+#include "data_plane/fts/ft_local_word_map.h"
 #include "storage/fts/ob_fts_parser_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
 #include "storage/fts/utils/ob_ft_char_utils.h"
@@ -131,10 +132,13 @@ ObAddWord::ObAddWord(
     const ObObjMeta &meta,
     const ObAddWordFlag &flag,
     common::ObIAllocator &allocator,
-    ObFTWordMap &word_map)
+    ObFTWordMap &word_map,
+    const bool copy_words)
   : word_meta_(meta),
     allocator_(allocator),
-    word_map_(word_map),
+    word_map_(&word_map),
+    local_word_map_(nullptr),
+    copy_words_(copy_words),
     min_max_word_cnt_(0),
     non_stopword_cnt_(0),
     stopword_cnt_(0),
@@ -143,6 +147,33 @@ ObAddWord::ObAddWord(
     flag_(flag),
     is_ascii_word_(true)
 {
+}
+
+ObAddWord::ObAddWord(
+    const ObFTParserProperty &property,
+    const ObObjMeta &meta,
+    const ObAddWordFlag &flag,
+    common::ObIAllocator &allocator,
+    FTLocalWordMap &word_map,
+    const bool copy_words)
+  : word_meta_(meta),
+    allocator_(allocator),
+    word_map_(nullptr),
+    local_word_map_(&word_map),
+    copy_words_(copy_words),
+    min_max_word_cnt_(0),
+    non_stopword_cnt_(0),
+    stopword_cnt_(0),
+    min_token_size_(property.min_token_size_),
+    max_token_size_(property.max_token_size_),
+    flag_(flag),
+    is_ascii_word_(true)
+{
+}
+
+int64_t ObAddWord::word_map_size() const
+{
+  return nullptr != local_word_map_ ? local_word_map_->size() : word_map_->size();
 }
 
 int ObAddWord::process_word(
@@ -268,15 +299,18 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (nullptr != local_word_map_) {
+    ret = local_word_map_->add(word, word_freq, flag_.groupby_word(), word_meta_,
+                              copy_words_ ? &allocator_ : nullptr);
   } else if (!flag_.groupby_word()) {
-    if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
+    if (OB_FAIL(word_map_->set_refactored(word, 1/*word count*/))) {
     }
   } else {
     // One hash lookup instead of two: set_or_update() inserts the word with a
     // count of one when it is new and hands an existing word/count pair to
     // the callback otherwise.
     FTWordCountUpdater updater(word, word_freq);
-    if (OB_FAIL(word_map_.set_or_update(word, 1/*word count of a new word*/, updater))) {
+    if (OB_FAIL(word_map_->set_or_update(word, 1/*word count of a new word*/, updater))) {
     }
   }
   return ret;

@@ -4,6 +4,18 @@ on:
   push:
     branches: [perf/fts-profile-diagnostics-20261111]
     paths-ignore:
+      - .github/script/seekdb/fts_fullchain_validation.py
+      - .github/script/seekdb/fts_local_word_map_probe.py
+      - .github/script/seekdb/fts_local_word_map_probe.cpp
+      - .github/workflows/fts-fullchain-validation.yml
+      - src/data_plane/api/data_plane/fts/ft_local_word_map.h
+      - src/data_plane/api/data_plane/fts/ob_fts_parser.h
+      - src/share/text_analysis/ob_token_stream.cpp
+      - src/share/text_analysis/ob_token_stream.h
+      - src/storage/fts/ob_beng_ft_parser.cpp
+      - src/storage/fts/ob_beng_ft_parser.h
+      - src/storage/fts/ob_fts_stop_word.cpp
+      - src/storage/fts/ob_fts_stop_word.h
       - .github/script/seekdb/fts_empty_wordmap_validation.py
       - .github/workflows/fts-empty-wordmap-validation.yml
       - src/observer/composition/retrieval/ob_das_legacy_tr_merge_iter.cpp

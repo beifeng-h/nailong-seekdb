@@ -51,7 +51,7 @@ TokenizeContext::TokenizeContext(ObCollationType coll_type,
                                  const char *fulltext,
                                  int64_t fulltext_len,
                                  bool is_smart)
-    : coll_type_(coll_type), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
+    : coll_type_(coll_type), fast_utf8_(false), fulltext_(fulltext), fulltext_len_(fulltext_len), cursor_(0),
       next_char_len_(0), handle_size_(0), is_smart_(is_smart), token_list_(allocator),
       result_list_(allocator)
 {
@@ -61,9 +61,19 @@ int TokenizeContext::init()
 {
   int ret = OB_SUCCESS;
 
+  fast_utf8_ = false;
   if (OB_ISNULL(fulltext_) || fulltext_len_ <= 0) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(prepare_next_char())) {
+  } else {
+    const ObCharsetInfo *cs = nullptr;
+    if (coll_type_ > CS_TYPE_INVALID && coll_type_ < CS_TYPE_MAX
+        && ObCharset::charset_type_by_coll(coll_type_) == CHARSET_UTF8MB4
+        && nullptr != (cs = ObCharset::get_charset(coll_type_))
+        && cs->cset == &ob_charset_utf8mb4_handler) {
+      fast_utf8_ = true;
+    }
+    if (OB_FAIL(prepare_next_char())) {
+    }
   }
   return ret;
 }
@@ -102,10 +112,14 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
+  if (fast_utf8_ && ObFTCharUtil::try_classify_utf8(fulltext_ + cursor_,
+                                                     fulltext_len_ - cursor_,
+                                                     next_char_len_, next_char_type_)) {
+    // Valid UTF-8 is decoded and classified in one pass.
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                 fulltext_ + cursor_,
+                                                 fulltext_len_ - cursor_,
+                                                 next_char_len_))) {
   } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                        fulltext_ + cursor_,
                                                        next_char_len_,

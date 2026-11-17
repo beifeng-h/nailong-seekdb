@@ -25,6 +25,7 @@
 #include "data_plane/fts/ob_fts_parser_name.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
 #include "data_plane/fts/ob_fts_struct.h"
+#include "data_plane/fts/ft_local_word_map.h"
 
 namespace oceanbase
 {
@@ -176,6 +177,12 @@ public:
       const int64_t fulltext_len,
       int64_t &doc_length,
       ObFTWordMap &words) const;
+  int segment(
+      const common::ObObjMeta &meta,
+      const char *fulltext,
+      const int64_t fulltext_len,
+      int64_t &doc_length,
+      FTLocalWordMap &words) const;
   int check_is_the_same(
       const common::ObString &parser_name,
       const common::ObString &parser_properties,
@@ -202,6 +209,10 @@ public:
       const ObFTWordMap &words,
       common::ObIJsonBase *&json_root);
 
+  int make_detail_json(const FTLocalWordMap &words, const int64_t doc_length,
+                       common::ObIJsonBase *&json_root);
+  int make_token_array_json(const FTLocalWordMap &words, common::ObIJsonBase *&json_root);
+
   void reset();
 
   TO_STRING_KV(KP_(allocator), K_(parser_name), KP_(parser_desc), K_(is_inited));
@@ -215,7 +226,17 @@ private:
       const char *fulltext,
       const int64_t fulltext_len,
       common::ObIAllocator &allocator,
-      ObAddWord &add_word);
+      ObAddWord &add_word,
+      const bool borrow_tokens);
+  template <typename WordMap>
+  int segment_impl(const common::ObObjMeta &meta, const char *fulltext,
+                   const int64_t fulltext_len, int64_t &doc_length, WordMap &words,
+                   const bool borrow_tokens) const;
+  template <typename WordMap>
+  int make_detail_json_impl(const WordMap &words, const int64_t doc_length,
+                            common::ObIJsonBase *&json_root);
+  template <typename WordMap>
+  int make_token_array_json_impl(const WordMap &words, common::ObIJsonBase *&json_root);
   int set_add_word_flag(const ObIFTParserDesc &ftparser_desc);
 private:
   common::ObIAllocator *allocator_;

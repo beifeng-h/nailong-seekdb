@@ -220,19 +220,24 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
 
 ObBasicEnglishNormalizer::ObBasicEnglishNormalizer()
   : ObTokenNormalizer(),
-    norm_allocator_("TxtTokGrpFilter", OB_MALLOC_NORMAL_BLOCK_SIZE)
+    norm_allocator_("TxtTokGrpFilter", OB_MALLOC_NORMAL_BLOCK_SIZE),
+    has_allocated_(false)
 {
 }
 
 void ObBasicEnglishNormalizer::reset()
 {
   norm_allocator_.reset();
+  has_allocated_ = false;
   ObTokenNormalizer::reset();
 }
 
 void ObBasicEnglishNormalizer::reuse()
 {
-  norm_allocator_.reuse();
+  if (has_allocated_) {
+    norm_allocator_.reuse();
+    has_allocated_ = false;
+  }
   ObTokenNormalizer::reuse();
 }
 
@@ -244,7 +249,10 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
   } else {
     next_token.reset();
     token_freq = 0;
-    norm_allocator_.reuse();
+    if (has_allocated_) {
+      norm_allocator_.reuse();
+      has_allocated_ = false;
+    }
     ObDatum tmp_datum;
     bool found_alnum = false;
     uint32_t norm_token_len = 0;
@@ -306,6 +314,7 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
         // has the token stream's lifetime; callers retaining a token still
         // make their own copy, as ObBEngFTParser does.
         next_token.set_string(norm_alnum_token);
+      } else if (FALSE_IT(has_allocated_ = true)) {
       } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
       } else {
         next_token.set_string(norm_lower_token);

@@ -354,7 +354,7 @@ def pair_summary(rounds, baseline, scorer):
         pairs.append(dict(baseline=a, candidate=b, unboundedImprovement=score['mean_improvement'],
                           categories=score['categories']))
     return dict(pairs=pairs, meanUnboundedImprovement=statistics.mean(
-                row['unboundedImprovement'] for row in pairs), samplesPerRole=2,
+                row['unboundedImprovement'] for row in pairs), samplesPerRole=len(SCHEDULE) // 2,
                 statisticalSignificanceClaimed=False, formalContestScore=False)
 
 
@@ -403,7 +403,7 @@ def validate(args):
         driver.dump(args.root / 'report.json', report)
     logs = [row.get('dbLogs', {}).get('fullServerLogs', {}) for row in report['instances']
             if row['name'] in dict(SCHEDULE)]
-    driver.require(len(logs) == 4 and all(row.get('fullBytes') and not row.get('truncated') for row in logs)
+    driver.require(len(logs) == len(SCHEDULE) and all(row.get('fullBytes') and not row.get('truncated') for row in logs)
                    and sum(row.get('fileCount', 0) for row in logs) >= 8,
                    'Complete raw ABBA server logs are required')
     report.update(status='native_correctness_and_original_benchmark_abba_completed',

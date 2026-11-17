@@ -63,6 +63,7 @@ public:
         ft_length_(0),
         parser_version_(0),
         allocator_(nullptr),
+        borrow_token_(false),
         ik_param_(),
         ngram_token_size_(NGRAM_TOKEN_SIZE),
         min_ngram_size_(NGRAM_TOKEN_SIZE),
@@ -87,6 +88,7 @@ public:
     ft_length_ = 0;
     parser_version_ = 0;
     allocator_ = nullptr;
+    borrow_token_ = false;
     ik_param_ = ObFTIKParam();
     ngram_token_size_ = NGRAM_TOKEN_SIZE;
     min_ngram_size_ = NGRAM_TOKEN_SIZE;
@@ -108,6 +110,8 @@ public:
   int64_t ft_length_;
   int64_t parser_version_;
   common::ObIAllocator *allocator_;
+  // Borrowed token bytes remain valid only until the next iterator call.
+  bool borrow_token_;
   ObFTIKParam ik_param_;
   int64_t ngram_token_size_;
   int64_t min_ngram_size_;

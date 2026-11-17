@@ -132,6 +132,7 @@ public:
   virtual int get_next(ObDatum &next_token, int64_t &token_freq) override;
 private:
   ObArenaAllocator norm_allocator_;
+  bool has_allocated_;
 };
 
 // group (deduplicate) and count

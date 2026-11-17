@@ -263,7 +263,8 @@ int ObFTParseHelper::segment(
     const char *ft,
     const int64_t ft_len,
     common::ObIAllocator &allocator,
-    ObAddWord &add_word)
+    ObAddWord &add_word,
+    const bool borrow_tokens)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(parser_version < 0 || nullptr == parser_desc || nullptr == cs || nullptr == ft || 0 >= ft_len)) {
@@ -272,6 +273,7 @@ int ObFTParseHelper::segment(
     ObFTParserParam param;
     ObITokenIterator *iter = nullptr;
     param.allocator_ = &allocator;
+    param.borrow_token_ = borrow_tokens;
     param.cs_ = cs;
     param.fulltext_ = ft;
     param.ft_length_ = ft_len;
@@ -354,16 +356,20 @@ void ObFTParseHelper::reset()
 {
   parser_desc_ = nullptr;
   allocator_ = nullptr;
+  parser_name_ = ObFTParser();
+  parser_property_ = ObFTParserProperty();
   add_word_flag_.clear();
   is_inited_ = false;
 }
 
-int ObFTParseHelper::segment(
+template <typename WordMap>
+int ObFTParseHelper::segment_impl(
     const ObObjMeta &meta,
     const char *fulltext,
     const int64_t fulltext_len,
     int64_t &doc_length,
-    ObFTWordMap &words) const
+    WordMap &words,
+    const bool borrow_tokens) const
 {
   int ret = OB_SUCCESS;
   const ObCharsetInfo *cs = nullptr;
@@ -377,10 +383,8 @@ int ObFTParseHelper::segment(
   } else if (OB_ISNULL(cs = common::ObCharset::get_charset(type))) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    if (!words.empty()) {
-      words.reuse();
-    }
-    ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
+    words.reuse();
+    ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words, borrow_tokens);
     if (OB_FAIL(segment(
                     parser_property_,
                     parser_name_.get_parser_version(),
@@ -389,7 +393,8 @@ int ObFTParseHelper::segment(
                     fulltext,
                     fulltext_len,
                     *allocator_,
-                    add_word))) {
+                    add_word,
+                    borrow_tokens))) {
     } else {
       doc_length = add_word.get_add_word_count();
     }
@@ -397,6 +402,20 @@ int ObFTParseHelper::segment(
   LOG_DEBUG("ft parse segment", K(ret), K(type), K(add_word_flag_), K(parser_name_),
       K(ObString(fulltext_len, fulltext)), K(words.size()));
   return ret;
+}
+
+int ObFTParseHelper::segment(const ObObjMeta &meta, const char *fulltext,
+                             const int64_t fulltext_len, int64_t &doc_length,
+                             ObFTWordMap &words) const
+{
+  return segment_impl(meta, fulltext, fulltext_len, doc_length, words, false);
+}
+
+int ObFTParseHelper::segment(const ObObjMeta &meta, const char *fulltext,
+                             const int64_t fulltext_len, int64_t &doc_length,
+                             FTLocalWordMap &words) const
+{
+  return segment_impl(meta, fulltext, fulltext_len, doc_length, words, parser_name_.is_beng());
 }
 
 int ObFTParseHelper::check_is_the_same(
@@ -420,8 +439,9 @@ int ObFTParseHelper::check_is_the_same(
   return ret;
 }
 
-int ObFTParseHelper::make_detail_json(
-    const ObFTWordMap &words,
+template <typename WordMap>
+int ObFTParseHelper::make_detail_json_impl(
+    const WordMap &words,
     const int64_t doc_length,
     common::ObIJsonBase *&json_root)
 {
@@ -440,7 +460,7 @@ int ObFTParseHelper::make_detail_json(
  } else if (OB_ISNULL(token_array = OB_NEWx(ObJsonArray, allocator_, allocator_))) {
    ret = OB_ALLOCATE_MEMORY_FAILED;
  } else {
-   for (ObFTWordMap::const_iterator it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
+   for (auto it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
      ObString key = it->first.get_word().get_string();
      ObJsonObject *node = nullptr;
      ObJsonInt *token_cnt_node = nullptr;
@@ -477,8 +497,9 @@ int ObFTParseHelper::make_detail_json(
   return ret;
 }
 
-int ObFTParseHelper::make_token_array_json(
-    const ObFTWordMap &words,
+template <typename WordMap>
+int ObFTParseHelper::make_token_array_json_impl(
+    const WordMap &words,
     common::ObIJsonBase *&json_root)
 {
   int ret = OB_SUCCESS;
@@ -486,7 +507,7 @@ int ObFTParseHelper::make_token_array_json(
   if (OB_UNLIKELY(OB_ISNULL(token_array = OB_NEWx(ObJsonArray, allocator_, allocator_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    for (ObFTWordMap::const_iterator it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
+    for (auto it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
       ObString key = it->first.get_word().get_string();
       ObJsonString *token = nullptr;
       if (OB_UNLIKELY(OB_ISNULL(token = OB_NEWx(ObJsonString, allocator_, key)))) {
@@ -505,6 +526,28 @@ int ObFTParseHelper::make_token_array_json(
     OB_DELETEx(ObJsonArray, allocator_, token_array);
   }
   return ret;
+}
+
+int ObFTParseHelper::make_detail_json(const ObFTWordMap &words,
+                                     const int64_t doc_length, ObIJsonBase *&json_root)
+{
+  return make_detail_json_impl(words, doc_length, json_root);
+}
+
+int ObFTParseHelper::make_detail_json(const FTLocalWordMap &words,
+                                     const int64_t doc_length, ObIJsonBase *&json_root)
+{
+  return make_detail_json_impl(words, doc_length, json_root);
+}
+
+int ObFTParseHelper::make_token_array_json(const ObFTWordMap &words, ObIJsonBase *&json_root)
+{
+  return make_token_array_json_impl(words, json_root);
+}
+
+int ObFTParseHelper::make_token_array_json(const FTLocalWordMap &words, ObIJsonBase *&json_root)
+{
+  return make_token_array_json_impl(words, json_root);
 }
 
 int ObFTParseHelper::set_add_word_flag(const ObIFTParserDesc &ftparser_desc)

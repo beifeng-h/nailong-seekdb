@@ -26,6 +26,7 @@ namespace oceanbase
 {
 namespace storage
 {
+class FTLocalWordMap;
 
 class ObFTParserProperty;
 
@@ -101,7 +102,15 @@ public:
       const ObObjMeta &meta,
       const ObAddWordFlag &flag,
       common::ObIAllocator &allocator,
-      ObFTWordMap &word_map);
+      ObFTWordMap &word_map,
+      const bool copy_words = false);
+  ObAddWord(
+      const ObFTParserProperty &property,
+      const ObObjMeta &meta,
+      const ObAddWordFlag &flag,
+      common::ObIAllocator &allocator,
+      FTLocalWordMap &word_map,
+      const bool copy_words = false);
   ~ObAddWord() = default;
   int process_word(
       const char *word,
@@ -116,17 +125,20 @@ public:
       K_(stopword_cnt),
       K_(min_token_size),
       K_(max_token_size),
-      K(word_map_.size()));
+      K(word_map_size()));
 
 private:
   bool is_min_max_word(const int64_t c_len) const;
   int casedown_word(const ObFTWord &src, ObFTWord &dst);
   int check_stopword(const ObFTWord &word, bool &is_stopword);
   int groupby_word(const ObFTWord &word, const int64_t word_cnt);
+  int64_t word_map_size() const;
 private:
   ObObjMeta word_meta_;
   common::ObIAllocator &allocator_;
-  ObFTWordMap &word_map_;
+  ObFTWordMap *word_map_;
+  FTLocalWordMap *local_word_map_;
+  bool copy_words_;
   int64_t min_max_word_cnt_;
   int64_t non_stopword_cnt_;
   int64_t stopword_cnt_;

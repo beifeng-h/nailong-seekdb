@@ -52,6 +52,10 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  static CharType classify_unicode(ob_wc_t unicode, bool allow_surrogates);
+  static bool try_classify_utf8(const char *input, int64_t length,
+                                int64_t &char_len, CharType &type);
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -441,17 +445,10 @@ inline int ObFTCharUtil::is_ignore_single_cjk(ObCollationType coll_type,
   return ret;
 }
 
-template <ObCharsetType CS_TYPE>
-inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
+inline ObFTCharUtil::CharType ObFTCharUtil::classify_unicode(ob_wc_t unicode, bool allow_surrogates)
 {
-  int ret = OB_SUCCESS;
-  ob_wc_t unicode = 0;
-  type = CharType::USELESS;
-
-  // Classification tests several Unicode blocks for the same input character.
-  // Decode once, retaining the original predicate priority and error behavior.
-  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
-  } else if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+  CharType type = CharType::USELESS;
+  if (ObUnicodeBlockUtils::is_alpha(unicode)) {
     type = CharType::ENGLISH_LETTER;
   } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
     type = CharType::ARABIC_LETTER;
@@ -459,12 +456,40 @@ inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, 
     type = CharType::CHINESE;
   } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
     type = CharType::OTHER_CJK;
-  } else if ((CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE)
-             && ObUnicodeBlockUtils::check_high_surrogate(unicode)) {
+  } else if (allow_surrogates && ObUnicodeBlockUtils::check_high_surrogate(unicode)) {
     type = CharType::SURROGATE_HIGH;
-  } else if ((CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE)
-             && ObUnicodeBlockUtils::check_low_surrogate(unicode)) {
+  } else if (allow_surrogates && ObUnicodeBlockUtils::check_low_surrogate(unicode)) {
     type = CharType::SURROGATE_LOW;
+  }
+  return type;
+}
+
+inline bool ObFTCharUtil::try_classify_utf8(const char *input, int64_t length,
+                                            int64_t &char_len, CharType &type)
+{
+  bool valid = false;
+  if (nullptr != input && length > 0) {
+    const unsigned char *begin = reinterpret_cast<const unsigned char *>(input);
+    ob_wc_t unicode = 0;
+    const int decoded = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(begin, begin + length, unicode);
+    if (decoded > 0) {
+      char_len = decoded;
+      type = classify_unicode(unicode, false);
+      valid = true;
+    }
+  }
+  return valid;
+}
+
+template <ObCharsetType CS_TYPE>
+inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
+{
+  int ret = OB_SUCCESS;
+  ob_wc_t unicode = 0;
+  type = CharType::USELESS;
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+  } else {
+    type = classify_unicode(unicode, CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE);
   }
   return ret;
 }
