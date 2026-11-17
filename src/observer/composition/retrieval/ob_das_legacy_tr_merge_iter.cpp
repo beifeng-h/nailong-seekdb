@@ -475,6 +475,7 @@ int ObDASLegacyTRMergeIter::init_daat_iter_param(ObTextDaaTParam &iter_param)
   iter_param.allocator_ = &myself_allocator_;
   iter_param.mode_flag_ = ir_ctdef_->mode_flag_;
   iter_param.function_lookup_mode_ = function_lookup_mode_;
+  iter_param.minimum_should_match_ = ir_rtdef_->minimum_should_match_;
   const ObDASScanCtDef *doc_agg_ctdef = ir_ctdef_->get_doc_agg_ctdef();
   if (!ir_ctdef_->need_calc_relevance()) {
     // Match-only DaaT does not need document statistics or a BM25 context.

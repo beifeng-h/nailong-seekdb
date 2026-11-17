@@ -488,6 +488,7 @@ void ObTextRetrievalDaaTTokenIter::reuse()
 {
   cur_idx_ = -1;
   count_ = 0;
+  max_batch_size_ = OB_MAX(eval_ctx_->max_batch_size_, 1);
   token_iter_->reuse();
 }
 

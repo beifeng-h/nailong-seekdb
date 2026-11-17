@@ -127,6 +127,7 @@ public:
   int init(const ObTextRetrievalScanIterParam &iter_param);
   void reuse();
   void reset();
+  void set_batch_size(const int64_t capacity) { max_batch_size_ = MIN(max_batch_size_, capacity); }
   virtual int get_next_row() override;
   virtual int get_next_batch(const int64_t capacity, int64_t &count) override;
   virtual int advance_to(const ObDatum &id_datum) override;

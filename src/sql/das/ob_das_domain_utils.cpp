@@ -1013,7 +1013,7 @@ int ObFTDMLIterator::generate_ft_word_rows(const ObChunkDatumStore::StoredRow *s
                                                                    ft,
                                                                    is_fts_index_aux,
                                                                    rows_,
-                                                                   &word_map_))) {
+                                                                   nullptr))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
   }
